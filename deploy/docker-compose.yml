@@ -1,0 +1,37 @@
+# 智枢智能体 —— 编排（后端 + 可选本地 Ollama 推理）
+# 启动：docker compose -f deploy/docker-compose.yml up -d
+
+services:
+  zhishu:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: zhishu-agent:1.0.0
+    container_name: zhishu-agent
+    ports:
+      - "8080:8080"
+    environment:
+      # 通过环境变量注入国产厂商 Key（不写进镜像/配置文件）
+      - ZHISHU_QWEN_KEY=${ZHISHU_QWEN_KEY:-}
+      - ZHISHU_DEEPSEEK_KEY=${ZHISHU_DEEPSEEK_KEY:-}
+      - ZHISHU_ZHIPU_KEY=${ZHISHU_ZHIPU_KEY:-}
+      - ZHISHU_KIMI_KEY=${ZHISHU_KIMI_KEY:-}
+      - ZHISHU_ERNIE_KEY=${ZHISHU_ERNIE_KEY:-}
+    volumes:
+      - zhishu-data:/app/backend/data
+    restart: unless-stopped
+
+  # 可选：本地推理（Ollama，内网离线）。镜像可换为国产推理镜像。
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: zhishu-ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #   restart: unless-stopped
+  #   # 启动后执行：docker exec zhishu-ollama ollama pull qwen2.5:7b
+
+volumes:
+  zhishu-data:
+  # ollama-data:

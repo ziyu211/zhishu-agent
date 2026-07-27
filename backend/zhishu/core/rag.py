@@ -1,0 +1,1014 @@
+"""智枢智能体 —— 知识库 RAG 模块。
+
+负责：文档切分 → 离线 Embedding → 本地向量库写入；查询时检索 top-k 作为上下文。
+纯内网离线，不依赖任何外部检索服务。
+
+本次完善：
+  * 文档级元数据（标题/来源/类型/归属人/分块数/字符数/大小/预览正文）登记，
+    支撑「文档列表 / 预览 / 删除」前端展示（修复上传后无法显示的问题）。
+  * 上传支持更多格式：TXT/MD/CSV/JSON/代码/日志等文本类，以及可选的
+    PDF(.pdf) / Word(.docx) / Excel(.xlsx)（需安装对应解析库，缺失则友好报错）。
+  * 归属隔离：owner 为空表示共享文档（对所有用户可见/可检索），非空表示私有，
+    仅归属人及管理员可见、可检索、可删除。
+"""
+from __future__ import annotations
+
+import os
+import re
+import io
+import uuid
+import zipfile
+import xml.etree.ElementTree as ET
+from typing import List, Optional
+
+from .embedding import EmbeddingEngine
+from .vector_store import VectorStore
+from .config import EmbeddingConfig, VectorStoreConfig
+
+
+# ── 标准库（零依赖）Office 文档提取 ───────────────────────────────────────
+# 借鉴 hermes-agent read_extract 的设计：优先用 zipfile + xml 直接解析
+# .docx/.xlsx，不依赖 python-docx / openpyxl，避免「缺库即要求装插件」与
+# 潜在的环境耦合。仅在标准库提取为空时才回退到第三方库。
+
+def _local(tag: str) -> str:
+    """去掉 XML 命名空间前缀，取本地标签名。"""
+    return tag.split("}", 1)[-1] if "}" in tag else tag
+
+
+def _elem_text(elem) -> str:
+    """收集元素及其所有后代中 <t>/<si> 内的纯文本（按文档顺序拼接）。"""
+    parts = []
+    for t in elem.iter():
+        if _local(t.tag) in ("t", "si"):
+            parts.append(t.text or "")
+    return "".join(parts)
+
+
+def _extract_docx_stdlib(raw: bytes) -> str:
+    """用标准库从 .docx 提取正文与表格文本（零依赖）。失败返回空串。"""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception:
+        return ""
+    names = set(z.namelist())
+    main = "word/document.xml" if "word/document.xml" in names else None
+    if not main:
+        for n in names:
+            if n.endswith("document.xml"):
+                main = n
+                break
+    if not main:
+        return ""
+    targets = [main]
+    for n in names:
+        if (n.startswith("word/header") or n.startswith("word/footer")) and n.endswith(".xml"):
+            targets.append(n)
+
+    blocks: List[str] = []
+    for part in targets:
+        try:
+            root = ET.fromstring(z.read(part))
+        except Exception:
+            continue
+        # 找到 body（无则直接用根）
+        body = None
+        for el in root.iter():
+            if _local(el.tag) == "body":
+                body = el
+                break
+        body = body or root
+
+        def walk(elem):
+            for child in elem:
+                ln = _local(child.tag)
+                if ln == "p":
+                    line = _elem_text(child).strip()
+                    if line:
+                        blocks.append(line)
+                elif ln == "tbl":
+                    rows = []
+                    for tr in child:
+                        if _local(tr.tag) != "tr":
+                            continue
+                        cells = []
+                        for tc in tr:
+                            if _local(tc.tag) != "tc":
+                                continue
+                            cells.append(_elem_text(tc).strip())
+                        if any(cells):
+                            rows.append(" | ".join(cells))
+                    if rows:
+                        blocks.append("\n".join(rows))
+                else:
+                    walk(child)
+
+        walk(body)
+    return "\n".join(blocks).strip()
+
+
+def _extract_xlsx_stdlib(raw: bytes) -> str:
+    """用标准库从 .xlsx 提取全部工作表文本（零依赖）。失败返回空串。"""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception:
+        return ""
+    names = set(z.namelist())
+
+    # 1) 共享字符串表
+    shared: List[str] = []
+    if "xl/sharedStrings.xml" in names:
+        try:
+            sroot = ET.fromstring(z.read("xl/sharedStrings.xml"))
+            for si in sroot:
+                if _local(si.tag) != "si":
+                    continue
+                shared.append(_elem_text(si).strip())
+        except Exception:
+            pass
+
+    # 2) 工作簿顺序与表文件映射
+    R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    sheet_order: List[tuple] = []
+    if "xl/workbook.xml" in names:
+        try:
+            wb = ET.fromstring(z.read("xl/workbook.xml"))
+            rels: dict = {}
+            if "xl/_rels/workbook.xml.rels" in names:
+                rroot = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+                for rel in rroot:
+                    rels[rel.get("Id")] = rel.get("Target") or ""
+            for sheets in wb.iter():
+                if _local(sheets.tag) != "sheets":
+                    continue
+                for sh in sheets:
+                    if _local(sh.tag) != "sheet":
+                        continue
+                    name = sh.get("name") or "Sheet"
+                    rid = sh.get(f"{{{R_NS}}}id")
+                    target = (rels.get(rid) or "").lstrip("/")
+                    if not target.startswith("xl/"):
+                        target = "xl/" + target
+                    sheet_order.append((name, target))
+        except Exception:
+            pass
+    if not sheet_order:
+        for n in names:
+            if n.startswith("xl/worksheets/") and n.endswith(".xml"):
+                sheet_order.append((n, n))
+
+    # 3) 逐表提取
+    out: List[str] = []
+    for name, sheetfile in sheet_order:
+        try:
+            sroot = ET.fromstring(z.read(sheetfile))
+        except Exception:
+            continue
+        rows = []
+        for row in sroot.iter():
+            if _local(row.tag) != "row":
+                continue
+            cells = []
+            for c in row:
+                if _local(c.tag) != "c":
+                    continue
+                t = c.get("t")
+                v = None
+                for child in c:
+                    ln = _local(child.tag)
+                    if ln == "v":
+                        v = child.text
+                    elif ln == "is":
+                        v = _elem_text(child).strip()
+                if v is None:
+                    cells.append("")
+                elif t == "s":
+                    try:
+                        cells.append(shared[int(v)])
+                    except (ValueError, IndexError):
+                        cells.append(v or "")
+                else:
+                    cells.append(v or "")
+            if any(str(x).strip() for x in cells):
+                rows.append("\t".join(str(x) for x in cells))
+        if rows:
+            out.append(f"### {name}")
+            out.append("\n".join(rows))
+    return "\n\n".join(out).strip()
+
+
+def _extract_pptx_stdlib(raw: bytes) -> str:
+    """用标准库从 .pptx 提取全部幻灯片文本（零依赖）。失败返回空串。"""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception:
+        return ""
+    names = sorted(z.namelist())
+    slides = [n for n in names if re.match(r"ppt/slides/slide\d+\.xml$", n)]
+    slides.sort(key=lambda n: int(re.search(r"(\d+)", n).group(1)))
+    if not slides:
+        slides = [n for n in names if n.startswith("ppt/slides/") and n.endswith(".xml")]
+    blocks: List[str] = []
+    for idx, s in enumerate(slides, 1):
+        try:
+            root = ET.fromstring(z.read(s))
+        except Exception:
+            continue
+        texts = [t.text or "" for t in root.iter() if _local(t.tag) == "t"]
+        line = " ".join(x.strip() for x in texts if x.strip())
+        if line:
+            blocks.append(f"[幻灯片 {idx}]\n{line}")
+    return "\n\n".join(blocks).strip()
+
+
+def _extract_odf_stdlib(raw: bytes) -> str:
+    """用标准库从 OpenDocument(.odt/.ods/.odp) 提取文本（零依赖）。失败返回空串。"""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception:
+        return ""
+    if "content.xml" not in z.namelist():
+        return ""
+    try:
+        root = ET.fromstring(z.read("content.xml"))
+    except Exception:
+        return ""
+    blocks: List[str] = []
+    for p in root.iter():
+        if _local(p.tag) == "p":
+            txt = "".join(p.itertext()).strip()
+            if txt:
+                blocks.append(txt)
+    for tbl in root.iter():
+        if _local(tbl.tag) == "table":
+            rows = []
+            for row in tbl:
+                if _local(row.tag) != "table-row":
+                    continue
+                cells = []
+                for cell in row:
+                    if _local(cell.tag) != "table-cell":
+                        continue
+                    cells.append("".join(cell.itertext()).strip())
+                if any(cells):
+                    rows.append("\t".join(cells))
+            if rows:
+                blocks.append("\n".join(rows))
+    return "\n".join(blocks).strip()
+
+
+def _extract_rtf(raw: bytes) -> str:
+    """尽力从 .rtf 提取纯文本（零依赖，控制字剥离）。失败返回空串。"""
+    try:
+        text = raw.decode("latin-1")
+    except Exception:
+        return ""
+    text = text.replace("\r", " ").replace("\n", " ")
+    # 丢弃常见二进制/样式目标组，避免大量乱码
+    for dest in ("fonttbl", "colortbl", "stylesheet", "info", "pict", "shppict", "generator"):
+        text = re.sub(r"\{\\*?\\?" + dest + r"[^{}]*\}", " ", text)
+    # 字符转义 \'xx
+    def _hex(m):
+        try:
+            return bytes([int(m.group(1), 16)]).decode("latin-1")
+        except Exception:
+            return ""
+    text = re.sub(r"\\'([0-9a-fA-F]{2})", _hex, text)
+    # 常见控制符号 → 文本
+    text = (text.replace("\\par", "\n").replace("\\line", "\n")
+                .replace("\\tab", "\t").replace("\\bullet", "•")
+                .replace("\\ldblquote", '"').replace("\\rdblquote", '"')
+                .replace("\\lquote", "'").replace("\\rquote", "'")
+                .replace("\\emdash", "—").replace("\\endash", "–"))
+    # 剩余控制字（\word 及可选数值）
+    text = re.sub(r"\\[a-zA-Z]+\-?\d* ?", "", text)
+    text = text.replace("{", "").replace("}", "")
+    text = re.sub(r"\\[^a-zA-Z]", "", text)
+    lines = [ln.strip() for ln in text.split("\n")]
+    return "\n".join(ln for ln in lines if ln).strip()
+
+
+def _extract_epub_stdlib(raw: bytes) -> str:
+    """用标准库从 .epub 提取正文文本（零依赖）。失败返回空串。"""
+    import posixpath
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception:
+        return ""
+    names = set(z.namelist())
+    opf_path = None
+    try:
+        croot = ET.fromstring(z.read("META-INF/container.xml"))
+        for rf in croot.iter():
+            if _local(rf.tag) == "rootfile":
+                opf_path = rf.get("full-path")
+                break
+    except Exception:
+        pass
+    if not opf_path:
+        for n in names:
+            if n.endswith(".opf"):
+                opf_path = n
+                break
+    if not opf_path:
+        for n in names:
+            if n.endswith(".xhtml") or n.endswith(".html"):
+                opf_path = n
+                break
+    if not opf_path:
+        return ""
+    try:
+        oroot = ET.fromstring(z.read(opf_path))
+    except Exception:
+        return ""
+    manifest = {}
+    for it in oroot.iter():
+        if _local(it.tag) == "item":
+            mid, href = it.get("id"), it.get("href")
+            if mid and href:
+                manifest[mid] = href
+    order = []
+    for sp in oroot.iter():
+        if _local(sp.tag) == "itemref":
+            mid = sp.get("idref")
+            if mid and mid in manifest:
+                order.append(manifest[mid])
+    if not order:
+        order = list(manifest.values())
+    base = opf_path.rsplit("/", 1)[0] if "/" in opf_path else ""
+    out: List[str] = []
+    for href in order:
+        path = href if href.startswith("/") else (base + "/" + href if base else href)
+        path = posixpath.normpath(path).lstrip("/")
+        if path not in names:
+            continue
+        try:
+            html = z.read(path).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        html = re.sub(r"<script[\s\S]*?</script>", " ", html, flags=re.I)
+        html = re.sub(r"<style[\s\S]*?</style>", " ", html, flags=re.I)
+        html = re.sub(r"<head[\s\S]*?</head>", " ", html, flags=re.I)
+        html = re.sub(r"<title[\s\S]*?</title>", " ", html, flags=re.I)
+        html = re.sub(r"<(p|div|br|/p|/div|/h[1-6]|li|/tr|/section|tr)[^>]*>", "\n", html, flags=re.I)
+        text = re.sub(r"<[^>]+>", "", html)
+        text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"&amp;", "&", text)
+        text = re.sub(r"&lt;", "<", text)
+        text = re.sub(r"&gt;", ">", text)
+        text = re.sub(r"\n{2,}", "\n", text).strip()
+        if text:
+            out.append(text)
+    return "\n\n".join(out).strip()
+
+
+def _extract_legacy_best_effort(raw: bytes) -> str:
+    """对旧版 OLE(.doc/.xls) 做「尽力而为」文本提取（零依赖）。
+
+    直接对二进制做 UTF-16LE / GBK 解码后抽取连续汉字/ASCII 游程，常能找回大部分正文
+    （Word 正文多以 UTF-16LE 存于 WordDocument 流，或 ANSI 代码页以 GBK 存）。
+    无有效文本返回空串；结果可能夹带少量格式乱码，属预期（系统提示已声明「尽力而为」）。
+    """
+    if not raw:
+        return ""
+    # 候选字符类：汉字/全角/半角字母数字/常用标点/空白，长度>=8
+    pat = (r"[\u4e00-\u9fff\u3400-\u4dbf\u3000-\u303f\uff00-\uffef"
+           r"A-Za-z0-9\s，。、；：！？（）「」“”‘’《》\-\._/]{8,}")
+    cand: List[str] = []
+    # 1) UTF-16LE（最常见）
+    try:
+        dec = raw.decode("utf-16le", errors="ignore")
+        cand.extend(re.findall(pat, dec))
+    except Exception:
+        pass
+    # 2) GBK / GB18030（旧版 ANSI 代码页中文）
+    try:
+        gbk = raw.decode("gb18030", errors="ignore")
+        cand.extend(re.findall(pat, gbk))
+    except Exception:
+        pass
+    # 3) 原始字节中的纯 ASCII 游程（标签/英文常以单字节存）
+    for a in re.findall(rb"[\x20-\x7e]{8,}", raw):
+        try:
+            cand.append(a.decode("ascii"))
+        except Exception:
+            pass
+    # 过滤：要求「含标点/数字/字母 且 中文占比>=50%」或长度>=24，
+    # 剔除随机二进制解码出的伪中文游程（随机串中文占比低、且极少含数字/标点）
+    def _keep(r: str) -> bool:
+        if len(r) >= 24:
+            return True
+        cjk = sum(1 for c in r if "\u4e00" <= c <= "\u9fff" or "\u3400" <= c <= "\u4dbf")
+        if cjk < len(r) * 0.5:
+            return False
+        return any(c in r for c in
+                   "，。、；：！？（）0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+    ranked = [r.strip() for r in cand if len(r.strip()) >= 4 and _keep(r.strip())]
+    ranked.sort(key=len, reverse=True)
+    seen: set = set()
+    keep: List[str] = []
+    for r in ranked[:60]:
+        key = r[:20]
+        if key in seen:
+            continue
+        seen.add(key)
+        keep.append(r)
+    # 守卫：若无任何「实质连续文本」（最长游程 <12），视为无内容，回落报错
+    if not keep or max(len(k) for k in keep) < 12:
+        return ""
+    return "\n".join(keep).strip()
+
+
+def _extract_docx_library(raw: bytes) -> str:
+    """第三方库回退（python-docx）。缺失依赖返回空串。"""
+    try:
+        from docx import Document  # type: ignore
+    except Exception:
+        return ""
+    try:
+        doc = Document(io.BytesIO(raw))
+        lines: List[str] = []
+        for para in doc.paragraphs:
+            if para.text:
+                lines.append(para.text)
+        for tbl in doc.tables:
+            for row in tbl.rows:
+                cells = [c.text or "" for c in row.cells]
+                if any(cells):
+                    lines.append(" | ".join(cells))
+        return "\n".join(lines).strip()
+    except Exception:
+        return ""
+
+
+def _extract_xlsx_library(raw: bytes) -> str:
+    """第三方库回退（openpyxl）。缺失依赖返回空串。"""
+    try:
+        from openpyxl import load_workbook  # type: ignore
+    except Exception:
+        return ""
+    try:
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        lines: List[str] = []
+        for ws in wb.worksheets:
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                cells = ["" if v is None else str(v) for v in row]
+                if any(cells):
+                    rows.append("\t".join(cells))
+            if rows:
+                lines.append(f"### {ws.title}")
+                lines.extend(rows)
+        return "\n".join(lines).strip()
+    except Exception:
+        return ""
+
+
+# 纯文本类扩展名（UTF-8 直接读取）
+_TEXT_EXTS = {
+    ".txt", ".text", ".md", ".markdown", ".csv", ".tsv", ".tab", ".json",
+    ".jsonl", ".log", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".xml", ".html", ".htm", ".py", ".js", ".ts", ".tsx", ".jsx", ".java",
+    ".c", ".cpp", ".h", ".hpp", ".go", ".rs", ".rb", ".php", ".sh", ".bat",
+    ".ps1", ".sql", ".r", ".scala", ".kt", ".swift", ".lua", ".pl", ".css",
+    ".scss",
+}
+
+# 图片扩展名（进入对话作为视觉参考；系统不内置 OCR）
+_IMAGE_EXTS_READ = {
+    ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff", ".svg",
+}
+
+
+def paginate_text(text: str, page: int = 1, page_size: int = 200,
+                  max_chars: int = 8000, start_line: int = None,
+                  end_line: int = None) -> dict:
+    """把文本按行分页/切片，每行带行号（零填充对齐），并按字符预算截断。
+
+    对标 hermes read_file 的「分页 / 行号 / 字符预算截断」能力，避免一次性把
+    超大文档全文塞进上下文。
+
+    两种模式（模型调用时参数名不统一，均兼容）：
+      * 分页模式：page + page_size（默认第 1 页 200 行）。
+      * 行范围模式：start_line + end_line（模型常用 read_file(..., start_line=200,
+        end_line=400) 直接定位片段）；给定行范围时优先于分页。
+    返回渲染所需的结构化信息。
+    """
+    lines = text.split("\n")
+    total_lines = len(lines)
+    width = max(3, len(str(total_lines)))
+
+    # ── 行范围模式 ──
+    if start_line is not None or end_line is not None:
+        s = max(1, int(start_line or 1))
+        e = int(end_line or total_lines)
+        e = max(s, min(e, total_lines))
+        s = min(s, e)
+        slice_lines = lines[s - 1:e]
+        numbered = "\n".join(
+            f"{s + i:0{width}d}: {ln}" for i, ln in enumerate(slice_lines)
+        ) or "(该范围为空)"
+        truncated = False
+        if len(numbered) > max_chars:
+            numbered = numbered[:max_chars].rstrip() + "\n…(已按字符预算截断，调大 max_chars)"
+            truncated = True
+        return {
+            "block": numbered,
+            "total_lines": total_lines,
+            "page": 1,
+            "page_total": 1,
+            "page_lines": len(slice_lines),
+            "truncated": truncated,
+            "range": (s, e),
+        }
+
+    # ── 分页模式 ──
+    page = max(1, int(page or 1))
+    page_size = max(1, int(page_size or 200))
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_lines = lines[start:end]
+    numbered = "\n".join(
+        f"{start + i + 1:0{width}d}: {ln}" for i, ln in enumerate(page_lines)
+    ) or "(本页为空)"
+    truncated = False
+    if len(numbered) > max_chars:
+        numbered = numbered[:max_chars].rstrip() + "\n…(已按字符预算截断，调大 max_chars 或翻页)"
+        truncated = True
+    page_total = max(1, (total_lines + page_size - 1) // page_size)
+    return {
+        "block": numbered,
+        "total_lines": total_lines,
+        "page": page,
+        "page_total": page_total,
+        "page_lines": len(page_lines),
+        "truncated": truncated,
+    }
+
+
+def format_read(filename: str, ftype: str, pg: dict) -> str:
+    if pg.get("range"):
+        s, e = pg["range"]
+        head = (
+            f"文件 {filename} | 类型 {ftype} | 总行数 {pg['total_lines']} | "
+            f"第 {s}-{e} 行 | 本段 {pg['page_lines']} 行"
+        )
+    else:
+        head = (
+            f"文件 {filename} | 类型 {ftype} | 总行数 {pg['total_lines']} | "
+            f"第 {pg['page']}/{pg['page_total']} 页 | 本页 {pg['page_lines']} 行"
+        )
+    tail = ""
+    if pg["truncated"] or pg.get("range") or pg["page"] < pg["page_total"]:
+        tail = "\n（内容较长：用 start_line/end_line 或 page 参数定位，max_chars 控制返回长度）"
+    return head + "\n" + "-" * 40 + "\n" + pg["block"] + tail
+
+
+def _split_text(text: str, chunk_size: int = 400, overlap: int = 50) -> List[str]:
+    """按中英文标点切分，滑动窗口重叠。"""
+    paras = [p.strip() for p in re.split(r"\n+", text) if p.strip()]
+    chunks, buf = [], ""
+    for p in paras:
+        if len(buf) + len(p) <= chunk_size:
+            buf += p + "\n"
+        else:
+            if buf:
+                chunks.append(buf.strip())
+            if len(p) > chunk_size:
+                for i in range(0, len(p), chunk_size - overlap):
+                    chunks.append(p[i:i + chunk_size].strip())
+                buf = ""
+            else:
+                buf = p + "\n"
+    if buf:
+        chunks.append(buf.strip())
+    return [c for c in chunks if c]
+
+
+def _ext(path: str) -> str:
+    return os.path.splitext(path)[1].lower()
+
+
+def _is_text_ext(name: str) -> bool:
+    """文件名（含路径/扩展名）是否属文本类。"""
+    return os.path.splitext(name)[1].lower() in _TEXT_EXTS
+
+
+def _looks_like_text(raw: bytes, threshold: float = 0.7) -> bool:
+    """字节流中可打印字符(含常见空白)占比是否足够高，用于判断是否为可读文本。
+
+    避免把『高可读性字节流』（如 .dat/.bin 实为文本）误判为二进制而报错。
+    """
+    if not raw:
+        return False
+    sample = raw[:8192]
+    printable = sum(1 for b in sample if 32 <= b < 127 or b in (9, 10, 13))
+    return (printable / len(sample)) >= threshold
+
+
+def _looks_like_zip(raw: bytes) -> bool:
+    """Magic bytes 检测 ZIP 容器：本地文件头 / 中央目录尾 / 空归档 / 分卷 (PK...)。"""
+    return raw[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+
+def _extract_zip(raw: bytes, depth: int = 0) -> str:
+    """从 ZIP 压缩包递归提取可读文本（零依赖标准库，对标 Hermes 自愈式解析）。
+
+    这是『按需读取 + 自愈』的核心：遇到压缩包不报错甩锅，而是自动解包、
+    列出内部条目、递归提取文本类文件内容，让 Agent 直接拿到可分析的文本。
+    若无可提取文本则仅返回清单，交由上层决定如何提示。
+    """
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+    except Exception:
+        return ""
+    entries = z.namelist()
+    if not entries:
+        return ""
+    out = [f"[压缩包内含 {len(entries)} 个条目]\n"] if depth == 0 else []
+    for name in entries:
+        if name.endswith("/"):
+            continue  # 目录条目
+        try:
+            data = z.read(name)
+        except Exception:
+            continue
+        # 嵌套压缩包：递归解包（最多 2 层，防止极深结构耗尽资源）
+        if _looks_like_zip(data) and depth < 2:
+            nested = _extract_zip(data, depth + 1)
+            if nested.strip():
+                out.append(f"\n=== 嵌套压缩包 {name} ===\n{nested}")
+            continue
+        if _is_text_ext(name) or _looks_like_text(data):
+            try:
+                content = data.decode("utf-8", errors="ignore")
+            except Exception:
+                content = ""
+            if content.strip():
+                out.append(f"\n--- {name} ---\n{content}")
+    return "\n".join(out)
+
+
+def _extract_pdf(raw: bytes) -> str:
+    """从 PDF 二进制提取文本（跨平台纯 Python 方案，不依赖任何 OCR 引擎）。
+
+    策略：
+      1) PyMuPDF(fitz)：逐页提取文本层（文本型 PDF 的标准做法，跨平台一致）；
+      2) pypdf：若已安装则作为兜底（单页容错 + 空口令解密）；
+      3) pdfminer.six：终极兜底，对中文/CID 字体更鲁棒；
+      4) 三者都失败（通常是纯图片扫描件、无文字层）返回空字符串，
+         交由 read_file_text 渲染为图片或提示用户——本系统刻意不内置 OCR
+         （tesseract / PaddleOCR 等需原生二进制，跨平台部署不可控）。
+    """
+    # 1) PyMuPDF（环境已安装）为主提取器 —— 仅取文本层，不做 OCR
+    try:
+        import fitz  # type: ignore
+        doc = fitz.open(stream=io.BytesIO(raw), filetype="pdf")
+        parts: list = []
+        for pg in doc:
+            try:
+                t = pg.get_text("text") or ""
+            except Exception:
+                t = ""
+            if t.strip():
+                parts.append(t)
+        doc.close()
+        text = "\n\n".join(parts).strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    # 2) pypdf 兜底
+    try:
+        from pypdf import PdfReader  # type: ignore
+        reader = PdfReader(io.BytesIO(raw))
+        try:
+            reader.decrypt("")  # 兼容空用户口令加密的文档
+        except Exception:
+            pass
+        parts = []
+        for pg in reader.pages:
+            try:
+                parts.append(pg.extract_text() or "")
+            except Exception:
+                parts.append("")
+        text = "\n".join(parts).strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    # 3) pdfminer 兜底
+    try:
+        from pdfminer.high_level import extract_text  # type: ignore
+        text = extract_text(io.BytesIO(raw)).strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    return ""
+
+
+def read_file_text(filename: str, raw: bytes) -> tuple[str, str]:
+    """从上传的二进制内容提取纯文本。
+
+    返回 (text, file_type)。file_type 用于前端展示标签。
+    无法解析时抛出 ValueError（带友好中文说明）。
+    """
+    ext = _ext(filename)
+    file_type = ext.lstrip(".").upper() or "TXT"
+
+    # ── 压缩包：自动解包并递归提取内部文本（自愈核心，而非报错甩锅）──
+    # 即使文件被错配扩展名（如 .txt 实为 zip），也按 magic bytes 识别处理。
+    if ext == ".zip" or _looks_like_zip(raw):
+        text = _extract_zip(raw)
+        if text.strip():
+            return text, "ZIP"
+        # 解包无可读文本：仍返回清单 + 提示（让 Agent 知道这是归档而非二进制）
+        return ("[压缩包] " + text + "\n"
+                "(归档内无可直接读取的文本文件；如需处理内部二进制，请用 code_exec 解包："
+                "import zipfile,os; z=zipfile.ZipFile(os.environ['TARGET_FILE']); print(z.namelist())"), "ZIP"
+
+    if ext in _TEXT_EXTS:
+        return raw.decode("utf-8", errors="ignore"), file_type or "TXT"
+
+    if ext == ".pdf":
+        text = _extract_pdf(raw)
+        if not text.strip():
+            # 扫描件（无文字层）：系统不内置 OCR（跨平台一致性考虑），
+            # 改为将各页渲染为图片，让用户至少可见内容，避免「无结果」死路。
+            try:
+                import fitz  # type: ignore
+                doc = fitz.open(stream=io.BytesIO(raw), filetype="pdf")
+                base = os.path.join("data", "generated", "pdf_render")
+                os.makedirs(base, exist_ok=True)
+                safe = re.sub(r"[^\w\-.]", "_", os.path.basename(filename)) or "doc"
+                out_dir = os.path.join(base, safe + "_" + uuid.uuid4().hex[:8])
+                os.makedirs(out_dir, exist_ok=True)
+                media_urls = []
+                for i, pg in enumerate(doc):
+                    pix = pg.get_pixmap(dpi=150)
+                    p = os.path.join(out_dir, f"page_{i + 1}.png")
+                    pix.save(p)
+                    media_urls.append(
+                        "/media/pdf_render/" + os.path.basename(out_dir) + f"/page_{i + 1}.png")
+                doc.close()
+                if media_urls:
+                    raise ValueError(
+                        "该 PDF 为纯图片扫描件（无文字层）。系统为保持跨平台一致、不内置 OCR 识别，"
+                        "无法直接提取文字。已为您将各页渲染为图片，可在前端/以下地址查看内容：\n"
+                        + "\n".join(media_urls)
+                        + "\n（如需文字版，请提供由文字处理软件导出的文本型 PDF，或先转换为可提取文本的格式。）")
+            except ValueError:
+                raise
+            except Exception:
+                pass
+            raise ValueError(
+                "PDF 未提取到文本：文件可能已加密、受损，或为纯图片扫描件（无文字层）。"
+                "系统不内置 OCR 识别（跨平台兼容性考虑）；若为扫描件请提供文本型 PDF。")
+        return text, "PDF"
+
+    if ext in (".docx", ".doc"):
+        if ext == ".doc":
+            # 旧版 .doc 为 OLE 二进制，标准库无法结构化解析；先尽力而为扫描文本，
+            # 成功则直接返回（模型可据此总结），失败再引导 code_exec / 转 docx。
+            text = _extract_legacy_best_effort(raw)
+            if text.strip():
+                return text, "DOC"
+            raise ValueError(
+                "暂不支持旧版 .doc 格式（OLE 二进制结构，非 zip，标准库无法完整解析）。"
+                "可选方案：① 请用户另存为 .docx 后重新上传以获得完整解析；"
+                "② 或调用 code_exec 对文件做「尽力而为」的文本提取（扫描 UTF-16LE / 可打印字符，"
+                "可能仅恢复部分正文），路径通过 os.environ['TARGET_FILE'] 读取。"
+            )
+        # 优先零依赖标准库解析；为空再回退第三方库；仍为空则视为图片型文档
+        text = _extract_docx_stdlib(raw) or _extract_docx_library(raw)
+        if not text.strip():
+            raise ValueError("Word 文档未提取到文本（可能是图片型文档；系统不内置 OCR，无法提取图片内文字，请转换为文本型文档）。")
+        return text, "DOCX"
+
+    if ext in (".xlsx",):
+        # 优先零依赖标准库解析；为空再回退第三方库
+        text = _extract_xlsx_stdlib(raw) or _extract_xlsx_library(raw)
+        if not text.strip():
+            raise ValueError("Excel 文档未提取到内容")
+        return text, "XLSX"
+
+    if ext == ".xls":
+        # 旧版 .xls 为 OLE 二进制，先尽力而为扫描文本（标签/中文常可找回）
+        text = _extract_legacy_best_effort(raw)
+        if text.strip():
+            return text, "XLS"
+        raise ValueError(
+            "暂不支持旧版 .xls 格式（OLE 二进制结构，非 zip，标准库无法解析）。"
+            "可选方案：① 请用户另存为 .xlsx 后重新上传以获得完整解析；"
+            "② 或调用 code_exec 对文件做「尽力而为」的文本提取（扫描可打印字符），"
+            "路径通过 os.environ['TARGET_FILE'] 读取。"
+        )
+
+    if ext == ".pptx":
+        text = _extract_pptx_stdlib(raw)
+        if not text.strip():
+            raise ValueError("PPT 文档未提取到文本（可能是图片型幻灯片）")
+        return text, "PPTX"
+
+    if ext in (".odt", ".ods", ".odp"):
+        text = _extract_odf_stdlib(raw)
+        if not text.strip():
+            raise ValueError("OpenDocument 文档未提取到文本")
+        return text, ext.lstrip(".").upper()
+
+    if ext == ".rtf":
+        text = _extract_rtf(raw)
+        if not text.strip():
+            raise ValueError("RTF 文档未提取到文本")
+        return text, "RTF"
+
+    if ext == ".epub":
+        text = _extract_epub_stdlib(raw)
+        if not text.strip():
+            raise ValueError("EPUB 未提取到文本")
+        return text, "EPUB"
+
+    # 兜底：高可读性字节流直接当文本；GBK/GB18030 兜底；否则给出可操作的 code_exec 自愈指令
+    if _looks_like_text(raw):
+        return raw.decode("utf-8", errors="ignore"), file_type or "TXT"
+    try:
+        gbk = raw.decode("gb18030")
+        if gbk.strip():
+            return gbk, file_type or "TXT"
+    except Exception:
+        pass
+    # 死路保护：把『报错甩锅』变成『可执行的自愈指引』，引导 Agent 用 code_exec 自救
+    raise ValueError(
+        f"文件「{filename}」（扩展名 {ext or '未知'}）无法直接解析为文本。\n"
+        "请勿直接告诉用户『无法解析』或让其重新上传；应先调用 code_exec 编写 Python 自救：\n"
+        "  import os\n"
+        "  p = os.environ.get('TARGET_FILE')  # stored_path 对应的磁盘文件\n"
+        "  data = open(p, 'rb').read()\n"
+        "  # 据字节特征（如 PK 头=ZIP、\\x1f\\x8b=Gzip、7z\\xbc\\xaf=7z）选择对应库解析\n"
+        "  print(len(data), data[:16].hex())  # 先探查 magic bytes，再决定处理方式")
+
+
+class KnowledgeBase:
+    def __init__(self, emb_cfg: EmbeddingConfig, vs_cfg: VectorStoreConfig,
+                 data_dir: Optional[str] = None, app_cfg=None):
+        self.emb = EmbeddingEngine(emb_cfg, app_cfg=app_cfg)
+        self.store = VectorStore(vs_cfg)
+        # 原始文件保留目录（用于「重新解析」）。仅当传入 data_dir 时启用。
+        self.raw_dir = os.path.join(data_dir, "knowledge_raw") if data_dir else ""
+        if self.raw_dir:
+            os.makedirs(self.raw_dir, exist_ok=True)
+
+    # ------------------------- 入库（带归属与元数据） -------------------------
+    def ingest_text(
+        self,
+        text: str,
+        doc_id: str = None,
+        meta: dict = None,
+        owner: str = None,
+        title: str = None,
+        file_type: str = "TEXT",
+        source: str = None,
+    ) -> dict:
+        doc_id = doc_id or uuid.uuid4().hex[:12]
+        chunks = _split_text(text)
+        if not chunks:
+            return {"doc_id": doc_id, "chunks": 0, "skipped": True}
+        vecs = self.emb.embed(chunks)
+        full_meta = {
+            "title": title or doc_id,
+            "source": source or title or doc_id,
+            "file_type": file_type,
+            "owner": owner,
+            "size": len(text.encode("utf-8")),
+            "char_count": sum(len(c) for c in chunks),
+            "content_preview": text,
+            **(meta or {}),
+        }
+        n = self.store.add(doc_id, chunks, vecs, full_meta)
+        return {"doc_id": doc_id, "chunks": n, "title": title or doc_id, "file_type": file_type}
+
+    def ingest_file(
+        self,
+        filename: str,
+        raw: bytes,
+        doc_id: str = None,
+        owner: str = None,
+        title: str = None,
+    ) -> dict:
+        """从上传的二进制内容解析并入库。失败时抛出 ValueError。"""
+        text, file_type = read_file_text(filename, raw)
+        doc_id = doc_id or os.path.splitext(filename)[0] or uuid.uuid4().hex[:12]
+        raw_path = self._save_raw(doc_id, filename, raw)
+        return self.ingest_text(
+            text,
+            doc_id=doc_id,
+            meta={"raw_path": raw_path} if raw_path else {},
+            owner=owner,
+            title=title or os.path.splitext(filename)[0] or filename,
+            file_type=file_type,
+            source=filename,
+        )
+
+    def _save_raw(self, doc_id: str, filename: str, raw: bytes) -> str:
+        """将原始字节落盘，供后续「重新解析」使用。失败返回空串。"""
+        if not self.raw_dir:
+            return ""
+        safe = re.sub(r"[^\w\-.]", "_", os.path.basename(filename))
+        path = os.path.join(self.raw_dir, f"{doc_id}__{safe}")
+        try:
+            with open(path, "wb") as f:
+                f.write(raw)
+            return os.path.abspath(path)
+        except OSError:
+            return ""
+
+    def reparse_document(self, doc_id: str, owner: Optional[str] = None) -> dict:
+        """用保留的原始文件，以当前解析器重新提取并覆盖入库（保持 doc_id 不变）。"""
+        if not self.raw_dir:
+            raise ValueError("服务端未启用原始文件保留，无法重新解析")
+        doc = self.store.get_document(doc_id, owner=owner)
+        if not doc:
+            raise ValueError("文档不存在或无权限")
+        raw_path = doc.get("raw_path")
+        if not raw_path or not os.path.exists(raw_path):
+            raise ValueError(
+                "未保留原始文件，无法重新解析（可能是早期文本入库或旧版上传）")
+        with open(raw_path, "rb") as f:
+            raw = f.read()
+        filename = doc.get("source") or f"{doc_id}.bin"
+        try:
+            text, file_type = read_file_text(filename, raw)
+        except ValueError as e:
+            raise ValueError(f"重新解析失败：{e}")
+        if not text.strip():
+            raise ValueError("重新解析后内容为空（可能是图片型文档；系统不内置 OCR，无法提取图片内文字，请转换为文本型文档）。")
+        # 删除旧分块与元数据（delete_document 会一并清理 raw_path 文件）
+        self.store.delete_document(doc_id, owner=owner)
+        # 重新写回原始文件，保证可再次重新解析
+        try:
+            with open(raw_path, "wb") as f:
+                f.write(raw)
+        except OSError:
+            raw_path = ""
+        res = self.ingest_text(
+            text,
+            doc_id=doc_id,
+            meta={"raw_path": raw_path} if raw_path else {},
+            owner=owner,
+            title=doc.get("title"),
+            file_type=file_type,
+            source=doc.get("source"),
+        )
+        return {
+            "doc_id": doc_id,
+            "title": doc.get("title"),
+            "file_type": file_type,
+            "chunks": res.get("chunks", 0),
+        }
+
+    def ingest_local_file(self, path: str, doc_id: str = None,
+                          owner: str = None) -> dict:
+        with open(path, "rb") as f:
+            raw = f.read()
+        return self.ingest_file(os.path.basename(path), raw, doc_id, owner)
+
+    # ------------------------- 检索 / 上下文 -------------------------
+    def query(self, question: str, top_k: int = 5,
+              owner: Optional[str] = None) -> List[dict]:
+        qv = self.emb.embed([question])[0]
+        return self.store.search(qv, top_k, owner=owner)
+
+    def build_context(self, question: str, top_k: int = 5,
+                      owner: Optional[str] = None) -> str:
+        hits = self.query(question, top_k, owner=owner)
+        if not hits:
+            return ""
+        parts = []
+        for i, h in enumerate(hits, 1):
+            src = h["meta"].get("source", h["doc_id"])
+            parts.append(f"[知识 {i} | 来源:{src} | 相似度:{h['score']:.3f}]\n{h['text']}")
+        return "\n\n".join(parts)
+
+    # ------------------------- 文档级管理 -------------------------
+    def list_documents(self, owner: Optional[str] = None,
+                       limit: int = 200, offset: int = 0,
+                       q: Optional[str] = None) -> List[dict]:
+        return self.store.list_documents(owner, limit, offset, q)
+
+    def get_document(self, doc_id: str, owner: Optional[str] = None) -> Optional[dict]:
+        return self.store.get_document(doc_id, owner)
+
+    def delete_document(self, doc_id: str, owner: Optional[str] = None) -> bool:
+        return self.store.delete_document(doc_id, owner)
+
+    def stats(self, owner: Optional[str] = None) -> dict:
+        return {
+            "backend": self.store.backend,
+            "embedding_dim": self.emb.dim,
+            "vectors": self.store.count(owner),
+            "documents": self.store.doc_count(owner),
+        }

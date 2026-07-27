@@ -1,0 +1,51 @@
+// 智枢智能体 · 设计令牌（SCSS 侧）
+// 配色已迁至 styles/tokens.ts（单源），运行时注入为 CSS 变量。
+// 此处仅保留 SCSS 变量别名（委派给 CSS 变量）与非配色的设计常量（布局/圆角/过渡/字体）。
+
+// ─── SCSS 变量（委派给运行时注入的 CSS 变量） ────────
+$bg-primary: var(--bg-primary);
+$bg-secondary: var(--bg-secondary);
+$bg-sidebar: var(--bg-sidebar);
+$bg-card: var(--bg-card);
+$bg-card-hover: var(--bg-card-hover);
+$bg-input: var(--bg-input);
+
+$border-color: var(--border-color);
+$border-light: var(--border-light);
+
+$accent-primary: var(--accent-primary);
+$accent-hover: var(--accent-hover);
+$accent-muted: var(--accent-muted);
+
+$text-primary: var(--text-primary);
+$text-secondary: var(--text-secondary);
+$text-muted: var(--text-muted);
+
+$success: var(--success);
+$error: var(--error);
+$warning: var(--warning);
+
+$msg-user-bg: var(--msg-user-bg);
+$msg-assistant-bg: var(--msg-assistant-bg);
+$msg-system-border: var(--msg-system-border);
+
+$code-bg: var(--code-bg);
+$brand: var(--brand);
+
+$font-ui: 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', system-ui, -apple-system, sans-serif;
+$font-code: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+
+// Layout
+$sidebar-width: 240px;
+$sidebar-collapsed-width: 64px;
+$header-height: 60px;
+$breakpoint-mobile: 768px;
+
+// Radius
+$radius-sm: 6px;
+$radius-md: 10px;
+$radius-lg: 14px;
+
+// Transition
+$transition-fast: 0.15s ease;
+$transition-normal: 0.25s ease;

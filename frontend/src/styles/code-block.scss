@@ -1,0 +1,14 @@
+// 代码块基础样式（被 global.scss 引入）
+// 实际高亮由 MarkdownRenderer 使用 highlight.js 生成，此处仅提供兜底排版。
+
+.hljs {
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.hljs-code-block {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--code-bg);
+}

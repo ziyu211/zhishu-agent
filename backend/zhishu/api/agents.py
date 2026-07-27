@@ -1,0 +1,134 @@
+"""智枢智能体 —— 子智能体（多 Agent 协作成员）管理路由。
+
+与技能/插件/MCP 同一范式：目录即模块，data/agents/<name>/agent.json 存元信息，
+启停状态存 data/agents_state.json（agents_disabled）。
+"""
+from __future__ import annotations
+
+import os
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from .auth import require_auth
+from ..core.agents_runtime import (
+    list_agents, read_agent_meta, write_agent_meta, delete_agent,
+    sanitize_name, is_enabled, set_enabled,
+)
+
+router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
+
+
+# ---------------------------------------------------------------------------
+# 请求体
+# ---------------------------------------------------------------------------
+class AgentBody(BaseModel):
+    name: str
+    description: str = ""
+    version: str = "1.0.0"
+    enabled: bool = True
+    system_prompt: str = ""
+    model: str | None = None
+    tools: object = "all"          # "all" | "none" | list[str]
+    max_steps: int | None = None
+
+
+class AgentUpdate(BaseModel):
+    description: str | None = None
+    version: str | None = None
+    enabled: bool | None = None
+    system_prompt: str | None = None
+    model: str | None = None
+    tools: object = None
+    max_steps: int | None = None
+
+
+class _ToggleBody(BaseModel):
+    enabled: bool
+
+
+# ---------------------------------------------------------------------------
+# 路由
+# ---------------------------------------------------------------------------
+@router.get("")
+async def get_agents(user=require_auth("*")):
+    return {"agents": list_agents()}
+
+
+@router.get("/options")
+async def get_agent_options(user=require_auth("*")):
+    """供聊天页选择器使用：返回已启用子智能体（name + description）。"""
+    items = [
+        {"name": a["name"], "description": a.get("description", "")}
+        for a in list_agents() if a.get("enabled")
+    ]
+    return {"agents": items}
+
+
+@router.get("/{name}")
+async def get_agent(name: str, user=require_auth("*")):
+    if not os.path.isdir(os.path.join(_agents_base(), name)):
+        raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
+    info = read_agent_meta(name)
+    info["name"] = name
+    info["enabled"] = is_enabled(name)
+    return info
+
+
+@router.post("")
+async def create_agent(body: AgentBody, user=require_auth("admin")):
+    name = sanitize_name(body.name)
+    if not name:
+        raise HTTPException(status_code=400, detail="子智能体名称非法")
+    if os.path.isdir(os.path.join(_agents_base(), name)):
+        raise HTTPException(status_code=409, detail=f"子智能体已存在：{name}")
+    meta = {
+        "name": name,
+        "description": body.description,
+        "version": body.version,
+        "enabled": body.enabled,
+        "system_prompt": body.system_prompt,
+        "model": body.model,
+        "tools": body.tools,
+        "max_steps": body.max_steps,
+    }
+    write_agent_meta(name, meta)
+    if not body.enabled:
+        set_enabled(name, False)
+    return {"ok": True, "name": name}
+
+
+@router.put("/{name}")
+async def update_agent(name: str, body: AgentUpdate, user=require_auth("admin")):
+    if not os.path.isdir(os.path.join(_agents_base(), name)):
+        raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
+    meta = read_agent_meta(name)
+    for k in ("description", "version", "system_prompt", "model", "tools", "max_steps"):
+        v = getattr(body, k)
+        if v is not None:
+            meta[k] = v
+    write_agent_meta(name, meta)
+    return {"ok": True, "name": name}
+
+
+@router.delete("/{name}")
+async def remove_agent(name: str, user=require_auth("admin")):
+    if not os.path.isdir(os.path.join(_agents_base(), name)):
+        raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
+    delete_agent(name)
+    return {"ok": True, "name": name}
+
+
+@router.put("/{name}/toggle")
+async def toggle_agent(name: str, body: _ToggleBody, user=require_auth("admin")):
+    if not os.path.isdir(os.path.join(_agents_base(), name)):
+        raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
+    set_enabled(name, body.enabled)
+    return {"ok": True, "name": name, "enabled": body.enabled}
+
+
+def _agents_base() -> str:
+    from ..core.agents_runtime import agent_dir
+    # agent_dir 需要 name，这里直接用其基目录逻辑
+    from ..context import get_ctx
+    return os.path.join(get_ctx().cfg.server.data_dir, "agents")

@@ -1,0 +1,101 @@
+# 智枢智能体 示例配置（YAML + 环境变量双来源）
+# 环境变量优先级更高：ZHISHU_<PROVIDER>_KEY 可注入各厂商 Key
+# 例如：export ZHISHU_QWEN_KEY=sk-xxxx
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  data_dir: data          # 会话/向量/审计数据目录（建议挂载持久卷）
+  static_dir: ""          # 留空则自动使用 backend/zhishu/static（前端构建产物）
+
+security:
+  enable_auth: true
+  admin_user: admin
+  admin_password: "zhishu@2026"   # 生产务必修改
+  secret: "change-me-zhishu-secret"
+  enable_sm: true          # 国密 SM2/SM3/SM4（缺 gmssl 库自动降级）
+  enable_audit: true       # 审计日志
+  enable_redact: true      # 数据脱敏：审计日志落库前对 PII 正则遮蔽
+  outbound_allow: false    # 默认内网隔离，禁止工具出网
+
+embedding:
+  backend: provider        # provider(走配置的模型Provider网络embeddings) | local(transformers) | ollama | hash
+  provider: ""             # 指定用于 embedding 的 Provider 名；留空则跟随 default_model 解析
+  embed_model: ""          # 用于 /embeddings 的「模型名」（与聊天模型区分）。
+                           # 【关键】未配置 embed_model 时，引擎直接降级为 hash 向量，不发起任何网络请求；
+                           # 要真正走网络语义 embeddings，需新增一个支持 /embeddings 的 Provider，
+                           # 并在此填入其 embedding 模型名（例如 text-embedding-3-small / bge-m3 等）。
+  fallback_hash: true      # 已配置 embed_model 但网络调用失败时，优雅降级 hash，避免中断上下文组装
+  model: bge-small-zh      # local 模式下的模型名
+  ollama_model: bge-m3:latest
+  ollama_base: http://127.0.0.1:11434
+  dim: 512
+
+vector_store:
+  backend: sqlite          # sqlite | milvus | pgvector | dm
+  path: data/zhishu_vector.db
+
+# 仅列出需要启用的厂商（其余预设自动包含）。api_key 留空即不鉴权（本地模型无需 Key）
+providers:
+  qwen:
+    api_key: ""
+    priority: 10
+  deepseek:
+    api_key: ""
+    priority: 20
+  zhipu:
+    api_key: ""
+    priority: 30
+  kimi:
+    api_key: ""
+    priority: 40
+  ernie:
+    api_key: ""
+    priority: 50
+  minimax:
+    api_key: ""
+    priority: 60
+  spark:
+    api_key: ""
+    priority: 70
+  # 本地推理默认不启用；如需本地 Ollama/vLLM，请显式打开 enabled 并设置 default_model
+  ollama:
+    enabled: false
+    priority: 1
+  vllm:
+    enabled: false
+    priority: 2
+
+# 留空 = 跟随「模型管理」中的配置（providers.json）自动解析；不再内置预设模型
+default_model: ""
+
+# Agent 运行时行为（均为 opt-in，默认关闭以零回归）
+agent:
+  compression_enabled: false        # 上下文压缩：长对话自动摘要（开启后调用 LLM 摘要）
+  compression_threshold: 24         # 历史轮数超此值才压缩
+  compression_keep_recent: 8         # 压缩时保留最近 N 轮原样
+  compression_tool_result_max: 4000  # 单条工具结果超此字符数则摘要（0=关闭）
+  skills_auto_learn: false          # 技能自进化：复杂任务后由 LLM 蒸馏沉淀为技能文件
+  skills_auto_learn_min_steps: 8     # 至少消耗步数
+  skills_auto_learn_min_tools: 3     # 至少调用工具次数
+  nudge_interval: 8                  # 每完成 N 次工具调用注入「该存记忆/造技能」内部提醒；0=关闭
+  reflection_enabled: false         # 后台记忆反思：每轮后 fork 廉价 LLM 把用户事实沉淀进 MEMORY.md（opt-in）
+
+# 网页搜索（web_search 工具后端；受 security.outbound_allow 出网闸门约束）
+web_search:
+  backend: bing_cn         # bing_cn(零Key,国内可达,默认) | duckduckgo(零Key,海外) | tavily(需api_key) | bing(需api_key)
+                           # 零 Key 后端失败自动互备（bing_cn <-> duckduckgo）
+  api_key: ""
+  max_results: 5
+  timeout: 15
+
+# 定时任务（内网合规版调度器）
+cron:
+  enabled: true
+  store_dir: cron            # 任务/历史持久化目录（相对 data_dir）
+  max_concurrency: 2         # 同时运行任务上限
+
+system_prompt: |
+  你是智枢智能体，一个部署在用户内网的国产自主可控 AI 助手。
+  你应当严谨、可靠，优先使用用户提供的知识库与工具完成任务，
+  不编造信息，涉及外部网络访问时遵循内网隔离策略。

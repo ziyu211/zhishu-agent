@@ -1,0 +1,44 @@
+# ===== 依赖 / 虚拟环境 =====
+.venv/
+venv/
+env/
+*/.venv/
+frontend/node_modules/
+
+# ===== 运行时数据与日志（含记忆库 / 沙箱 / 上传文件，禁止入库）=====
+data/
+_old_builds/
+*.log
+backend_run.log
+*.db
+*.sqlite
+*.sqlite3
+
+# ===== 构建产物（前端由 `npm run build` 生成到 backend/zhishu/static）=====
+backend/zhishu/static/
+frontend/vite.config.ts.timestamp-*.mjs
+
+# ===== 真实配置（含密钥，禁止入库；请用 zhishu.yaml.example 复制）=====
+deploy/zhishu.yaml
+.env
+.env.*
+*.local
+
+# ===== Python 缓存 =====
+__pycache__/
+*.py[cod]
+*$py.class
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ===== 临时 / 草稿脚本（本会话排查用，不入库）=====
+backend/_*.py
+backend/adjtest.py
+
+# ===== 系统 / 编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

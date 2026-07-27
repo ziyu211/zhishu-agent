@@ -1,0 +1,30 @@
+# 智枢智能体 运行依赖（国产 / 开源，均可通过国内源安装）
+
+# ---- 核心（必装）----
+fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx>=0.27
+pydantic>=2.6
+pyyaml>=6.0
+numpy>=1.26
+sqlalchemy>=2.0
+jinja2>=3.1
+python-multipart>=0.0.9
+sse-starlette>=2.1
+
+# ---- 可选：离线 Embedding / 本地模型（按需，缺失则自动降级）----
+# sentence-transformers>=2.5      # 本地加载 bge-zh / m3e
+# torch>=2.1                      # sentence-transformers 依赖
+# gmssl>=3.2                      # 国密 SM2/SM3/SM4（缺失则降级至标准哈希）
+
+# ---- 可选：国产向量库 / 数据库后端（按需）----
+# pymilvus>=2.3                   #  Milvus（国产 Zilliz）
+# pgvector / psycopg2-binary      #  PostgreSQL + pgvector
+# dmPython                        #  达梦 DM
+# kingbase8                       #  人大金仓 Kingbase
+
+# 说明：
+# 1. 不依赖任何境外厂商 SDK（openai / anthropic / google 等），
+#    国产模型统一通过 OpenAI 兼容协议经 httpx 调用。
+# 2. 安装请使用国内镜像：
+#    pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
