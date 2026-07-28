@@ -7,6 +7,7 @@ import { api } from '@/api/client'
 import MessageList from '@/components/chat/MessageList.vue'
 import ChatInput from '@/components/chat/ChatInput.vue'
 import SessionListItem from '@/components/chat/SessionListItem.vue'
+import ThinkingGraphPanel from '@/components/chat/ThinkingGraphPanel.vue'
 import DocViewer from '@/components/DocViewer.vue'
 
 const chat = useChatStore()
@@ -14,6 +15,7 @@ const app = useAppStore()
 const message = useMessage()
 
 const showSessions = ref(true)
+const showGraph = ref(false)
 const showRename = ref(false)
 const renameValue = ref('')
 const renameId = ref('')
@@ -162,6 +164,20 @@ onMounted(() => {
           <span class="header-session-title">{{ chat.active?.title || '对话' }}</span>
         </div>
         <div class="header-actions">
+          <NButton
+            size="small"
+            :type="showGraph ? 'primary' : 'default'"
+            :secondary="showGraph"
+            @click="showGraph = !showGraph"
+          >
+            <template #icon>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                <circle cx="6" cy="6" r="2.5" /><circle cx="18" cy="7" r="2.5" /><circle cx="12" cy="18" r="2.5" />
+                <path d="M8 7l8 0M7 8l4 8M17 9l-4 7" />
+              </svg>
+            </template>
+            思维图谱
+          </NButton>
           <NSelect
             v-model:value="selectedAgent"
             :options="agentOptions"
@@ -190,6 +206,12 @@ onMounted(() => {
       <ChatInput />
       <DocViewer />
     </div>
+
+    <ThinkingGraphPanel
+      v-if="showGraph"
+      :messages="chat.active?.messages || []"
+      @close="showGraph = false"
+    />
 
     <NModal
       v-model:show="showRename"
