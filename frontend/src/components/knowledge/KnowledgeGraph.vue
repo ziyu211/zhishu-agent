@@ -36,31 +36,26 @@ const selected = ref<{
 
 let chart: echarts.ECharts | null = null
 
-// —— 参考图风格配色：浅色背景上的高饱和主题色 ——
-const DOC_PALETTE = [
-  '#ef5350', // 红
-  '#42a5f5', // 蓝
-  '#ffa726', // 橙
-  '#66bb6a', // 绿
-  '#ffca28', // 黄
-  '#ab47bc', // 紫
-  '#26c6da', // 青
-  '#ec407a', // 粉
-  '#7e57c2', // 深紫
-  '#26a69a', // teal
-]
-const MULTI_DOC_COLOR = '#5c6b7f' // 多文档桥接节点用深灰，稳重不抢戏
-const CROSS_COLOR = '#f4a261'
-const FALLBACK = '#9ca3af'
-const BG_LIGHT = '#f8fafc'
+// —— 深色星空参考图配色 ——
+const BG_DARK = '#0b1120' // 接近纯黑的深蓝
+const PANEL_DARK = '#111827'
+const BORDER_DARK = '#1f2937'
+const TEXT_LIGHT = '#e2e8f0'
+const TEXT_MUTED = '#94a3b8'
+const CROSS_COLOR = '#f59e0b'
+const HUB_COLOR = '#2563eb' // 中央大蓝核
 
-const docColorMap = computed<Record<string, string>>(() => {
-  const m: Record<string, string> = {}
-  graph.value.documents.forEach((d, i) => {
-    m[d.doc_id] = DOC_PALETTE[i % DOC_PALETTE.length]
-  })
-  return m
-})
+// 40+ 独立彩色，按节点名哈希取，保证相邻节点颜色分散
+const NODE_PALETTE = [
+  '#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e',
+  '#10b981', '#14b8a6', '#06b6d4', '#0ea5e9', '#3b82f6', '#6366f1',
+  '#8b5cf6', '#a855f7', '#d946ef', '#ec4899', '#f43f5e', '#fb7185',
+  '#fdba74', '#fcd34d', '#bef264', '#86efac', '#67e8f9', '#93c5fd',
+  '#c4b5fd', '#f0abfc', '#fda4af', '#fca5a5', '#fed7aa', '#fde047',
+  '#d9f99d', '#bbf7d0', '#99f6e4', '#a5f3fc', '#bfdbfe', '#c7d2fe',
+  '#ddd6fe', '#f5d0fe', '#fbcfe8', '#fecdd3',
+]
+
 const docTitleMap = computed<Record<string, string>>(() => {
   const m: Record<string, string> = {}
   graph.value.documents.forEach((d) => (m[d.doc_id] = d.title))
@@ -76,93 +71,94 @@ const legendDocs = computed<KgDocRef[]>(() => {
 function docTitles(ids?: string[]): string[] {
   return (ids || []).map((id) => docTitleMap.value[id] || id)
 }
-function nodeColor(docs?: string[]): string {
-  if (!docs || docs.length === 0) return FALLBACK
-  if (docs.length === 1) return docColorMap.value[docs[0]] || FALLBACK
-  return MULTI_DOC_COLOR
+
+// 把字符串哈希成 0..m-1 的索引
+function hashCode(str: string): number {
+  let h = 0
+  for (let i = 0; i < str.length; i++) h = (h << 5) - h + str.charCodeAt(i)
+  return Math.abs(h)
 }
-// 根据背景色亮度决定节点内文字用白或深灰
-function labelColor(bgHex: string): string {
-  const hex = bgHex.replace('#', '')
-  const r = parseInt(hex.slice(0, 2), 16)
-  const g = parseInt(hex.slice(2, 4), 16)
-  const b = parseInt(hex.slice(4, 6), 16)
-  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-  return luminance > 0.62 ? '#374151' : '#ffffff'
+
+function nodeColor(name: string, isHub: boolean): string {
+  if (isHub) return HUB_COLOR
+  return NODE_PALETTE[hashCode(name) % NODE_PALETTE.length]
 }
-function calcSize(freq: number): number {
-  return Math.min(90, Math.max(26, 22 + Math.sqrt(freq) * 8))
+
+function calcSize(freq: number, isHub: boolean): number {
+  if (isHub) return Math.min(120, 55 + Math.sqrt(freq) * 4)
+  return Math.min(70, Math.max(18, 14 + Math.sqrt(freq) * 5))
 }
 
 function buildOption() {
+  // 中央大蓝核 = 频次最高节点
+  const hubName = graph.value.nodes.length
+    ? [...graph.value.nodes].sort((a, b) => b.freq - a.freq)[0].name
+    : ''
+
   const nodes = graph.value.nodes.map((n) => {
-    const color = nodeColor(n.docs)
-    const size = calcSize(n.freq)
+    const isHub = n.name === hubName
+    const color = nodeColor(n.name, isHub)
+    const size = calcSize(n.freq, isHub)
     return {
       name: n.name,
       value: n.freq,
       symbolSize: size,
+      // 中央节点固定居中，形成放射状
+      ...(isHub ? { fixed: true, x: 0, y: 0 } : {}),
       itemStyle: {
         color,
-        // 多文档节点用白描边强调桥接身份
-        borderColor: (n.docs?.length || 0) > 1 ? '#ffffff' : 'rgba(0,0,0,0.08)',
-        borderWidth: (n.docs?.length || 0) > 1 ? 2.5 : 1,
-        shadowBlur: 8,
-        shadowColor: 'rgba(0,0,0,0.12)',
+        borderColor: isHub ? '#93c5fd' : (n.docs?.length || 0) > 1 ? '#ffffff' : 'rgba(255,255,255,0.18)',
+        borderWidth: isHub ? 4 : (n.docs?.length || 0) > 1 ? 2 : 1,
+        shadowBlur: isHub ? 28 : 10,
+        shadowColor: isHub ? 'rgba(37,99,235,0.55)' : `${color}66`,
       },
       label: {
         show: true,
-        position: 'inside',
-        fontSize: size >= 56 ? 12 : 10,
-        color: labelColor(color),
-        fontWeight: 500,
+        position: isHub ? 'inside' : 'outside',
+        distance: isHub ? 0 : 6,
+        fontSize: isHub ? 16 : Math.max(10, Math.min(13, 9 + size / 10)),
+        color: '#f8fafc',
+        fontWeight: isHub ? 700 : 500,
         formatter: (p: any) => p.data.name,
-        textBorderColor: 'rgba(0,0,0,0.12)',
-        textBorderWidth: 1,
+        textBorderColor: 'rgba(0,0,0,0.75)',
+        textBorderWidth: 2,
       },
       _doc: n.doc_count,
       _docs: n.docs || [],
     }
   })
+
   const links = graph.value.edges.map((e) => {
     const isCross = !!e.cross
-    const showLabel = !isCross && e.weight >= 3
     return {
       source: e.source,
       target: e.target,
       value: e.weight,
       _cross: isCross,
       _docs: e.docs || [],
-      label: {
-        show: showLabel,
-        formatter: '{c}',
-        fontSize: 10,
-        color: '#6b7280',
-        textBorderColor: 'rgba(248,250,252,0.85)',
-        textBorderWidth: 2,
-      },
       lineStyle: isCross
-        ? { width: 1.5, opacity: 0.65, color: CROSS_COLOR, type: 'dashed' as const, curveness: 0.2 }
+        ? { width: 1.2, opacity: 0.55, color: CROSS_COLOR, type: 'dashed' as const, curveness: 0.25 }
         : {
-            width: Math.min(1 + e.weight * 0.35, 3.5),
-            opacity: 0.3 + Math.min(e.weight / 14, 0.35),
-            color: '#9ca3af',
+            width: Math.min(1 + e.weight * 0.25, 2.2),
+            opacity: 0.18 + Math.min(e.weight / 18, 0.22),
+            color: '#94a3b8',
           },
     }
   })
+
   return {
-    backgroundColor: BG_LIGHT,
+    backgroundColor: BG_DARK,
     tooltip: {
-      backgroundColor: 'rgba(20,26,38,0.95)',
-      borderColor: '#2a3346',
-      textStyle: { color: '#d6deea', fontSize: 12 },
+      backgroundColor: 'rgba(15,23,42,0.96)',
+      borderColor: '#334155',
+      textStyle: { color: '#e2e8f0', fontSize: 12 },
       formatter: (p: any) => {
         if (p.dataType === 'node') {
           const src = docTitles(p.data._docs)
           const srcHtml = src.length
             ? `<br/>来源文档：${src.map((t) => `「${t}」`).join(' ')}`
             : ''
-          return `<b>${p.data.name}</b><br/>出现频次：${p.data.value}<br/>涉及文档：${p.data._doc} 篇${srcHtml}`
+          return `<b style="color:${p.color}">${p.data.name}</b><br/>出现频次：${p.data.value}<br/>涉及文档：${p.data._doc} 篇${srcHtml}`
         }
         if (p.data._cross) {
           const src = docTitles(p.data._docs)
@@ -172,7 +168,7 @@ function buildOption() {
         return `${p.data.source} — ${p.data.target}<br/>共现强度：${p.data.value}${src.length ? `<br/>来源文档：${src.map((t) => `「${t}」`).join(' ')}` : ''}`
       },
     },
-    animationDuration: 1400,
+    animationDuration: 1600,
     animationEasingUpdate: 'cubicOut',
     series: [
       {
@@ -180,11 +176,22 @@ function buildOption() {
         layout: 'force',
         roam: true,
         draggable: true,
-        force: { repulsion: 650, edgeLength: [110, 240], gravity: 0.04, friction: 0.16, layoutAnimation: true },
+        force: {
+          repulsion: 720,
+          edgeLength: [80, 200],
+          gravity: 0.08,
+          friction: 0.14,
+          layoutAnimation: true,
+        },
         label: { show: true },
         edgeSymbol: ['none', 'none'],
-        lineStyle: { curveness: 0.05 },
-        emphasis: { focus: 'adjacency', scale: true, label: { show: true } },
+        lineStyle: { curveness: 0.04 },
+        emphasis: {
+          focus: 'adjacency',
+          scale: true,
+          label: { show: true, fontSize: 14, fontWeight: 700 },
+          lineStyle: { opacity: 0.9, width: 2.5 },
+        },
         data: nodes,
         links,
       },
@@ -298,20 +305,18 @@ onUnmounted(() => {
         <template v-if="crossDoc && graph.stats.cross_edges"> + <b class="cross">{{ graph.stats.cross_edges }}</b> 跨文档</template>
         （库内共 {{ graph.stats.nodes }} 节点）
       </span>
-      <span class="kg-tip">节点色=来源文档 · 灰线=共现 · 虚线=跨文档共现</span>
+      <span class="kg-tip">彩色节点=关键词 · 灰线=共现 · 虚线=跨文档共现</span>
     </div>
 
     <div v-if="legendDocs.length" class="kg-legend">
+      <span class="kg-legend-hint">来源文档：</span>
       <span
         v-for="d in legendDocs"
         :key="d.doc_id"
         class="kg-legend-item"
         :class="{ dim: docFilter.length && !docFilter.includes(d.doc_id) }"
       >
-        <span class="kg-dot" :style="{ background: docColorMap[d.doc_id] }"></span>{{ d.title }}
-      </span>
-      <span v-if="legendDocs.length > 1" class="kg-legend-item">
-        <span class="kg-dot multi"></span>多文档共有
+        {{ d.title }}
       </span>
     </div>
 
@@ -326,7 +331,6 @@ onUnmounted(() => {
 
     <div v-if="selected" class="kg-detail">
       <div class="kg-detail-head">
-        <span class="kg-dot" :style="{ background: nodeColor(selected.docs) }"></span>
         <b>{{ selected.name }}</b>
         <NTag size="small" :bordered="false">频次 {{ selected.freq }}</NTag>
         <NTag size="small" :bordered="false" type="info">文档 {{ selected.doc_count }}</NTag>
@@ -355,19 +359,33 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 @use '@/styles/variables' as *;
-.kg-wrap { display: flex; flex-direction: column; height: 100%; }
+.kg-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #0b1120;
+  padding: 16px;
+  border-radius: $radius-md;
+}
 .kg-toolbar {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  padding: 4px 2px 10px;
+  padding-bottom: 12px;
 }
 .kg-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: $text-secondary; cursor: pointer; }
-.kg-stat { font-size: 13px; color: $text-secondary; b { color: $text-primary; } .cross { color: #f4a261; } }
+.kg-stat { font-size: 13px; color: $text-secondary; b { color: $text-primary; } .cross { color: #f59e0b; } }
 .kg-tip { font-size: 11px; color: $text-muted; margin-left: auto; }
 .kg-legend {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 0 2px 10px; font-size: 12px; color: $text-secondary;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding-bottom: 12px; font-size: 12px; color: #94a3b8;
 }
-.kg-legend-item { display: inline-flex; align-items: center; gap: 5px; &.dim { opacity: 0.35; } }
+.kg-legend-hint { color: #64748b; }
+.kg-legend-item {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 999px;
+  &.dim { opacity: 0.35; }
+}
 .kg-empty { padding: 80px 0; }
 .kg-canvas-wrap { position: relative; width: 100%; }
 .kg-empty-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
@@ -375,20 +393,20 @@ onUnmounted(() => {
   width: 100%;
   height: calc(100vh - 250px);
   min-height: 440px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: #0b1120;
+  border: 1px solid #1f2937;
   border-radius: $radius-md;
 }
 .kg-detail {
   margin-top: 12px;
   padding: 12px 14px;
-  background: $bg-card;
-  border: 1px solid $border-color;
+  background: #111827;
+  border: 1px solid #1f2937;
   border-radius: $radius-md;
+  color: #e2e8f0;
 }
 .kg-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.kg-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; &.multi { background: #5c6b7f; box-shadow: 0 0 0 1.5px #fff inset; } }
-.kg-detail-rel { margin-top: 8px; font-size: 12px; color: $text-secondary; }
+.kg-detail-rel { margin-top: 8px; font-size: 12px; color: #94a3b8; }
 .rel-tag { margin: 2px 4px 2px 0; }
-.muted { color: $text-muted; }
+.muted { color: #64748b; }
 </style>
