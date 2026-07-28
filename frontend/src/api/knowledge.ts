@@ -35,6 +35,12 @@ export const searchKnowledge = (q: string, top_k = 5) =>
     `/api/v1/knowledge/search?q=${encodeURIComponent(q)}&top_k=${top_k}`,
   )
 export const knowledgeStats = () => request<KnowledgeStats>('/api/v1/knowledge/stats')
+export const getKnowledgeGraph = (limit = 300, minWeight = 1) =>
+  request<{
+    nodes: { name: string; freq: number; doc_count: number }[]
+    edges: { source: string; target: string; weight: number }[]
+    stats: { nodes: number; edges: number; returned_nodes: number; returned_edges: number }
+  }>(`/api/v1/knowledge/graph?limit=${limit}&min_weight=${minWeight}`)
 
 export const knowledgeApi = {
   ingestText,
@@ -45,4 +51,5 @@ export const knowledgeApi = {
   reparseDocument,
   searchKnowledge,
   knowledgeStats,
+  getKnowledgeGraph,
 }

@@ -23,6 +23,7 @@ from typing import List, Optional
 
 from .embedding import EmbeddingEngine
 from .vector_store import VectorStore
+from .kgraph import KnowledgeGraph
 from .config import EmbeddingConfig, VectorStoreConfig
 
 
@@ -861,6 +862,10 @@ class KnowledgeBase:
         self.raw_dir = os.path.join(data_dir, "knowledge_raw") if data_dir else ""
         if self.raw_dir:
             os.makedirs(self.raw_dir, exist_ok=True)
+        # 知识图谱层（关键词共现网络，离线）。data_dir 解析为绝对路径，
+        # 与向量库平行持久化于 data_dir/zhishu_kg.db。
+        self.data_dir = os.path.abspath(data_dir) if data_dir else None
+        self.graph = KnowledgeGraph(self.data_dir)
 
     # ------------------------- 入库（带归属与元数据） -------------------------
     def ingest_text(
@@ -889,6 +894,13 @@ class KnowledgeBase:
             **(meta or {}),
         }
         n = self.store.add(doc_id, chunks, vecs, full_meta)
+        # 增量构建知识图谱（关键词共现网络）
+        if self.graph is not None:
+            try:
+                self.graph.analyze_document(doc_id, text, owner=owner)
+            except Exception as e:  # 图谱失败绝不影响主链路
+                import logging
+                logging.getLogger("zhishu.rag").warning("知识图谱分析失败 doc_id=%s: %s", doc_id, e)
         return {"doc_id": doc_id, "chunks": n, "title": title or doc_id, "file_type": file_type}
 
     def ingest_file(
@@ -948,6 +960,12 @@ class KnowledgeBase:
             raise ValueError("重新解析后内容为空（可能是图片型文档；系统不内置 OCR，无法提取图片内文字，请转换为文本型文档）。")
         # 删除旧分块与元数据（delete_document 会一并清理 raw_path 文件）
         self.store.delete_document(doc_id, owner=owner)
+        # 回退旧图谱贡献（reparse 走的是 store.delete，不会触发 KB.delete_document）
+        if self.graph is not None:
+            try:
+                self.graph.remove_document(doc_id)
+            except Exception:
+                pass
         # 重新写回原始文件，保证可再次重新解析
         try:
             with open(raw_path, "wb") as f:
@@ -1003,7 +1021,13 @@ class KnowledgeBase:
         return self.store.get_document(doc_id, owner)
 
     def delete_document(self, doc_id: str, owner: Optional[str] = None) -> bool:
-        return self.store.delete_document(doc_id, owner)
+        ok = self.store.delete_document(doc_id, owner)
+        if ok and self.graph is not None:
+            try:
+                self.graph.remove_document(doc_id)
+            except Exception:
+                pass
+        return ok
 
     def stats(self, owner: Optional[str] = None) -> dict:
         return {

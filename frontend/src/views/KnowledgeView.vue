@@ -6,10 +6,12 @@ import {
 } from 'naive-ui'
 import { api } from '@/api/client'
 import { useAppStore } from '@/stores/app'
+import KnowledgeGraph from '@/components/knowledge/KnowledgeGraph.vue'
 
 const message = useMessage()
 const appStore = useAppStore()
 const isAdmin = computed(() => appStore.isAdmin)
+const tab = ref<'kb' | 'graph'>('kb')
 
 const stats = ref<any>({ documents: 0, vectors: 0, backend: '—', embedding_dim: 0 })
 const docs = ref<any[]>([])
@@ -173,8 +175,10 @@ onMounted(() => { loadStats(); loadDocs() })
       </div>
     </header>
 
+    <NTabs v-model:value="tab" type="line" class="kg-tabs">
+      <NTabPane name="kb" tab="知识库">
     <div class="kb-body">
-      <NScrollbar style="max-height: calc(100vh - 120px)">
+      <NScrollbar style="max-height: calc(100vh - 160px)">
         <!-- 导入区 -->
         <div class="grid-2">
           <section class="card-block">
@@ -292,6 +296,11 @@ onMounted(() => { loadStats(); loadDocs() })
         <pre class="preview-content">{{ previewDoc?.content || '（无预览内容）' }}</pre>
       </NSpin>
     </NModal>
+      </NTabPane>
+      <NTabPane name="graph" tab="知识图谱">
+        <KnowledgeGraph />
+      </NTabPane>
+    </NTabs>
   </div>
 </template>
 
@@ -308,6 +317,7 @@ onMounted(() => { loadStats(); loadDocs() })
 .pill { font-size: 12px; padding: 3px 10px; border-radius: 10px; background: $bg-secondary; color: $text-secondary; border: 1px solid $border-light; }
 
 .kb-body { flex: 1; padding: 20px; overflow: hidden; }
+.kg-tabs { padding: 0 20px; }
 .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
 @media (max-width: 860px) { .grid-2 { grid-template-columns: 1fr; } }
 

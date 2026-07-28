@@ -128,3 +128,20 @@ async def stats(user=require_auth("knowledge:read")):
     ctx = get_ctx()
     owner = user.get("u")
     return ctx.kb.stats(owner=owner)
+
+
+@router.get("/graph")
+async def graph(
+    limit: int = Query(300, ge=10, le=2000, description="返回节点上限"),
+    min_weight: int = Query(1, ge=1, description="边最小共现权重"),
+    user=require_auth("knowledge:read"),
+):
+    """知识图谱（关键词共现网络）。
+
+    普通用户仅见自己 + 共享文档贡献的子图；管理员（owner=None）可见全量。
+    """
+    ctx = get_ctx()
+    if ctx.kb.graph is None:
+        return {"nodes": [], "edges": [], "stats": {"nodes": 0, "edges": 0}}
+    owner = None if user.get("r") == "admin" else user.get("u")
+    return ctx.kb.graph.get_graph(owner=owner, limit=limit, min_weight=min_weight)
