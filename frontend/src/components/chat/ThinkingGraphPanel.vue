@@ -6,9 +6,11 @@ import {
   reasoningToSteps,
   sessionReasoning,
   extractConcepts,
+  buildBaseGraph,
   buildConceptMessageMap,
   createForceSimulation,
   nodeRadius,
+  NUCLEUS_ID,
   type ThinkingStep,
   type ConceptGraph,
   type SimNode,
@@ -44,8 +46,21 @@ const hasReasoning = computed(() =>
 )
 const reasoning = computed(() => sessionReasoning(props.messages))
 const steps = computed<ThinkingStep[]>(() => reasoningToSteps(reasoning.value))
-const graph = computed<ConceptGraph>(() => extractConcepts(reasoning.value))
+
+/* 概念图谱：优先用模型思考抽取的概念；若会话尚无思考，则退化为
+   基于提问的「细胞」式基础图谱，保证随时都能看到可交互的图。 */
+const reasoningGraph = computed<ConceptGraph>(() => extractConcepts(reasoning.value))
+const baseGraph = computed<ConceptGraph>(() => buildBaseGraph(props.messages))
+const isPreview = computed(() => reasoningGraph.value.nodes.length === 0)
+const graph = computed<ConceptGraph>(() => (isPreview.value ? baseGraph.value : reasoningGraph.value))
 const conceptMsgMap = computed(() => buildConceptMessageMap(props.messages, graph.value.nodes))
+
+/* 点击中心核时跳转的对话消息（最新一条用户提问） */
+const nucleusTargetId = computed(() => {
+  const u = [...props.messages].reverse().find((m) => m.role === 'user')
+  return u?.id
+})
+const isNucleus = (id: string) => id === NUCLEUS_ID
 
 const KIND_LABEL: Record<string, string> = {
   goal: '目标',
@@ -151,10 +166,14 @@ function onNodeUp() {
   if (dragId && sim) {
     const n = sim.getNode(dragId)
     if (n) n.fixed = false
-    // 视为点击（非拖拽）：跳转到该概念首次出现的对话消息
+    // 视为点击（非拖拽）：跳转到对应对话消息
     if (!moved) {
-      const mid = conceptMsgMap.value.get(dragId)
-      if (mid) emit('focus-message', mid)
+      if (dragId === NUCLEUS_ID) {
+        if (nucleusTargetId.value) emit('focus-message', nucleusTargetId.value)
+      } else {
+        const mid = conceptMsgMap.value.get(dragId)
+        if (mid) emit('focus-message', mid)
+      }
     }
   }
   dragId = null
@@ -288,15 +307,24 @@ onBeforeUnmount(() => {
                 v-for="n in graph.nodes"
                 :key="n.id"
                 class="tg-node"
-                :class="{ dim: nodeDimmed(n.id) }"
-                :style="{ cursor: conceptMsgMap.get(n.id) ? 'pointer' : 'grab' }"
+                :class="{ dim: nodeDimmed(n.id), 'tg-node--nucleus': isNucleus(n.id) }"
+                :style="{ cursor: isNucleus(n.id) || conceptMsgMap.get(n.id) ? 'pointer' : 'grab' }"
                 @pointerenter="hoverId = n.id"
                 @pointerleave="hoverId = null"
                 @pointerdown="onNodeDown($event, n.id)"
                 @pointermove="onNodeMove"
                 @pointerup="onNodeUp"
               >
-                <title v-if="conceptMsgMap.get(n.id)">点击跳转到相关对话</title>
+                <title v-if="isNucleus(n.id)">对话主题 · 点击跳转到提问</title>
+                <title v-else-if="conceptMsgMap.get(n.id)">点击跳转到相关对话</title>
+                <!-- 细胞核膜：脉冲呼吸环 -->
+                <circle
+                  v-if="isNucleus(n.id)"
+                  :cx="nodePos(n.id)?.x"
+                  :cy="nodePos(n.id)?.y"
+                  :r="nodeRadius(n.weight, maxWeight) + 7"
+                  class="tg-membrane"
+                />
                 <circle
                   :cx="nodePos(n.id)?.x"
                   :cy="nodePos(n.id)?.y"
@@ -311,7 +339,10 @@ onBeforeUnmount(() => {
               </g>
             </g>
           </svg>
-          <div class="tg-graph-stat">{{ graph.nodes.length }} 个概念 · {{ graph.edges.length }} 条关联</div>
+          <div class="tg-graph-stat">
+            <template v-if="isPreview">预览 · 基于提问生成</template>
+            <template v-else>{{ graph.nodes.length }} 个概念 · {{ graph.edges.length }} 条关联</template>
+          </div>
         </div>
       </div>
     </div>
@@ -481,6 +512,33 @@ onBeforeUnmount(() => {
 }
 .tg-node.dim { opacity: 0.32; }
 .tg-node.dim .tg-node-label { opacity: 0.4; }
+
+/* 「细胞核」基础点：品牌色 + 脉冲膜 */
+.tg-node--nucleus .tg-node-dot {
+  fill: var(--brand, #e8453c);
+  fill-opacity: 0.92;
+  stroke: var(--bg-card);
+  stroke-width: 2;
+}
+.tg-node--nucleus .tg-node-label {
+  fill: var(--text-primary, #1f2329);
+  font-size: 11px;
+  font-weight: 600;
+}
+.tg-membrane {
+  fill: none;
+  stroke: var(--brand, #e8453c);
+  stroke-opacity: 0.35;
+  stroke-width: 1.4;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: tg-pulse 2.6s ease-in-out infinite;
+}
+@keyframes tg-pulse {
+  0% { stroke-opacity: 0.45; transform: scale(0.92); }
+  50% { stroke-opacity: 0.12; transform: scale(1.16); }
+  100% { stroke-opacity: 0.45; transform: scale(0.92); }
+}
 
 .tg-graph-stat {
   position: absolute;

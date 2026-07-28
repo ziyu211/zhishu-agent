@@ -173,6 +173,64 @@ const STOPWORDS = new Set([
 ])
 
 /**
+ * 抽取候选术语（英文词 + 中文 n-gram 2~4 元），与 extractConcepts 内部逻辑一致。
+ * 供 buildBaseGraph 复用：对用户提问做高频词统计，生成「细胞」式卫星节点。
+ */
+function extractCandidates(text: string): string[] {
+  const src = (text || '').toLowerCase()
+  const out: string[] = []
+  if (!src.trim()) return out
+
+  const enWords = src.match(/[a-z][a-z0-9_+-]{2,}/g) || []
+  for (const w of enWords) {
+    if (STOPWORDS.has(w)) continue
+    out.push(w)
+  }
+
+  const cjkRuns = src.match(/[一-鿿]+/g) || []
+  for (const run of cjkRuns) {
+    if (run.length === 1) continue
+    if (run.length <= 5 && !STOPWORDS.has(run)) out.push(run)
+    for (let n = 2; n <= 4; n++) {
+      for (let i = 0; i + n <= run.length; i++) {
+        const g = run.slice(i, i + n)
+        if (STOPWORDS.has(g)) continue
+        if (/^[一-鿿]{2,4}$/.test(g)) out.push(g)
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * 预览图专用：从用户提问抽取「较干净」的关键词。
+ * 与 extractCandidates 的滑动 n-gram 不同，这里在连词/助词边界切分中文，
+ * 取 2~5 字整块（更接近真实词），避免「索系统与」这类碎片噪声。
+ */
+const Q_BOUNDARY = /[的与和是在对用并而及以将把被让使叫等对于关于通过由于因为所以但是如果然后接着更最]/g
+function extractQuestionTerms(text: string): string[] {
+  const src = (text || '').toLowerCase()
+  const out: string[] = []
+  if (!src.trim()) return out
+
+  const en = src.match(/[a-z][a-z0-9_+-]{2,}/g) || []
+  for (const w of en) {
+    if (STOPWORDS.has(w)) continue
+    out.push(w)
+  }
+
+  const runs = src.match(/[一-鿿]+/g) || []
+  for (const run of runs) {
+    const chunks = run.split(Q_BOUNDARY)
+    for (const c of chunks) {
+      const t = c.trim()
+      if (t.length >= 2 && t.length <= 5 && !STOPWORDS.has(t)) out.push(t)
+    }
+  }
+  return out
+}
+
+/**
  * 轻量术语抽取（无分词库）：
  *  - 英文：长度 ≥ 3 的单词；
  *  - 中文：CJK 连续串，生成 2~3 字 n-gram 作为候选词（重复出现的更可能是真实词）；
@@ -256,6 +314,63 @@ export function sessionReasoning(messages: Msg[]): string {
     .filter((m) => m.role === 'assistant' && m.reasoning && m.reasoning.trim())
     .map((m) => m.reasoning as string)
     .join('\n\n')
+}
+
+/** 中心核节点 id——「细胞」式基础点，始终存在于概念图谱中。 */
+export const NUCLEUS_ID = '__nucleus__'
+
+/**
+ * 生成「细胞」式基础图谱：始终存在一个中心核（对话主题）作为「细胞核」，
+ * 由用户提问里的高频关键词作为卫星节点（「细胞器」）连到核。
+ * 这样即使模型尚未输出 <think> 思考，也能立刻看到一张可交互、带力导向的图。
+ */
+export function buildBaseGraph(messages: Msg[]): ConceptGraph {
+  const userMsgs = messages.filter(
+    (m) => m.role === 'user' && m.content && m.content.trim(),
+  )
+  const nucleus: ConceptNode = {
+    id: NUCLEUS_ID,
+    label: deriveSeedLabel(userMsgs),
+    weight: 6,
+  }
+  const nodes: ConceptNode[] = [nucleus]
+  const edges: ConceptEdge[] = []
+
+  if (userMsgs.length) {
+    const text = userMsgs.map((m) => m.content).join('\n')
+    const candidates = extractQuestionTerms(text)
+    const freq = new Map<string, number>()
+    for (const c of candidates) {
+      if (STOPWORDS.has(c) || c.length < 2) continue
+      freq.set(c, (freq.get(c) || 0) + 1)
+    }
+    // 去碎片化：若某词是另一（更长）候选词的子串，则丢弃，保留完整词
+    const entries = [...freq.entries()]
+    const kept = entries.filter(
+      ([a]) => !entries.some(([b]) => b !== a && a.length < b.length && b.includes(a)),
+    )
+    const top = kept.sort((a, b) => b[1] - a[1]).slice(0, 10)
+    for (const [label, w] of top) {
+      const id = `q:${label}`
+      if (id === NUCLEUS_ID) continue
+      nodes.push({ id, label, weight: 1 + w })
+      edges.push({ source: NUCLEUS_ID, target: id, weight: 1 })
+    }
+  }
+  return { nodes, edges }
+}
+
+/** 从用户消息派生中心核标签（对话主题）。 */
+function deriveSeedLabel(userMsgs: Msg[]): string {
+  const src = (userMsgs[userMsgs.length - 1] || userMsgs[0])?.content?.trim() || ''
+  if (!src) return '对话'
+  // 去掉开头客套前缀，截到首个标点或前 6 字
+  const stripped = src
+    .replace(/^[\s#*>`\-[\]【】]*/, '')
+    .replace(/^(请[问教]?|帮我|我想|我要|如何|怎么|为什么|能否|是否|麻烦|可以|能|试|求)/, '')
+  const cut = (stripped.split(/[，。？！；;:\n]/)[0] || stripped).replace(/\s+/g, '')
+  const label = cut.slice(0, 6)
+  return label && label.length >= 2 ? label : '对话'
 }
 
 /** 文本是否包含某术语：英文按整词边界匹配，中文按子串匹配。 */
