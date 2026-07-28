@@ -10,6 +10,7 @@ const props = defineProps<{
   searchPlaceholder?: string
   editable?: boolean
   showStatus?: boolean
+  exportable?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -17,6 +18,7 @@ const emit = defineEmits<{
   (e: 'refresh'): void
   (e: 'edit', item: any): void
   (e: 'delete', item: any): void
+  (e: 'export', item: any): void
 }>()
 
 const keyword = ref('')
@@ -89,9 +91,10 @@ function onToggle(it: any, enabled: boolean) {
           <div v-if="showStatus && it.error" class="card-error" :title="it.error">连接异常：{{ it.error.slice(0, 60) }}</div>
         </div>
         <div class="card-right">
-          <div class="card-actions" v-if="editable">
-            <NButton size="tiny" quaternary type="primary" @click="emit('edit', it)">编辑</NButton>
-            <NPopconfirm @positive-click="emit('delete', it)">
+          <div class="card-actions" v-if="editable || exportable">
+            <NButton v-if="exportable" size="tiny" quaternary type="default" @click="emit('export', it)">导出</NButton>
+            <NButton v-if="editable" size="tiny" quaternary type="primary" @click="emit('edit', it)">编辑</NButton>
+            <NPopconfirm v-if="editable" @positive-click="emit('delete', it)">
               <template #trigger>
                 <NButton size="tiny" quaternary type="error">删除</NButton>
               </template>

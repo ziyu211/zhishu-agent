@@ -7,12 +7,14 @@
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
+from starlette.responses import StreamingResponse
 
 from .auth import require_auth
 from ..context import get_ctx
@@ -26,6 +28,7 @@ from ..core.modules import (
     module_dir,
     DISABLED_KEY,
 )
+from ..core.modules.skills_io import import_archive, export_skills
 
 
 router = APIRouter(prefix="/api/v1", tags=["modules"])
@@ -104,6 +107,48 @@ class SkillUpdate(BaseModel):
 @router.get("/skills")
 async def list_skills(user=require_auth("*")):
     return {"skills": _list_modules("skills")}
+
+
+@router.post("/skills/import")
+async def import_skills(file: UploadFile = File(...), user=require_auth("*")):
+    """从外部智能体（Hermes / OpenClaw / 智枢原生 / 通用 Markdown 压缩包）批量导入技能。
+
+    上传 .zip / .tgz / .tar.gz，自动嗅探格式并转换为智枢技能目录。
+    """
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="上传文件为空")
+    fn = (file.filename or "").lower()
+    fmt = "tgz" if (fn.endswith(".tgz") or fn.endswith(".tar.gz")) else "zip"
+    try:
+        res = import_archive(data, fmt, get_ctx().cfg.server.data_dir)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"导入失败：{e}")
+    return {"ok": True, **res}
+
+
+@router.get("/skills/export")
+async def export_skills_all(user=require_auth("*")):
+    """导出全部技能为 zip（智枢原生格式，兼容 Hermes 的 SKILL.md 约定）。"""
+    data = export_skills(get_ctx().cfg.server.data_dir)
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=zhishu-skills.zip"},
+    )
+
+
+@router.get("/skills/{name}/export")
+async def export_skill_one(name: str, user=require_auth("*")):
+    """导出单个技能为 zip。"""
+    if not os.path.isdir(module_dir("skills", name)):
+        raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
+    data = export_skills(get_ctx().cfg.server.data_dir, names=[name])
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=zhishu-skill-{name}.zip"},
+    )
 
 
 @router.get("/skills/{name}")

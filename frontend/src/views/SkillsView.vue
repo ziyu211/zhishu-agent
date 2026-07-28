@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { useMessage } from 'naive-ui'
-import { NModal, NForm, NFormItem, NInput, NSwitch, NButton } from 'naive-ui'
+import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NUpload, NDrawer, NDrawerContent, NAlert } from 'naive-ui'
 import { api } from '@/api/client'
+import { importSkills, exportSkills, exportSkill } from '@/api/skills'
 import ModuleList from '@/components/modules/ModuleList.vue'
 
 const message = useMessage()
@@ -19,6 +20,12 @@ const form = reactive<{ name: string; description: string; version: string; cont
   content: '',
   enabled: true,
 })
+
+// 导入相关
+const showImport = ref(false)
+const importing = ref(false)
+const importFile = ref<File | null>(null)
+const importResult = ref<any>(null)
 
 async function load() {
   loading.value = true
@@ -109,6 +116,57 @@ async function onToggle(p: { name: string; enabled: boolean }) {
   }
 }
 
+// ── 导入 ──
+function openImport() {
+  importFile.value = null
+  importResult.value = null
+  showImport.value = true
+}
+function onUploadChange(options: any) {
+  const f = options?.file?.file as File | undefined
+  if (f) importFile.value = f
+}
+async function doImport() {
+  if (!importFile.value) {
+    message.warning('请先选择要导入的压缩包（.zip / .tgz）')
+    return
+  }
+  importing.value = true
+  importResult.value = null
+  try {
+    const res = await importSkills(importFile.value)
+    importResult.value = res
+    if (res?.imported?.length) {
+      message.success(`成功导入 ${res.imported.length} 个技能`)
+      await load()
+    } else {
+      message.warning('未导入任何技能，请检查压缩包格式')
+    }
+  } catch (e: any) {
+    message.error(e?.message || '导入失败')
+  } finally {
+    importing.value = false
+  }
+}
+
+// ── 导出 ──
+async function doExportAll() {
+  try {
+    await exportSkills()
+    message.success('已导出全部技能（zip）')
+  } catch (e: any) {
+    message.error(e?.message || '导出失败')
+  }
+}
+async function doExportOne(it: any) {
+  try {
+    await exportSkill(it.name)
+    message.success(`已导出技能：${it.name}`)
+  } catch (e: any) {
+    message.error(e?.message || '导出失败')
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -119,14 +177,32 @@ onMounted(load)
         <div class="header-title">技能</div>
         <div class="header-sub">技能是一段注入 Agent 系统提示的指令（Markdown）。启用后，Agent 在每次对话都会参考这些指令。</div>
       </div>
-      <NButton type="primary" size="small" @click="openCreate">
-        <template #icon>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </template>
-        新建技能
-      </NButton>
+      <div class="header-actions">
+        <NButton size="small" @click="doExportAll">
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+            </svg>
+          </template>
+          导出全部
+        </NButton>
+        <NButton size="small" @click="openImport">
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+            </svg>
+          </template>
+          导入
+        </NButton>
+        <NButton type="primary" size="small" @click="openCreate">
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </template>
+          新建技能
+        </NButton>
+      </div>
     </header>
 
     <div class="module-content">
@@ -135,12 +211,14 @@ onMounted(load)
         :items="skills"
         :loading="loading"
         :editable="true"
+        :exportable="true"
         empty-text="暂无技能，点击右上角「新建技能」"
         search-placeholder="搜索技能..."
         @toggle="onToggle"
         @refresh="load"
         @edit="openEdit"
         @delete="remove"
+        @export="doExportOne"
       />
     </div>
 
@@ -174,6 +252,54 @@ onMounted(load)
         </div>
       </template>
     </NModal>
+
+    <!-- 导入外部技能 -->
+    <NDrawer v-model:show="showImport" :width="420" placement="right">
+      <NDrawerContent title="导入技能" closable>
+        <NAlert type="info" :show-icon="true" style="margin-bottom: 16px">
+          支持从 <b>Hermes</b>、<b>OpenClaw</b> 等智能体，或智枢原生压缩包（.zip / .tgz）导入。
+          系统会自动识别 <code>SKILL.md</code> / <code>module.json</code> / 通用 Markdown 格式并转换为智枢技能。
+        </NAlert>
+
+        <NUpload
+          accept=".zip,.tgz,.tar.gz"
+          :max="1"
+          :default-upload="false"
+          @change="onUploadChange"
+        >
+          <NButton>选择压缩包（.zip / .tgz）</NButton>
+        </NUpload>
+
+        <div v-if="importFile" class="import-file">
+          已选择：<code>{{ importFile.name }}</code>
+        </div>
+
+        <div class="modal-footer" style="margin-top: 20px">
+          <NButton @click="showImport = false">关闭</NButton>
+          <NButton type="primary" :loading="importing" :disabled="!importFile" @click="doImport">开始导入</NButton>
+        </div>
+
+        <NAlert
+          v-if="importResult"
+          :type="importResult.imported?.length ? 'success' : 'warning'"
+          :show-icon="true"
+          style="margin-top: 18px"
+        >
+          <template #header>导入结果</template>
+          <div v-if="importResult.detected_format?.length" class="ri">
+            识别格式：{{ importResult.detected_format.join('、') }}
+          </div>
+          <div class="ri">成功：{{ (importResult.imported || []).length }} 个</div>
+          <ul v-if="importResult.imported?.length" class="ri-list">
+            <li v-for="s in importResult.imported" :key="s.name">{{ s.name }}<span v-if="s.description"> — {{ s.description }}</span></li>
+          </ul>
+          <div v-if="importResult.errors?.length" class="ri-err">失败：{{ importResult.errors.length }} 个</div>
+          <ul v-if="importResult.errors?.length" class="ri-list ri-err">
+            <li v-for="(e, i) in importResult.errors" :key="i">{{ e.name || '?' }}：{{ e.error }}</li>
+          </ul>
+        </NAlert>
+      </NDrawerContent>
+    </NDrawer>
   </div>
 </template>
 
@@ -182,4 +308,10 @@ onMounted(load)
 .module-view { height: calc(100 * var(--vh)); display: flex; flex-direction: column; }
 .module-content { flex: 1; overflow-y: auto; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; }
+.header-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.import-file { margin-top: 12px; font-size: 12px; color: $text-muted; }
+.import-file code { font-family: $font-code; background: $code-bg; padding: 2px 6px; border-radius: 4px; }
+.ri { font-size: 13px; }
+.ri-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: $text-secondary; }
+.ri-err { color: #d03050; }
 </style>

@@ -97,6 +97,31 @@ export async function request<T = any>(
   return (await resp.text()) as unknown as T
 }
 
+// ─── 文件下载（blob → 触发浏览器下载） ───────────────────
+export async function downloadFile(path: string, filename: string): Promise<void> {
+  const headers: Record<string, string> = {}
+  const token = getToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const resp = await fetch(resolveUrl(path), { method: 'GET', headers })
+  if (!resp.ok) {
+    let msg = `下载失败(${resp.status})`
+    try {
+      const d = await resp.json()
+      msg = d.detail || d.msg || msg
+    } catch {}
+    throw new Error(msg)
+  }
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 // ─── 离散提示（不依赖组件树内的 provider） ───────────────
 let _discrete: ReturnType<typeof createDiscreteApi> | null = null
 function discrete() {

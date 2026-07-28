@@ -1,7 +1,7 @@
 /**
  * 技能 Skills API。
  */
-import { request } from './http'
+import { request, downloadFile } from './http'
 import type { SkillItem } from './types'
 
 export const listSkills = () => request<SkillItem[]>('/api/v1/skills')
@@ -18,6 +18,23 @@ export const toggleSkill = (name: string, enabled: boolean) =>
     body: { enabled },
   })
 
+/**
+ * 从外部智能体（Hermes / OpenClaw / 通用压缩包）导入技能。
+ * file: 用户选择的 .zip / .tgz 文件。
+ */
+export const importSkills = (file: File) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  return request<any>('/api/v1/skills/import', { method: 'POST', formData: fd })
+}
+
+/** 导出全部技能（zip，智枢原生 / Hermes 兼容格式）。 */
+export const exportSkills = () => downloadFile('/api/v1/skills/export', 'zhishu-skills.zip')
+
+/** 导出单个技能为 zip。 */
+export const exportSkill = (name: string) =>
+  downloadFile(`/api/v1/skills/${encodeURIComponent(name)}/export`, `zhishu-skill-${name}.zip`)
+
 export const skillsApi = {
   listSkills,
   getSkill,
@@ -25,4 +42,7 @@ export const skillsApi = {
   updateSkill,
   deleteSkill,
   toggleSkill,
+  importSkills,
+  exportSkills,
+  exportSkill,
 }
