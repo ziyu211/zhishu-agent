@@ -143,7 +143,8 @@ class ModuleIntegrator:
     async def connect_one(self, name: str, meta: Optional[dict] = None) -> dict:
         name = sanitize_name(name)
         meta = meta or read_meta("mcp", name)
-        client = MCPClient(name, meta or {})
+        from ...context import get_ctx
+        client = MCPClient(name, meta or {}, data_dir=get_ctx().cfg.server.data_dir)
         try:
             await client.connect()
         except Exception as e:

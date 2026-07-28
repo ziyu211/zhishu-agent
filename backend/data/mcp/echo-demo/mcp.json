@@ -1,0 +1,11 @@
+{
+  "name": "echo-demo",
+  "description": "本地回显 MCP 演示服务（纯标准库，零依赖），用于验证「智枢 ↔ MCP」连通。点击连接后即可在对话中调用 mcp__echo-demo__echo 工具。",
+  "version": "1.0.0",
+  "enabled": true,
+  "command": "auto",
+  "args": [
+    "mcp/echo-demo/server.py"
+  ],
+  "env": {}
+}

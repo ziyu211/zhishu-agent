@@ -42,3 +42,10 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# ===== 例外：内置 MCP 演示服务（静态示例，随仓库分发；非用户运行时数据）=====
+!backend/data/
+!backend/data/mcp/
+!backend/data/mcp/echo-demo/
+!backend/data/mcp/echo-demo/mcp.json
+!backend/data/mcp/echo-demo/server.py

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from typing import Any, Optional
 
 from ..tools import ToolRegistry, Tool, ToolContext
@@ -26,9 +27,10 @@ def _make_mcp_handler(client, tool_name: str):
 
 
 class MCPClient:
-    def __init__(self, name: str, config: dict):
+    def __init__(self, name: str, config: dict, data_dir: Optional[str] = None):
         self.name = name
         self.config = config
+        self.data_dir = data_dir
         self.transport = (config.get("transport") or "stdio").lower()
         self.proc = None
         self._req_id = 0
@@ -55,9 +57,23 @@ class MCPClient:
 
     async def _connect_stdio(self) -> None:
         cmd = self.config.get("command")
-        if not cmd:
-            raise RuntimeError("MCP 配置缺少 command")
+        # 双环境自适应：command 为 "auto" 时，使用运行后端自身的 Python 解释器
+        # （Docker 容器内即容器内 python；Windows 直跑即 venv python），避免把
+        # 容器路径（/app/...）或宿主路径写死进配置导致另一环境 [Errno 2]。
+        if not cmd or cmd == "auto":
+            cmd = sys.executable
         args = list(self.config.get("args") or [])
+        # 双环境自适应：args 中的相对路径视为相对于 data 目录，在运行时解析为
+        # 绝对路径，使同一份 mcp.json 在 Docker 与 Windows 下都能正确加载脚本。
+        if self.data_dir:
+            resolved = []
+            for a in args:
+                cand = os.path.join(self.data_dir, a)
+                if not os.path.isabs(a) and os.path.isfile(cand):
+                    resolved.append(os.path.abspath(cand))
+                else:
+                    resolved.append(a)
+            args = resolved
         env = dict(os.environ)
         env.update(self.config.get("env") or {})
         self.proc = await asyncio.create_subprocess_exec(
