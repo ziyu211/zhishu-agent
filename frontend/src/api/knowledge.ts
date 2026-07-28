@@ -35,12 +35,50 @@ export const searchKnowledge = (q: string, top_k = 5) =>
     `/api/v1/knowledge/search?q=${encodeURIComponent(q)}&top_k=${top_k}`,
   )
 export const knowledgeStats = () => request<KnowledgeStats>('/api/v1/knowledge/stats')
-export const getKnowledgeGraph = (limit = 300, minWeight = 1) =>
-  request<{
-    nodes: { name: string; freq: number; doc_count: number }[]
-    edges: { source: string; target: string; weight: number }[]
-    stats: { nodes: number; edges: number; returned_nodes: number; returned_edges: number }
-  }>(`/api/v1/knowledge/graph?limit=${limit}&min_weight=${minWeight}`)
+export interface KgNode {
+  name: string
+  freq: number
+  doc_count: number
+  docs?: string[]
+}
+export interface KgEdge {
+  source: string
+  target: string
+  weight: number
+  cross?: boolean
+  docs?: string[]
+}
+export interface KgDocRef {
+  doc_id: string
+  title: string
+}
+export interface KgGraphResp {
+  nodes: KgNode[]
+  edges: KgEdge[]
+  documents: KgDocRef[]
+  doc_ids?: string[]
+  stats: {
+    nodes: number
+    edges: number
+    returned_nodes: number
+    returned_edges: number
+    cross_edges?: number
+    docs?: number
+  }
+}
+export const getKnowledgeGraph = (
+  limit = 300,
+  minWeight = 1,
+  opts: { docIds?: string[]; crossDoc?: boolean } = {},
+) => {
+  const p = new URLSearchParams()
+  p.set('limit', String(limit))
+  p.set('min_weight', String(minWeight))
+  p.set('include_docs', 'true')
+  if (opts.crossDoc) p.set('cross_doc', 'true')
+  for (const id of opts.docIds || []) p.append('doc_ids', id)
+  return request<KgGraphResp>(`/api/v1/knowledge/graph?${p.toString()}`)
+}
 
 export const knowledgeApi = {
   ingestText,

@@ -134,14 +134,31 @@ async def stats(user=require_auth("knowledge:read")):
 async def graph(
     limit: int = Query(300, ge=10, le=2000, description="返回节点上限"),
     min_weight: int = Query(1, ge=1, description="边最小共现权重"),
+    doc_ids: list[str] | None = Query(None, description="按文档筛选子图（可多值）"),
+    cross_doc: bool = Query(False, description="是否附加跨文档共现弱边（虚线层）"),
+    include_docs: bool = Query(True, description="节点/边是否携带来源文档列表"),
     user=require_auth("knowledge:read"),
 ):
     """知识图谱（关键词共现网络）。
 
     普通用户仅见自己 + 共享文档贡献的子图；管理员（owner=None）可见全量。
+    响应额外携带 documents（可见文档 doc_id→标题映射，供前端筛选器与来源展示）。
     """
     ctx = get_ctx()
     if ctx.kb.graph is None:
-        return {"nodes": [], "edges": [], "stats": {"nodes": 0, "edges": 0}}
+        return {"nodes": [], "edges": [], "documents": [],
+                "stats": {"nodes": 0, "edges": 0}}
     owner = None if user.get("r") == "admin" else user.get("u")
-    return ctx.kb.graph.get_graph(owner=owner, limit=limit, min_weight=min_weight)
+    # 权限可见文档集合（普通用户=自己+共享；admin=全量，不过滤）
+    visible = ctx.kb.list_documents(owner=owner, limit=1000)
+    allowed = None if owner is None else [d["doc_id"] for d in visible]
+    g = ctx.kb.graph.get_graph(
+        owner=owner, limit=limit, min_weight=min_weight,
+        doc_ids=doc_ids, cross_doc=cross_doc, include_docs=include_docs,
+        allowed_doc_ids=allowed,
+    )
+    g["documents"] = [
+        {"doc_id": d["doc_id"], "title": d.get("title") or d["doc_id"]}
+        for d in visible
+    ]
+    return g

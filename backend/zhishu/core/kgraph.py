@@ -288,10 +288,143 @@ class KnowledgeGraph:
             logger.error("remove_document 失败 doc_id=%s: %s", doc_id, e)
 
     # ------------------------- 读取 -------------------------
+    def _load_payloads(self, doc_ids: list[str] | None = None,
+                       allowed_doc_ids: list[str] | None = None) -> dict:
+        """读取 kg_doc 中的逐文档明细。
+
+        doc_ids：用户显式筛选的文档集合（None=不筛选）；
+        allowed_doc_ids：权限可见集合（None=全部可见，如 admin）。
+        返回 {doc_id: {"kws": {词: 频次}, "edges": {"a|b": 权重}}}。
+        """
+        rows = self._conn.execute("SELECT doc_id, payload FROM kg_doc").fetchall()
+        sel = set(doc_ids) if doc_ids else None
+        allow = set(allowed_doc_ids) if allowed_doc_ids is not None else None
+        out: dict = {}
+        for doc_id, payload in rows:
+            if sel is not None and doc_id not in sel:
+                continue
+            if allow is not None and doc_id not in allow:
+                continue
+            try:
+                out[doc_id] = json.loads(payload)
+            except Exception:
+                continue
+        return out
+
+    @staticmethod
+    def _cross_doc_edges(node_docs: dict, intra_pairs: set,
+                         max_cross_edges: int = 300) -> list[dict]:
+        """跨文档共现弱边：两个关键词共同出现在 ≥2 篇文档中（不要求同分块），
+        且它们之间不存在文档内共现边。权重 = 共同文档数。"""
+        # 只有出现在 ≥2 篇文档的节点才可能产生跨文档边
+        multi = [(n, docs) for n, docs in node_docs.items() if len(docs) >= 2]
+        multi.sort(key=lambda x: -len(x[1]))
+        cross: list[dict] = []
+        n = len(multi)
+        for i in range(n):
+            a, da = multi[i]
+            for j in range(i + 1, n):
+                b, db = multi[j]
+                key = (a, b) if a <= b else (b, a)
+                if key in intra_pairs:
+                    continue
+                common = da & db
+                if len(common) >= 2:
+                    cross.append({
+                        "source": key[0], "target": key[1],
+                        "weight": len(common), "cross": True,
+                        "docs": sorted(common),
+                    })
+        cross.sort(key=lambda e: -e["weight"])
+        return cross[:max_cross_edges]
+
+    def _graph_from_payloads(self, payloads: dict, limit: int, min_weight: int,
+                             max_edges: int, cross_doc: bool, include_docs: bool,
+                             max_cross_edges: int = 300) -> dict:
+        """基于逐文档明细聚合图谱（支持来源标注 / 文档筛选 / 跨文档弱边）。"""
+        # 节点聚合：词 -> 总频次 / {doc_id: 频次}
+        node_freq: Counter = Counter()
+        node_doc_freq: dict[str, dict] = {}
+        for doc_id, p in payloads.items():
+            for name, cnt in (p.get("kws") or {}).items():
+                node_freq[name] += int(cnt)
+                node_doc_freq.setdefault(name, {})[doc_id] = int(cnt)
+        top = node_freq.most_common(limit)
+        node_names = {n for n, _ in top}
+        nodes = []
+        for name, freq in top:
+            item = {"name": name, "freq": freq,
+                    "doc_count": len(node_doc_freq.get(name, {}))}
+            if include_docs:
+                # 按该词在各文档中的频次降序给出来源
+                dd = sorted(node_doc_freq.get(name, {}).items(), key=lambda x: -x[1])
+                item["docs"] = [d for d, _ in dd]
+            nodes.append(item)
+        # 文档内共现边聚合：pair -> 总权重 / 来源文档
+        edge_weight: Counter = Counter()
+        edge_docs: dict[tuple, set] = {}
+        for doc_id, p in payloads.items():
+            for pair, w in (p.get("edges") or {}).items():
+                a, _, b = pair.partition("|")
+                if a not in node_names or b not in node_names:
+                    continue
+                key = (a, b) if a <= b else (b, a)
+                edge_weight[key] += int(w)
+                edge_docs.setdefault(key, set()).add(doc_id)
+        edges = []
+        for (a, b), w in edge_weight.items():
+            if w < min_weight:
+                continue
+            item = {"source": a, "target": b, "weight": w, "cross": False}
+            if include_docs:
+                item["docs"] = sorted(edge_docs.get((a, b), set()))
+            edges.append(item)
+        edges.sort(key=lambda e: -e["weight"])
+        edges = edges[:max_edges]
+        # 跨文档共现弱边（虚线层）
+        cross_edges: list[dict] = []
+        if cross_doc:
+            node_docs = {n: set(node_doc_freq.get(n, {})) for n in node_names}
+            intra_pairs = set(edge_weight.keys())
+            cross_edges = self._cross_doc_edges(node_docs, intra_pairs, max_cross_edges)
+            if not include_docs:
+                for e in cross_edges:
+                    e.pop("docs", None)
+        c = self._conn
+        total_nodes = c.execute("SELECT COUNT(*) FROM kg_nodes").fetchone()[0]
+        total_edges = c.execute("SELECT COUNT(*) FROM kg_edges").fetchone()[0]
+        return {
+            "nodes": nodes,
+            "edges": edges + cross_edges,
+            "doc_ids": sorted(payloads.keys()),
+            "stats": {
+                "nodes": total_nodes, "edges": total_edges,
+                "returned_nodes": len(nodes), "returned_edges": len(edges),
+                "cross_edges": len(cross_edges), "docs": len(payloads),
+            },
+        }
+
     def get_graph(self, owner: str | None = None, limit: int = 300, min_weight: int = 1,
-                   max_edges: int = 2000) -> dict:
+                   max_edges: int = 2000, doc_ids: list[str] | None = None,
+                   cross_doc: bool = False, include_docs: bool = False,
+                   allowed_doc_ids: list[str] | None = None) -> dict:
         if not self.enabled:
             return {"nodes": [], "edges": [], "stats": {"nodes": 0, "edges": 0}}
+        # 优先走逐文档明细路径（支持筛选/来源/跨文档边）；
+        # kg_doc 无数据（极早期库）时回退聚合表路径。
+        try:
+            payloads = self._load_payloads(doc_ids, allowed_doc_ids)
+        except Exception as e:
+            logger.warning("读取 kg_doc 失败，回退聚合表：%s", e)
+            payloads = {}
+        if payloads:
+            return self._graph_from_payloads(
+                payloads, limit, min_weight, max_edges, cross_doc, include_docs)
+        if doc_ids or allowed_doc_ids is not None:
+            # 显式筛选/权限过滤后为空 → 返回空图，而非全量
+            return {"nodes": [], "edges": [], "doc_ids": [],
+                    "stats": {"nodes": 0, "edges": 0, "returned_nodes": 0,
+                              "returned_edges": 0, "cross_edges": 0, "docs": 0}}
         c = self._conn
         # 节点（按 freq 降序），owner 过滤
         rows = c.execute(
