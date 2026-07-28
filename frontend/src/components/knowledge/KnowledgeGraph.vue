@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { NButton, NEmpty, NSpin, NSelect, NSwitch, useMessage, NTag } from 'naive-ui'
-import { getKnowledgeGraph, type KgGraphResp, type KgDocRef } from '@/api/knowledge'
+import { getKnowledgeGraph, type KgGraphResp, type KgDocRef, type KgEdge } from '@/api/knowledge'
 
 const message = useMessage()
 const chartEl = ref<HTMLElement | null>(null)
@@ -20,6 +20,13 @@ const limitOpts = [
   { label: '300 节点', value: 300 },
   { label: '500 节点', value: 500 },
 ]
+// 关联强度：默认只显示强关联，过滤单次共现的噪音边
+const minW = ref(2)
+const minWOpts = [
+  { label: '全部关联', value: 1 },
+  { label: '强关联 (≥2)', value: 2 },
+  { label: '极强关联 (≥3)', value: 3 },
+]
 // —— 文档筛选与跨文档开关 ——
 const docFilter = ref<string[]>([]) // 空数组 = 全部文档
 const crossDoc = ref(false)
@@ -36,10 +43,10 @@ const selected = ref<{
 
 let chart: echarts.ECharts | null = null
 
-// —— 配色 ——
-// 文档专属色板（按文档在列表中的顺序取色）；多文档节点用琥珀色标识
-const DOC_PALETTE = ['#5b9bff', '#5bd6a6', '#ff7a8a', '#c98bff', '#5bd0e6', '#ff9f5b', '#9be15b', '#f27bc0', '#8f9fff', '#5bc8b0']
-const MULTI_DOC_COLOR = '#ffce5b'
+// —— 配色（清爽莫兰迪色板，按文档顺序取色）——
+const DOC_PALETTE = ['#6ea8ff', '#5fd0a8', '#ff8a9b', '#c89bff', '#5cc8e0', '#ffb15b', '#a8e05f', '#f48cc0', '#8f9bff', '#5bc8b0']
+const MULTI_DOC_COLOR = '#ffd166'
+const CROSS_COLOR = '#f4a261'
 const FALLBACK = '#7c8aa5'
 
 const docColorMap = computed<Record<string, string>>(() => {
@@ -61,44 +68,69 @@ const legendDocs = computed<KgDocRef[]>(() => {
   return graph.value.documents.filter((d) => used.has(d.doc_id))
 })
 
+// 常驻标签：仅高频重要节点（其余靠 hover/点击显示），避免文字堆叠
+const labelTopSet = computed<Set<string>>(() => {
+  const arr = [...graph.value.nodes].sort((a, b) => b.freq - a.freq)
+  const topN = Math.min(36, Math.max(8, Math.floor(arr.length * 0.4)))
+  return new Set(arr.slice(0, topN).map((n) => n.name))
+})
+
 function docTitles(ids?: string[]): string[] {
   return (ids || []).map((id) => docTitleMap.value[id] || id)
 }
-
 function nodeColor(docs?: string[]): string {
   if (!docs || docs.length === 0) return FALLBACK
   if (docs.length === 1) return docColorMap.value[docs[0]] || FALLBACK
   return MULTI_DOC_COLOR
 }
+// 边着色：同一文档内的关联用该文档色（成色簇），跨文档用琥珀，多文档共现取首色
+function edgeColor(e: KgEdge): string {
+  if (e.cross) return CROSS_COLOR
+  const ds = e.docs || []
+  if (ds.length === 1) return docColorMap.value[ds[0]] || FALLBACK
+  return FALLBACK
+}
 
 function buildOption() {
+  const total = graph.value.nodes.length || 1
+  // 斥力自适应：节点越多越散，避免挤成一团
+  const repulsion = Math.min(720, Math.max(170, Math.round(2600 / Math.sqrt(total))))
+  const edgeLen: [number, number] = [50, Math.min(200, 45 + total * 1.1)]
+  const top = labelTopSet.value
+
   const nodes = graph.value.nodes.map((n) => ({
     name: n.name,
     value: n.freq,
-    symbolSize: 10 + Math.sqrt(n.freq) * 6,
+    symbolSize: 9 + Math.sqrt(n.freq) * 4.2,
     itemStyle: {
       color: nodeColor(n.docs),
-      // 多文档节点加描边强调「桥接」身份
-      borderColor: (n.docs?.length || 0) > 1 ? '#fff' : 'transparent',
+      borderColor: (n.docs?.length || 0) > 1 ? 'rgba(255,255,255,0.9)' : 'transparent',
       borderWidth: (n.docs?.length || 0) > 1 ? 1.5 : 0,
+      shadowBlur: 6,
+      shadowColor: 'rgba(0,0,0,0.35)',
     },
+    label: { show: top.has(n.name) },
     _doc: n.doc_count,
     _docs: n.docs || [],
   }))
-  const links = graph.value.edges.map((e) => ({
-    source: e.source,
-    target: e.target,
-    value: e.weight,
-    _cross: !!e.cross,
-    _docs: e.docs || [],
-    lineStyle: e.cross
-      ? { width: 1, opacity: 0.35, color: '#e8b45b', type: 'dashed' as const, curveness: 0.2 }
-      : {
-          width: Math.min(1 + e.weight, 8),
-          opacity: 0.25 + Math.min(e.weight / 8, 0.55),
-          color: '#7c8aa5',
-        },
-  }))
+  const links = graph.value.edges.map((e) => {
+    const w = e.weight
+    const isCross = !!e.cross
+    return {
+      source: e.source,
+      target: e.target,
+      value: w,
+      _cross: isCross,
+      _docs: e.docs || [],
+      lineStyle: isCross
+        ? { width: 1, opacity: 0.5, color: CROSS_COLOR, type: 'dashed' as const, curveness: 0.22 }
+        : {
+            width: Math.min(0.6 + w * 0.9, 7),
+            opacity: 0.14 + Math.min(w / 10, 0.5),
+            color: edgeColor(e),
+          },
+    }
+  })
   return {
     backgroundColor: 'transparent',
     tooltip: {
@@ -115,24 +147,38 @@ function buildOption() {
         }
         if (p.data._cross) {
           const src = docTitles(p.data._docs)
-          return `${p.data.source} ⇢ ${p.data.target}<br/><span style="color:#e8b45b">跨文档共现</span>：共同出现于 ${p.data.value} 篇文档${src.length ? `<br/>${src.map((t) => `「${t}」`).join(' ')}` : ''}`
+          return `${p.data.source} ⇢ ${p.data.target}<br/><span style="color:${CROSS_COLOR}">跨文档共现</span>：共同出现于 ${p.data.value} 篇文档${src.length ? `<br/>${src.map((t) => `「${t}」`).join(' ')}` : ''}`
         }
         const src = docTitles(p.data._docs)
-        return `${p.data.source} ↔ ${p.data.target}<br/>共现强度：${p.data.value}${src.length ? `<br/>来源文档：${src.map((t) => `「${t}」`).join(' ')}` : ''}`
+        return `${p.data.source} — ${p.data.target}<br/>共现强度：${p.data.value}${src.length ? `<br/>来源文档：${src.map((t) => `「${t}」`).join(' ')}` : ''}`
       },
     },
-    animationDuration: 1200,
+    animationDuration: 1000,
+    animationEasingUpdate: 'quinticInOut',
     series: [
       {
         type: 'graph',
         layout: 'force',
         roam: true,
         draggable: true,
-        force: { repulsion: 200, edgeLength: [50, 140], gravity: 0.08, friction: 0.15 },
-        label: { show: true, fontSize: 12, color: '#d6deea', formatter: (p: any) => p.data.name },
+        force: { repulsion, edgeLength: edgeLen, gravity: 0.05, friction: 0.18, layoutAnimation: true },
+        label: {
+          show: false,
+          fontSize: 11,
+          color: '#e8eef7',
+          position: 'right',
+          textBorderColor: 'rgba(7,11,18,0.92)',
+          textBorderWidth: 3,
+          formatter: (p: any) => p.data.name,
+        },
         edgeSymbol: ['none', 'none'],
-        lineStyle: { curveness: 0.08 },
-        emphasis: { focus: 'adjacency', scale: true, label: { show: true } },
+        lineStyle: { curveness: 0.06 },
+        emphasis: {
+          focus: 'adjacency',
+          scale: true,
+          label: { show: true },
+          lineStyle: { width: 2.2, opacity: 0.85 },
+        },
         data: nodes,
         links,
       },
@@ -152,8 +198,6 @@ function render() {
 
 let ro: ResizeObserver | null = null
 
-// 在容器可见且有正确尺寸后再初始化图表，避免其在隐藏容器里以 0 尺寸初始化
-// （那样只会在左上角渲染出残缺的一小块）
 async function ensureChart() {
   await nextTick()
   if (!chart && chartEl.value) {
@@ -172,7 +216,7 @@ async function load() {
   loading.value = true
   selected.value = null
   try {
-    const r = await getKnowledgeGraph(limit.value, 1, {
+    const r = await getKnowledgeGraph(limit.value, minW.value, {
       docIds: docFilter.value.length ? docFilter.value : undefined,
       crossDoc: crossDoc.value,
     })
@@ -226,29 +270,35 @@ onUnmounted(() => {
 <template>
   <div class="kg-wrap">
     <div class="kg-toolbar">
-      <NButton size="small" type="primary" :loading="loading" @click="load">刷新图谱</NButton>
-      <NSelect v-model:value="limit" :options="limitOpts" size="small" style="width: 130px" @update:value="load" />
-      <NSelect
-        v-model:value="docFilter"
-        :options="docOptions"
-        multiple
-        clearable
-        size="small"
-        style="min-width: 220px; max-width: 420px"
-        placeholder="全部文档（可多选筛选）"
-        max-tag-count="responsive"
-        @update:value="load"
-      />
-      <label class="kg-switch">
-        <NSwitch v-model:value="crossDoc" size="small" @update:value="load" />
-        <span>跨文档共现</span>
-      </label>
-      <span class="kg-stat">
-        展示 <b>{{ graph.stats.returned_nodes }}</b> 节点 / <b>{{ graph.stats.returned_edges }}</b> 关系
-        <template v-if="crossDoc && graph.stats.cross_edges"> + <b class="cross">{{ graph.stats.cross_edges }}</b> 跨文档</template>
-        （库内共 {{ graph.stats.nodes }} 节点）
-      </span>
-      <span class="kg-tip">节点色=来源文档 · 白边=多文档 · 虚线=跨文档共现</span>
+      <div class="kg-group">
+        <NButton size="small" type="primary" :loading="loading" @click="load">刷新图谱</NButton>
+        <NSelect v-model:value="limit" :options="limitOpts" size="small" style="width: 116px" @update:value="load" />
+        <NSelect v-model:value="minW" :options="minWOpts" size="small" style="width: 132px" @update:value="load" />
+      </div>
+      <div class="kg-group">
+        <NSelect
+          v-model:value="docFilter"
+          :options="docOptions"
+          multiple
+          clearable
+          size="small"
+          style="min-width: 200px; max-width: 380px"
+          placeholder="全部文档（可多选筛选）"
+          max-tag-count="responsive"
+          @update:value="load"
+        />
+        <label class="kg-switch">
+          <NSwitch v-model:value="crossDoc" size="small" @update:value="load" />
+          <span>跨文档</span>
+        </label>
+      </div>
+      <div class="kg-group kg-info">
+        <span class="kg-stat">
+          <b>{{ graph.stats.returned_nodes }}</b> 节点 / <b>{{ graph.stats.returned_edges }}</b> 关系
+          <template v-if="crossDoc && graph.stats.cross_edges"> · <b class="cross">{{ graph.stats.cross_edges }}</b> 跨文档</template>
+        </span>
+        <span class="kg-tip">拖拽平移 · 滚轮缩放 · 悬停聚焦邻域</span>
+      </div>
     </div>
 
     <div v-if="legendDocs.length" class="kg-legend">
@@ -263,6 +313,7 @@ onUnmounted(() => {
       <span v-if="legendDocs.length > 1" class="kg-legend-item">
         <span class="kg-dot multi"></span>多文档共有
       </span>
+      <span class="kg-legend-item"><span class="kg-line"></span>同色 = 同文档内关联</span>
     </div>
 
     <NSpin :show="loading">
@@ -307,25 +358,31 @@ onUnmounted(() => {
 @use '@/styles/variables' as *;
 .kg-wrap { display: flex; flex-direction: column; height: 100%; }
 .kg-toolbar {
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  padding: 4px 2px 10px;
+  display: flex; align-items: center; flex-wrap: wrap;
+  gap: 10px; padding: 4px 2px 10px;
 }
+.kg-group {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding-left: 12px; margin-left: 2px;
+  border-left: 1px solid $border-color;
+  &:first-child { border-left: none; padding-left: 0; margin-left: 0; }
+}
+.kg-info { margin-left: auto; }
 .kg-switch { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: $text-secondary; cursor: pointer; }
-.kg-stat { font-size: 13px; color: $text-secondary; b { color: $text-primary; } .cross { color: #e8b45b; } }
-.kg-tip { font-size: 11px; color: $text-muted; margin-left: auto; }
+.kg-stat { font-size: 13px; color: $text-secondary; b { color: $text-primary; } .cross { color: #f4a261; } }
+.kg-tip { font-size: 11px; color: $text-muted; margin-left: 10px; }
 .kg-legend {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   padding: 0 2px 10px; font-size: 12px; color: $text-secondary;
 }
 .kg-legend-item { display: inline-flex; align-items: center; gap: 5px; &.dim { opacity: 0.35; } }
-.kg-empty { padding: 80px 0; }
 .kg-canvas-wrap { position: relative; width: 100%; }
 .kg-empty-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .kg-chart {
   width: 100%;
   height: calc(100vh - 250px);
   min-height: 440px;
-  background: #0f1623;
+  background: radial-gradient(circle at 50% 38%, #131c2c 0%, #0d1420 100%);
   border: 1px solid $border-color;
   border-radius: $radius-md;
 }
@@ -337,7 +394,8 @@ onUnmounted(() => {
   border-radius: $radius-md;
 }
 .kg-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.kg-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; &.multi { background: #ffce5b; box-shadow: 0 0 0 1.5px #fff inset; } }
+.kg-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; &.multi { background: #ffd166; box-shadow: 0 0 0 1.5px #fff inset; } }
+.kg-line { width: 18px; height: 3px; border-radius: 2px; background: $text-secondary; display: inline-block; opacity: 0.6; }
 .kg-detail-rel { margin-top: 8px; font-size: 12px; color: $text-secondary; }
 .rel-tag { margin: 2px 4px 2px 0; }
 .muted { color: $text-muted; }
