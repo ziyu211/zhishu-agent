@@ -121,8 +121,9 @@ zhishu-agent/
 │   └── src/ ...
 └── deploy/
     ├── zhishu.yaml.example   # 示例配置（复制为 zhishu.yaml 后填入密钥，真实配置不入库）
-    ├── Dockerfile            # 容器化部署
-    └── docker-compose.yml
+    ├── Dockerfile            # 标准容器化构建（node:18-alpine + python:3.11-slim）
+    ├── Dockerfile.local      # 受限/离线网络专用（华为云 SWR 基础镜像 + 国内源，零代理）
+    └── docker-compose.yml    # 一键编排（后端 + 可选本地 Ollama）
 ```
 
 ---
@@ -191,6 +192,82 @@ cd backend && python start_backend.py
 | `memory` | — | 长期记忆存储路径与策略 |
 
 完整字段见 `deploy/zhishu.yaml.example`。
+
+---
+
+## 八、Docker 容器化部署
+
+镜像为「单进程」设计：一个容器同时跑 Agent 引擎 + REST/SSE API + 编译后的前端，对外只暴露 `8080`。
+
+### 8.1 准备配置
+
+```bash
+cp deploy/zhishu.yaml.example deploy/zhishu.yaml
+# 编辑 deploy/zhishu.yaml，填入 Provider api_key、管理员密码等
+# 该文件已被 .gitignore 忽略，不会进入任何提交
+```
+
+### 8.2 构建镜像
+
+提供两份 Dockerfile：
+
+- `deploy/Dockerfile`：标准构建，基础镜像 `node:18-alpine` + `python:3.11-slim`，需要能访问 `docker.io`（或配置镜像加速）。
+- `deploy/Dockerfile.local`：**受限 / 离线网络专用**，基础镜像走华为云 SWR（`ddn-k8s` 代理，直连可达，无需 `docker.io` / 代理），npm 走 npmmirror、pip 走腾讯云镜像。构建命令见文件头注释。
+
+```bash
+# 标准（需 docker.io 可达）
+docker build -t zhishu-agent:1.0.0 -f deploy/Dockerfile .
+
+# 受限网络 / 国内零代理（推荐内网、本机）
+docker build -t zhishu-agent:1.0.0 -f deploy/Dockerfile.local .
+```
+
+> 构建会把 `deploy/zhishu.yaml` 打进镜像。若不想把密钥烧进镜像层，可先用占位配置（不填真实 Key）构建，运行时用只读卷挂载真实配置覆盖（见 8.4）。
+
+### 8.3 运行（docker run）
+
+```bash
+docker run -d --name zsagent \
+  -p 8080:8080 \
+  -v zsagent_data:/app/backend/data \
+  --restart unless-stopped \
+  zhishu-agent:1.0.0
+```
+
+- `-v zsagent_data:/app/backend/data`：持久化向量库（`zhishu_vector.db`）、会话记忆与 `providers.json`，容器重建不丢数据。
+- 浏览器打开 http://localhost:8080 ，默认账号 `admin` / `zhishu@2026`（生产请改 `deploy/zhishu.yaml` 的 `admin_password`）。
+
+### 8.4 配置不烧进镜像（推荐生产）
+
+先用占位配置构建（不填真实 Key），运行时只读挂载真实配置覆盖：
+
+```bash
+cp deploy/zhishu.yaml.example deploy/zhishu.yaml   # 占位，勿填真实 Key
+docker build -t zhishu-agent:1.0.0 -f deploy/Dockerfile.local .
+docker run -d --name zsagent -p 8080:8080 \
+  -v "$(pwd)/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro" \
+  -v zsagent_data:/app/backend/data \
+  --restart unless-stopped zhishu-agent:1.0.0
+```
+
+### 8.5 一键编排（docker compose）
+
+```bash
+# 先准备好 deploy/zhishu.yaml
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+compose 已声明 `zhishu-data` 数据卷与 `8080` 端口映射；可选启用内置的 Ollama 服务（取消注释 `ollama:` 段）做内网离线推理。
+
+### 8.6 健康检查与排错
+
+```bash
+curl http://localhost:8080/health     # 期望 {"status":"ok",...}
+docker logs -f zsagent                 # 查看启动 / 对话日志
+```
+
+- 若对话报「所有 LLM Provider 均不可用 / 429」：说明配置的 Provider 配额耗尽或不可达，需更换或补充 `providers.json` 中的可用 Key（在 `deploy/zhishu.yaml` 的 providers 段或运行时数据卷内调整）。
+- 容器重启后配置与记忆均在 `zsagent_data` 卷中保留。
 
 ---
 
