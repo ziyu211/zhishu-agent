@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { NButton, NInput, NModal, NSelect, useMessage } from 'naive-ui'
 import { useChatStore } from '@/stores/chat'
 import { useAppStore } from '@/stores/app'
@@ -14,8 +14,29 @@ const chat = useChatStore()
 const app = useAppStore()
 const message = useMessage()
 
+const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
+function onFocusMessage(id: string) {
+  messageListRef.value?.scrollToMessage(id)
+}
+
 const showSessions = ref(true)
-const showGraph = ref(false)
+// 思维图谱面板开关：持久化到 localStorage，刷新后保持
+const GRAPH_OPEN_KEY = 'zhishu:tgOpen'
+function loadGraphOpen(): boolean {
+  try {
+    return localStorage.getItem(GRAPH_OPEN_KEY) === '1'
+  } catch {
+    return false
+  }
+}
+const showGraph = ref(loadGraphOpen())
+watch(showGraph, (v) => {
+  try {
+    localStorage.setItem(GRAPH_OPEN_KEY, v ? '1' : '0')
+  } catch {
+    /* ignore */
+  }
+})
 const showRename = ref(false)
 const renameValue = ref('')
 const renameId = ref('')
@@ -202,7 +223,7 @@ onMounted(() => {
         </div>
       </header>
 
-      <MessageList />
+      <MessageList ref="messageListRef" />
       <ChatInput />
       <DocViewer />
     </div>
@@ -211,6 +232,7 @@ onMounted(() => {
       v-if="showGraph"
       :messages="chat.active?.messages || []"
       @close="showGraph = false"
+      @focus-message="onFocusMessage"
     />
 
     <NModal

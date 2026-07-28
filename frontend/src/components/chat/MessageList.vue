@@ -19,6 +19,23 @@ watch(
   () => chat.active?.messages.map((m) => m.content + (m.toolResult || '')).join('|'),
   scrollToBottom,
 )
+
+/** 滚动到指定消息并短暂高亮（供思维图谱「点击概念跳转」使用）。 */
+function scrollToMessage(id: string) {
+  nextTick(() => {
+    const boxEl = box.value
+    if (!boxEl) return
+    const el = Array.from(boxEl.querySelectorAll<HTMLElement>('[data-mid]')).find(
+      (e) => e.dataset.mid === id,
+    )
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.add('msg-flash')
+    window.setTimeout(() => el.classList.remove('msg-flash'), 1600)
+  })
+}
+
+defineExpose({ scrollToMessage })
 </script>
 
 <template>
@@ -30,11 +47,14 @@ watch(
     </div>
 
     <template v-else>
-      <MessageItem
+      <div
         v-for="m in chat.active.messages"
         :key="m.id"
-        :message="m"
-      />
+        class="msg-row"
+        :data-mid="m.id"
+      >
+        <MessageItem :message="m" />
+      </div>
     </template>
   </div>
 </template>
@@ -58,5 +78,16 @@ watch(
   svg { margin-bottom: 8px; opacity: 0.6; }
   p { font-size: 14px; margin: 0; }
   .empty-sub { font-size: 12px; }
+}
+
+/* 思维图谱「点击概念跳转」时短暂高亮目标消息 */
+.msg-row.msg-flash {
+  animation: msgFlash 1.6s ease-out;
+  border-radius: 12px;
+}
+@keyframes msgFlash {
+  0% { box-shadow: 0 0 0 2px $accent-primary; }
+  55% { box-shadow: 0 0 0 2px rgba(120, 150, 255, 0.45); }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 </style>

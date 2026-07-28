@@ -6,6 +6,7 @@ import {
   reasoningToSteps,
   sessionReasoning,
   extractConcepts,
+  buildConceptMessageMap,
   createForceSimulation,
   nodeRadius,
   type ThinkingStep,
@@ -14,10 +15,28 @@ import {
 } from '@/composables/useThinkingGraph'
 
 const props = defineProps<{ messages: Msg[] }>()
-const emit = defineEmits<{ (e: 'close'): void }>()
+const emit = defineEmits<{
+  (e: 'close'): void
+  (e: 'focus-message', id: string): void
+}>()
 
-/* ── Tab 状态 ─────────────────────────────── */
-const tab = ref<'steps' | 'concepts'>('steps')
+/* ── Tab 状态（持久化到 localStorage，跨刷新保持） ── */
+const TAB_KEY = 'zhishu:tgTab'
+function loadTab(): 'steps' | 'concepts' {
+  try {
+    return localStorage.getItem(TAB_KEY) === 'concepts' ? 'concepts' : 'steps'
+  } catch {
+    return 'steps'
+  }
+}
+const tab = ref<'steps' | 'concepts'>(loadTab())
+watch(tab, (v) => {
+  try {
+    localStorage.setItem(TAB_KEY, v)
+  } catch {
+    /* ignore */
+  }
+})
 
 /* ── 数据源 ───────────────────────────────── */
 const hasReasoning = computed(() =>
@@ -26,6 +45,7 @@ const hasReasoning = computed(() =>
 const reasoning = computed(() => sessionReasoning(props.messages))
 const steps = computed<ThinkingStep[]>(() => reasoningToSteps(reasoning.value))
 const graph = computed<ConceptGraph>(() => extractConcepts(reasoning.value))
+const conceptMsgMap = computed(() => buildConceptMessageMap(props.messages, graph.value.nodes))
 
 const KIND_LABEL: Record<string, string> = {
   goal: '目标',
@@ -102,16 +122,23 @@ const edgeVisible = (e: { source: string; target: string }) => {
 const nodePos = (id: string): SimNode | undefined => sim?.getNode(id)
 const nodeDimmed = (id: string) => !!hoverId.value && hoverId.value !== id
 
-/* ── 拖拽节点 ─────────────────────────────── */
+/* ── 拖拽节点（区分点击：未移动则视为点击跳转） ── */
 let dragId: string | null = null
+let downX = 0
+let downY = 0
+let moved = false
 function onNodeDown(e: PointerEvent, id: string) {
   dragId = id
+  downX = e.clientX
+  downY = e.clientY
+  moved = false
   const n = sim?.getNode(id)
   if (n) n.fixed = true
   ;(e.target as Element).setPointerCapture?.(e.pointerId)
 }
 function onNodeMove(e: PointerEvent) {
   if (!dragId || !sim || !graphBox.value) return
+  if (Math.abs(e.clientX - downX) > 4 || Math.abs(e.clientY - downY) > 4) moved = true
   const rect = graphBox.value.getBoundingClientRect()
   const n = sim.getNode(dragId)
   if (!n) return
@@ -124,6 +151,11 @@ function onNodeUp() {
   if (dragId && sim) {
     const n = sim.getNode(dragId)
     if (n) n.fixed = false
+    // 视为点击（非拖拽）：跳转到该概念首次出现的对话消息
+    if (!moved) {
+      const mid = conceptMsgMap.value.get(dragId)
+      if (mid) emit('focus-message', mid)
+    }
   }
   dragId = null
 }
@@ -257,12 +289,14 @@ onBeforeUnmount(() => {
                 :key="n.id"
                 class="tg-node"
                 :class="{ dim: nodeDimmed(n.id) }"
+                :style="{ cursor: conceptMsgMap.get(n.id) ? 'pointer' : 'grab' }"
                 @pointerenter="hoverId = n.id"
                 @pointerleave="hoverId = null"
                 @pointerdown="onNodeDown($event, n.id)"
                 @pointermove="onNodeMove"
                 @pointerup="onNodeUp"
               >
+                <title v-if="conceptMsgMap.get(n.id)">点击跳转到相关对话</title>
                 <circle
                   :cx="nodePos(n.id)?.x"
                   :cy="nodePos(n.id)?.y"

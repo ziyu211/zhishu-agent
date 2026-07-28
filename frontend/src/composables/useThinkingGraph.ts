@@ -258,6 +258,45 @@ export function sessionReasoning(messages: Msg[]): string {
     .join('\n\n')
 }
 
+/** 文本是否包含某术语：英文按整词边界匹配，中文按子串匹配。 */
+export function textContains(term: string, text: string): boolean {
+  const lower = text.toLowerCase()
+  if (/[a-z]/.test(term)) {
+    const re = new RegExp(`(^|[^a-z0-9])${escapeRe(term)}([^a-z0-9]|$)`, 'i')
+    return re.test(lower)
+  }
+  return lower.includes(term.toLowerCase())
+}
+
+/** 转义正则特殊字符，用于把术语安全地嵌入 RegExp。 */
+function escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * 为概念图谱的每个节点（term）找到其首次出现的消息 id，
+ * 用于「点击概念节点 → 跳转并高亮对应对话消息」。
+ * @param messages 会话消息（含 assistant.reasoning）
+ * @param nodes    概念图谱节点（来自 extractConcepts）
+ * @returns Map<term, messageId>
+ */
+export function buildConceptMessageMap(
+  messages: Msg[],
+  nodes: ConceptNode[],
+): Map<string, string> {
+  const map = new Map<string, string>()
+  if (!nodes.length) return map
+  for (const m of messages) {
+    if (m.role !== 'assistant' || !m.reasoning) continue
+    for (const nd of nodes) {
+      if (!map.has(nd.id) && textContains(nd.id, m.reasoning)) {
+        map.set(nd.id, m.id)
+      }
+    }
+  }
+  return map
+}
+
 /* ───────────────────────── 零依赖力导向布局 ───────────────────────── */
 
 export interface SimNode {
