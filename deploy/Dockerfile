@@ -19,8 +19,9 @@ WORKDIR /app
 # 使用国内 pip 镜像（离线环境可改为私有源或离线 wheels 目录）
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple
 
-# 安装 Python 依赖
+# 安装 Python 依赖（requirements.txt 在项目根，需一并复制进 backend/）
 COPY backend/ ./backend/
+COPY requirements.txt ./backend/requirements.txt
 COPY --from=fe /app/backend/zhishu/static ./backend/zhishu/static
 RUN pip install --no-cache-dir -r backend/requirements.txt
 

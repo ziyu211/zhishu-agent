@@ -1,0 +1,19 @@
+# 构建上下文排除项（避免把本地环境/数据打进镜像）
+.git
+**/.git
+backend/.venv
+frontend/node_modules
+node_modules
+data
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+_old_builds
+backend_run.log
+*.log
+*.pyc
+__pycache__
+**/__pycache__
+.workbuddy
+**/.workbuddy
+.DS_Store
