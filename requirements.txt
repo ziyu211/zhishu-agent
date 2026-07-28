@@ -12,6 +12,11 @@ jinja2>=3.1
 python-multipart>=0.0.9
 sse-starlette>=2.1
 
+# ---- 文档解析：PDF / 文本型附件（必装，read_file 提取 PDF 文本依赖）----
+PyMuPDF>=1.24          # 首选 PDF 文本/版面提取（fitz）
+pypdf>=4.0             # PyMuPDF 不可用时的兜底 PDF 解析
+pdfminer.six>=20221105 # 进一步兜底（pdfminer.high_level.extract_text）
+
 # ---- 可选：离线 Embedding / 本地模型（按需，缺失则自动降级）----
 # sentence-transformers>=2.5      # 本地加载 bge-zh / m3e
 # torch>=2.1                      # sentence-transformers 依赖

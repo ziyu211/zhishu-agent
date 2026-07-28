@@ -26,9 +26,12 @@ const emit = defineEmits<{
 const TAB_KEY = 'zhishu:tgTab'
 function loadTab(): 'steps' | 'concepts' {
   try {
-    return localStorage.getItem(TAB_KEY) === 'concepts' ? 'concepts' : 'steps'
+    const v = localStorage.getItem(TAB_KEY)
+    if (v === 'steps' || v === 'concepts') return v
+    // 默认展示「概念图谱」：即使模型尚未思考，也能即时预览「细胞」式基础点
+    return 'concepts'
   } catch {
-    return 'steps'
+    return 'concepts'
   }
 }
 const tab = ref<'steps' | 'concepts'>(loadTab())
@@ -243,18 +246,16 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="tg-body">
-      <!-- 空态：整会话都没有思考过程 -->
-      <div v-if="!hasReasoning" class="tg-empty">
-        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.3h6c0-1 .4-1.8 1-2.3A7 7 0 0 0 12 2z" />
-        </svg>
-        <p>模型尚未产生思考过程</p>
-        <span>当模型以 &lt;think&gt; 输出深度思考时，这里会自动绘制推理链路与概念网络。</span>
-      </div>
-
       <!-- 推理步骤 -->
-      <div v-else-if="tab === 'steps'" class="tg-steps">
-        <div v-if="steps.length === 0" class="tg-empty">
+      <div v-if="tab === 'steps'" class="tg-steps">
+        <div v-if="!hasReasoning" class="tg-empty">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.3 1 2.3h6c0-1 .4-1.8 1-2.3A7 7 0 0 0 12 2z" />
+          </svg>
+          <p>模型尚未产生思考过程</p>
+          <span>当模型以 &lt;think&gt; 输出深度思考时，这里会自动绘制推理步骤链。切到「概念图谱」即可基于当前提问即时预览。</span>
+        </div>
+        <div v-else-if="steps.length === 0" class="tg-empty">
           <p>暂无可解析的步骤</p>
           <span>思考文本中没有明显的编号或过渡结构，暂无法拆为步骤链。</span>
         </div>
