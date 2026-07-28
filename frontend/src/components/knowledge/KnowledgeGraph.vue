@@ -88,6 +88,25 @@ function render() {
     return
   }
   chart.setOption(buildOption(), true)
+  chart.resize()
+}
+
+let ro: ResizeObserver | null = null
+
+// 在容器可见且有正确尺寸后再初始化图表，避免其在隐藏容器里以 0 尺寸初始化
+// （那样只会在左上角渲染出残缺的一小块）
+async function ensureChart() {
+  await nextTick()
+  if (!chart && chartEl.value) {
+    chart = echarts.init(chartEl.value, undefined, { renderer: 'canvas' })
+    chart.on('click', onChartClick)
+    window.addEventListener('resize', onResize)
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(() => chart?.resize())
+      ro.observe(chartEl.value)
+    }
+  }
+  requestAnimationFrame(() => chart?.resize())
 }
 
 async function load() {
@@ -96,7 +115,7 @@ async function load() {
   try {
     const r = await getKnowledgeGraph(limit.value, 1)
     graph.value = r
-    await nextTick()
+    await ensureChart()
     render()
   } catch (e: any) {
     message.error(e?.message || '加载知识图谱失败')
@@ -123,18 +142,14 @@ function onChartClick(params: any) {
     : null
 }
 
-onMounted(async () => {
-  await nextTick()
-  if (chartEl.value) {
-    chart = echarts.init(chartEl.value, undefined, { renderer: 'canvas' })
-    chart.on('click', onChartClick)
-    window.addEventListener('resize', onResize)
-  }
+onMounted(() => {
   load()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
+  ro?.disconnect()
+  ro = null
   chart?.dispose()
   chart = null
 })
@@ -153,10 +168,12 @@ onUnmounted(() => {
     </div>
 
     <NSpin :show="loading">
-      <div v-if="!loading && graph.nodes.length === 0" class="kg-empty">
-        <NEmpty description="暂无图谱数据，请先在「知识库」上传或粘贴文档" />
+      <div class="kg-canvas-wrap">
+        <div ref="chartEl" class="kg-chart"></div>
+        <div v-if="!loading && graph.nodes.length === 0" class="kg-empty-overlay">
+          <NEmpty description="暂无图谱数据，请先在「知识库」上传或粘贴文档" />
+        </div>
       </div>
-      <div v-show="graph.nodes.length" ref="chartEl" class="kg-chart"></div>
     </NSpin>
 
     <div v-if="selected" class="kg-detail">
@@ -191,6 +208,8 @@ onUnmounted(() => {
 .kg-stat { font-size: 13px; color: $text-secondary; b { color: $text-primary; } }
 .kg-tip { font-size: 11px; color: $text-muted; margin-left: auto; }
 .kg-empty { padding: 80px 0; }
+.kg-canvas-wrap { position: relative; width: 100%; }
+.kg-empty-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
 .kg-chart {
   width: 100%;
   height: calc(100vh - 220px);
