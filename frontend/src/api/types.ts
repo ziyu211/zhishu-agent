@@ -14,6 +14,9 @@ export interface LoginResp {
   token_type?: string
   user?: string
   role?: string
+  role_label?: string
+  display_name?: string
+  perms?: string[]
 }
 export interface ChangePasswordReq {
   old_password: string

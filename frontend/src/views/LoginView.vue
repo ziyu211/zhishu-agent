@@ -33,6 +33,7 @@ async function handleLogin() {
       role: res.role,
       role_label: res.role_label,
       display_name: res.display_name,
+      perms: res.perms || [],
     })
     const redirect = (route.query.redirect as string) || '/chat'
     router.replace(redirect)

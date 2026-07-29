@@ -51,12 +51,12 @@ class _ToggleBody(BaseModel):
 # 路由
 # ---------------------------------------------------------------------------
 @router.get("")
-async def get_agents(user=require_auth("*")):
+async def get_agents(user=require_auth("agents:read")):
     return {"agents": list_agents()}
 
 
 @router.get("/options")
-async def get_agent_options(user=require_auth("*")):
+async def get_agent_options(user=require_auth("agents:read")):
     """供聊天页选择器使用：返回已启用子智能体（name + description）。"""
     items = [
         {"name": a["name"], "description": a.get("description", "")}
@@ -66,7 +66,7 @@ async def get_agent_options(user=require_auth("*")):
 
 
 @router.get("/{name}")
-async def get_agent(name: str, user=require_auth("*")):
+async def get_agent(name: str, user=require_auth("agents:read")):
     if not os.path.isdir(os.path.join(_agents_base(), name)):
         raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
     info = read_agent_meta(name)
@@ -76,7 +76,7 @@ async def get_agent(name: str, user=require_auth("*")):
 
 
 @router.post("")
-async def create_agent(body: AgentBody, user=require_auth("admin")):
+async def create_agent(body: AgentBody, user=require_auth("agents:write")):
     name = sanitize_name(body.name)
     if not name:
         raise HTTPException(status_code=400, detail="子智能体名称非法")
@@ -99,7 +99,7 @@ async def create_agent(body: AgentBody, user=require_auth("admin")):
 
 
 @router.put("/{name}")
-async def update_agent(name: str, body: AgentUpdate, user=require_auth("admin")):
+async def update_agent(name: str, body: AgentUpdate, user=require_auth("agents:write")):
     if not os.path.isdir(os.path.join(_agents_base(), name)):
         raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
     meta = read_agent_meta(name)
@@ -112,7 +112,7 @@ async def update_agent(name: str, body: AgentUpdate, user=require_auth("admin"))
 
 
 @router.delete("/{name}")
-async def remove_agent(name: str, user=require_auth("admin")):
+async def remove_agent(name: str, user=require_auth("agents:write")):
     if not os.path.isdir(os.path.join(_agents_base(), name)):
         raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
     delete_agent(name)
@@ -120,7 +120,7 @@ async def remove_agent(name: str, user=require_auth("admin")):
 
 
 @router.put("/{name}/toggle")
-async def toggle_agent(name: str, body: _ToggleBody, user=require_auth("admin")):
+async def toggle_agent(name: str, body: _ToggleBody, user=require_auth("agents:write")):
     if not os.path.isdir(os.path.join(_agents_base(), name)):
         raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
     set_enabled(name, body.enabled)

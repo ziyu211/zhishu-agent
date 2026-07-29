@@ -26,6 +26,7 @@ export function useAuth() {
       role: r.role || 'user',
       role_label: (r as any).role_label,
       display_name: (r as any).display_name,
+      perms: (r as any).perms || [],
     }
     saveUser(u)
     user.value = u

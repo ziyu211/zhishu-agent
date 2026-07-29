@@ -15,6 +15,8 @@ export const useAppStore = defineStore('app', {
   }),
   getters: {
     isAdmin: (s) => s.user?.role === 'admin',
+    /** 当前用户权限集合（来自后端 ROLES，admin 为 ['*']） */
+    perms: (s) => (s.user as any)?.perms || [],
     /** 扁平化模型选项：provider/model */
     modelOptions: (s) => {
       const opt: { value: string; label: string; provider: string }[] = []
@@ -24,6 +26,20 @@ export const useAppStore = defineStore('app', {
         }
       }
       return opt
+    },
+    /** 权限判断：admin('*') 恒真；拥有写权限隐含读权限 */
+    can: (s) => (perm: string): boolean => {
+      const u = s.user as any
+      if (!u) return false
+      if (u.role === 'admin') return true
+      const p: string[] = u.perms || []
+      if (p.includes('*')) return true
+      if (p.includes(perm)) return true
+      if (perm.endsWith(':read')) {
+        const w = perm.replace(':read', ':write')
+        if (p.includes(w)) return true
+      }
+      return false
     },
   },
   actions: {

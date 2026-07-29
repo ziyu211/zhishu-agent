@@ -105,12 +105,12 @@ class SkillUpdate(BaseModel):
 
 
 @router.get("/skills")
-async def list_skills(user=require_auth("*")):
+async def list_skills(user=require_auth("modules:read")):
     return {"skills": _list_modules("skills")}
 
 
 @router.post("/skills/import")
-async def import_skills(file: UploadFile = File(...), user=require_auth("*")):
+async def import_skills(file: UploadFile = File(...), user=require_auth("modules:write")):
     """从外部智能体（Hermes / OpenClaw / 智枢原生 / 通用 Markdown 压缩包）批量导入技能。
 
     上传 .zip / .tgz / .tar.gz，自动嗅探格式并转换为智枢技能目录。
@@ -128,7 +128,7 @@ async def import_skills(file: UploadFile = File(...), user=require_auth("*")):
 
 
 @router.get("/skills/export")
-async def export_skills_all(user=require_auth("*")):
+async def export_skills_all(user=require_auth("modules:read")):
     """导出全部技能为 zip（智枢原生格式，兼容 Hermes 的 SKILL.md 约定）。"""
     data = export_skills(get_ctx().cfg.server.data_dir)
     return StreamingResponse(
@@ -139,7 +139,7 @@ async def export_skills_all(user=require_auth("*")):
 
 
 @router.get("/skills/{name}/export")
-async def export_skill_one(name: str, user=require_auth("*")):
+async def export_skill_one(name: str, user=require_auth("modules:read")):
     """导出单个技能为 zip。"""
     if not os.path.isdir(module_dir("skills", name)):
         raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
@@ -152,7 +152,7 @@ async def export_skill_one(name: str, user=require_auth("*")):
 
 
 @router.get("/skills/{name}")
-async def get_skill(name: str, user=require_auth("*")):
+async def get_skill(name: str, user=require_auth("modules:read")):
     if not os.path.isdir(module_dir("skills", name)):
         raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
     info = read_meta("skills", name)
@@ -162,7 +162,7 @@ async def get_skill(name: str, user=require_auth("*")):
 
 
 @router.post("/skills")
-async def create_skill(body: SkillBody, user=require_auth("*")):
+async def create_skill(body: SkillBody, user=require_auth("modules:write")):
     name = sanitize_name(body.name)
     if not name:
         raise HTTPException(status_code=400, detail="技能名称非法")
@@ -180,7 +180,7 @@ async def create_skill(body: SkillBody, user=require_auth("*")):
 
 
 @router.put("/skills/{name}")
-async def update_skill(name: str, body: SkillUpdate, user=require_auth("*")):
+async def update_skill(name: str, body: SkillUpdate, user=require_auth("modules:write")):
     if not os.path.isdir(module_dir("skills", name)):
         raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
     meta = read_meta("skills", name)
@@ -193,7 +193,7 @@ async def update_skill(name: str, body: SkillUpdate, user=require_auth("*")):
 
 
 @router.delete("/skills/{name}")
-async def remove_skill(name: str, user=require_auth("*")):
+async def remove_skill(name: str, user=require_auth("modules:write")):
     if not os.path.isdir(module_dir("skills", name)):
         raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
     delete_module("skills", name)
@@ -201,7 +201,7 @@ async def remove_skill(name: str, user=require_auth("*")):
 
 
 @router.put("/skills/{name}/toggle")
-async def toggle_skill(name: str, body: _ToggleBody, user=require_auth("*")):
+async def toggle_skill(name: str, body: _ToggleBody, user=require_auth("modules:write")):
     return _toggle("skills", name, body.enabled)
 
 
@@ -238,12 +238,12 @@ class PluginUpdate(BaseModel):
 
 
 @router.get("/plugins")
-async def list_plugins(user=require_auth("*")):
+async def list_plugins(user=require_auth("modules:read")):
     return {"plugins": _list_modules("plugins")}
 
 
 @router.get("/plugins/{name}")
-async def get_plugin(name: str, user=require_auth("*")):
+async def get_plugin(name: str, user=require_auth("modules:read")):
     if not os.path.isdir(module_dir("plugins", name)):
         raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
     info = read_meta("plugins", name)
@@ -253,7 +253,7 @@ async def get_plugin(name: str, user=require_auth("*")):
 
 
 @router.post("/plugins")
-async def create_plugin(body: PluginBody, user=require_auth("*")):
+async def create_plugin(body: PluginBody, user=require_auth("modules:write")):
     name = sanitize_name(body.name)
     if not name:
         raise HTTPException(status_code=400, detail="插件名称非法")
@@ -271,7 +271,7 @@ async def create_plugin(body: PluginBody, user=require_auth("*")):
 
 
 @router.put("/plugins/{name}")
-async def update_plugin(name: str, body: PluginUpdate, user=require_auth("*")):
+async def update_plugin(name: str, body: PluginUpdate, user=require_auth("modules:write")):
     if not os.path.isdir(module_dir("plugins", name)):
         raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
     meta = read_meta("plugins", name)
@@ -284,7 +284,7 @@ async def update_plugin(name: str, body: PluginUpdate, user=require_auth("*")):
 
 
 @router.delete("/plugins/{name}")
-async def remove_plugin(name: str, user=require_auth("*")):
+async def remove_plugin(name: str, user=require_auth("modules:write")):
     if not os.path.isdir(module_dir("plugins", name)):
         raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
     delete_module("plugins", name)
@@ -292,12 +292,12 @@ async def remove_plugin(name: str, user=require_auth("*")):
 
 
 @router.put("/plugins/{name}/toggle")
-async def toggle_plugin(name: str, body: _ToggleBody, user=require_auth("*")):
+async def toggle_plugin(name: str, body: _ToggleBody, user=require_auth("modules:write")):
     return _toggle("plugins", name, body.enabled)
 
 
 @router.post("/plugins/refresh")
-async def refresh_plugins(user=require_auth("*")):
+async def refresh_plugins(user=require_auth("modules:write")):
     from ..core.modules import register_plugin_tools
     register_plugin_tools()
     return {"ok": True}
@@ -309,7 +309,7 @@ class PluginInstallBody(BaseModel):
 
 
 @router.post("/plugins/install")
-async def install_plugin(body: PluginInstallBody, user=require_auth("*")):
+async def install_plugin(body: PluginInstallBody, user=require_auth("modules:write")):
     """按需安装解析插件（用户在前端确认后调用，实现「直接安装」）。
 
     优先从内置解析插件编目（core.parsers.PARSE_PLUGINS）取规格；
@@ -352,7 +352,7 @@ class McpCallBody(BaseModel):
 
 
 @router.get("/mcp")
-async def list_mcp(user=require_auth("*")):
+async def list_mcp(user=require_auth("modules:read")):
     items = _list_modules("mcp")
     status = get_ctx().modules.status()
     for it in items:
@@ -364,7 +364,7 @@ async def list_mcp(user=require_auth("*")):
 
 
 @router.get("/tools")
-async def list_tools(user=require_auth("*")):
+async def list_tools(user=require_auth("modules:read")):
     """列出当前已注册到 Agent 的全部工具（含模块提供的 plugin__*/mcp__* 工具）。"""
     from ..core.tools import ToolRegistry
     specs = ToolRegistry.specs()
@@ -381,7 +381,7 @@ async def list_tools(user=require_auth("*")):
 
 
 @router.get("/mcp/{name}")
-async def get_mcp(name: str, user=require_auth("*")):
+async def get_mcp(name: str, user=require_auth("modules:read")):
     if not os.path.isdir(module_dir("mcp", name)):
         raise HTTPException(status_code=404, detail=f"未找到 MCP 服务器：{name}")
     info = read_meta("mcp", name)
@@ -395,7 +395,7 @@ async def get_mcp(name: str, user=require_auth("*")):
 
 
 @router.post("/mcp")
-async def create_mcp(body: McpBody, user=require_auth("*")):
+async def create_mcp(body: McpBody, user=require_auth("modules:write")):
     name = sanitize_name(body.name)
     if not name:
         raise HTTPException(status_code=400, detail="MCP 名称非法")
@@ -415,7 +415,7 @@ async def create_mcp(body: McpBody, user=require_auth("*")):
 
 
 @router.put("/mcp/{name}")
-async def update_mcp(name: str, body: McpUpdate, user=require_auth("*")):
+async def update_mcp(name: str, body: McpUpdate, user=require_auth("modules:write")):
     if not os.path.isdir(module_dir("mcp", name)):
         raise HTTPException(status_code=404, detail=f"未找到 MCP 服务器：{name}")
     meta = read_meta("mcp", name)
@@ -428,7 +428,7 @@ async def update_mcp(name: str, body: McpUpdate, user=require_auth("*")):
 
 
 @router.delete("/mcp/{name}")
-async def remove_mcp(name: str, user=require_auth("*")):
+async def remove_mcp(name: str, user=require_auth("modules:write")):
     if not os.path.isdir(module_dir("mcp", name)):
         raise HTTPException(status_code=404, detail=f"未找到 MCP 服务器：{name}")
     # 先断开
@@ -441,7 +441,7 @@ async def remove_mcp(name: str, user=require_auth("*")):
 
 
 @router.put("/mcp/{name}/toggle")
-async def toggle_mcp(name: str, body: _ToggleBody, user=require_auth("*")):
+async def toggle_mcp(name: str, body: _ToggleBody, user=require_auth("modules:write")):
     res = _toggle("mcp", name, body.enabled)
     # 停用时断开连接
     if not body.enabled:
@@ -453,19 +453,19 @@ async def toggle_mcp(name: str, body: _ToggleBody, user=require_auth("*")):
 
 
 @router.post("/mcp/refresh")
-async def refresh_mcp(user=require_auth("*")):
+async def refresh_mcp(user=require_auth("modules:write")):
     await get_ctx().modules.connect_enabled_mcp()
     return {"ok": True, "status": get_ctx().modules.status()}
 
 
 @router.post("/mcp/{name}/connect")
-async def connect_mcp(name: str, user=require_auth("*")):
+async def connect_mcp(name: str, user=require_auth("modules:write")):
     st = await get_ctx().modules.connect_one(name)
     return {"ok": True, "name": name, **st}
 
 
 @router.post("/mcp/{name}/call")
-async def call_mcp(name: str, body: McpCallBody, user=require_auth("*")):
+async def call_mcp(name: str, body: McpCallBody, user=require_auth("modules:write")):
     result = await get_ctx().modules.call_mcp_tool(name, body.tool, body.arguments)
     return {"ok": True, "name": name, "tool": body.tool, "result": result}
 
@@ -477,7 +477,7 @@ _MEMORY_FILES = {"memory": "MEMORY.md", "user": "USER.md", "soul": "SOUL.md"}
 
 
 @router.get("/memory")
-async def get_memory(user=require_auth("*")):
+async def get_memory(user=require_auth("modules:read")):
     ctx = get_ctx()
     base = ctx.cfg.server.data_dir
     out: dict = {}
@@ -494,7 +494,7 @@ class _MemoryBody(BaseModel):
 
 
 @router.put("/memory")
-async def save_memory(body: _MemoryBody, user=require_auth("*")):
+async def save_memory(body: _MemoryBody, user=require_auth("modules:write")):
     ctx = get_ctx()
     base = ctx.cfg.server.data_dir
     os.makedirs(base, exist_ok=True)
@@ -507,7 +507,7 @@ async def save_memory(body: _MemoryBody, user=require_auth("*")):
 
 
 @router.get("/memory/export")
-async def export_memory(user=require_auth("*")):
+async def export_memory(user=require_auth("modules:read")):
     ctx = get_ctx()
     base = ctx.cfg.server.data_dir
     parts = []
@@ -519,7 +519,7 @@ async def export_memory(user=require_auth("*")):
 
 
 @router.get("/memory/search")
-async def search_memory(q: str = "", user=require_auth("*")):
+async def search_memory(q: str = "", user=require_auth("modules:read")):
     ctx = get_ctx()
     base = ctx.cfg.server.data_dir
     hits: list = []

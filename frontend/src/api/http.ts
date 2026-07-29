@@ -25,6 +25,7 @@ export interface LocalUser {
   role: string
   role_label?: string
   display_name?: string
+  perms?: string[]
   [k: string]: unknown
 }
 

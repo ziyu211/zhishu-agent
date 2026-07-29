@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/v1", tags=["admin"])
 
 
 @router.get("/admin/status")
-async def status(user=require_auth("*")):
+async def status(user=require_auth("system:read")):
     ctx = get_ctx()
     return {
         "auth_enabled": ctx.cfg.security.enable_auth,
@@ -26,13 +26,13 @@ async def status(user=require_auth("*")):
 
 
 @router.get("/admin/audit")
-async def audit(user=require_auth("*"), limit: int = 100):
+async def audit(user=require_auth("audit:read"), limit: int = 100):
     ctx = get_ctx()
     return {"records": ctx.audit.recent(limit)}
 
 
 @router.post("/admin/redact")
-async def redact_test(req: dict = Body(...), user=require_auth("*")):
+async def redact_test(req: dict = Body(...), user=require_auth("audit:read")):
     """脱敏自测：传入 {"text": "..."} 或 {"obj": {...}}，返回脱敏后结果（合规验证用）。"""
     ctx = get_ctx()
     if not ctx.cfg.security.enable_redact:

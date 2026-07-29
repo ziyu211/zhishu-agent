@@ -27,7 +27,7 @@ class IngestReq(BaseModel):
 
 
 @router.post("/ingest")
-async def ingest(req: IngestReq, user=require_auth("knowledge:read")):
+async def ingest(req: IngestReq, user=require_auth("knowledge:write")):
     ctx = get_ctx()
     if not req.text.strip():
         return {"ok": False, "msg": "文本为空"}
@@ -47,7 +47,7 @@ async def ingest(req: IngestReq, user=require_auth("knowledge:read")):
 
 
 @router.post("/upload")
-async def upload(file: UploadFile = File(...), user=require_auth("knowledge:read")):
+async def upload(file: UploadFile = File(...), user=require_auth("knowledge:write")):
     ctx = get_ctx()
     raw = await file.read()
     if not raw:
@@ -90,7 +90,7 @@ async def get_document(doc_id: str, user=require_auth("knowledge:read")):
 
 
 @router.delete("/documents/{doc_id}")
-async def delete_document(doc_id: str, user=require_auth("knowledge:read")):
+async def delete_document(doc_id: str, user=require_auth("knowledge:write")):
     ctx = get_ctx()
     owner = None if user.get("r") == "admin" else user.get("u")
     ok = ctx.kb.delete_document(doc_id, owner=owner)
@@ -102,7 +102,7 @@ async def delete_document(doc_id: str, user=require_auth("knowledge:read")):
 
 
 @router.post("/documents/{doc_id}/reparse")
-async def reparse_document(doc_id: str, user=require_auth("knowledge:read")):
+async def reparse_document(doc_id: str, user=require_auth("knowledge:write")):
     """用保留的原始文件，以当前解析器重新提取并覆盖入库（doc_id 不变）。"""
     ctx = get_ctx()
     owner = None if user.get("r") == "admin" else user.get("u")

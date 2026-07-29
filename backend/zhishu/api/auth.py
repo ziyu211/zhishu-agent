@@ -59,13 +59,14 @@ def _current(authorization: str | None) -> dict:
 
 @router.get("/me")
 async def me(authorization: str | None = Header(None)):
-    from ..core.security import ROLE_LABELS
+    from ..core.security import ROLE_LABELS, ROLES
     data = _current(authorization)
     role = data.get("r", "")
     return {
         "user": data.get("u", ""),
         "role": role,
         "role_label": ROLE_LABELS.get(role, role),
+        "perms": ROLES.get(role, []),
     }
 
 

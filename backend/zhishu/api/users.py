@@ -39,7 +39,7 @@ def _store():
 
 
 @router.get("/roles")
-async def roles(user=require_auth("*")):
+async def roles(user=require_auth("users:read")):
     """供前端下拉：角色列表及其权限说明。"""
     return {
         "roles": [
@@ -50,13 +50,13 @@ async def roles(user=require_auth("*")):
 
 
 @router.get("")
-async def list_users(user=require_auth("*")):
+async def list_users(user=require_auth("users:read")):
     _, store = _store()
     return {"users": store.list()}
 
 
 @router.post("")
-async def create_user(req: CreateUserReq, user=require_auth("*")):
+async def create_user(req: CreateUserReq, user=require_auth("users:write")):
     ctx, store = _store()
     try:
         u = store.create(req.username, req.password, req.role, req.display_name)
@@ -67,7 +67,7 @@ async def create_user(req: CreateUserReq, user=require_auth("*")):
 
 
 @router.put("/{uid}")
-async def update_user(uid: int, req: UpdateUserReq, user=require_auth("*")):
+async def update_user(uid: int, req: UpdateUserReq, user=require_auth("users:write")):
     ctx, store = _store()
     try:
         u = store.update(uid, role=req.role, status=req.status,
@@ -79,7 +79,7 @@ async def update_user(uid: int, req: UpdateUserReq, user=require_auth("*")):
 
 
 @router.post("/{uid}/password")
-async def reset_password(uid: int, req: ResetPwdReq, user=require_auth("*")):
+async def reset_password(uid: int, req: ResetPwdReq, user=require_auth("users:write")):
     ctx, store = _store()
     try:
         store.set_password(uid, req.password)
@@ -90,7 +90,7 @@ async def reset_password(uid: int, req: ResetPwdReq, user=require_auth("*")):
 
 
 @router.delete("/{uid}")
-async def delete_user(uid: int, user=require_auth("*")):
+async def delete_user(uid: int, user=require_auth("users:write")):
     ctx, store = _store()
     try:
         store.delete(uid)

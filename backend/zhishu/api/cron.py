@@ -35,12 +35,12 @@ class CronUpdate(BaseModel):
 
 
 @router.get("")
-async def list_jobs(user=require_auth("*")):
+async def list_jobs(user=require_auth("cron:read")):
     return get_ctx().cron.list_jobs()
 
 
 @router.post("")
-async def create_job(req: CronCreate, user=require_auth("*")):
+async def create_job(req: CronCreate, user=require_auth("cron:write")):
     if req.schedule_type not in ("interval", "daily", "cron"):
         raise HTTPException(400, "schedule_type 必须为 interval/daily/cron")
     if req.action not in ("chat", "shell"):
@@ -54,7 +54,7 @@ async def create_job(req: CronCreate, user=require_auth("*")):
 
 
 @router.put("/{jid}")
-async def update_job(jid: int, req: CronUpdate, user=require_auth("*")):
+async def update_job(jid: int, req: CronUpdate, user=require_auth("cron:write")):
     kw = {k: v for k, v in req.model_dump().items() if v is not None}
     if not kw:
         raise HTTPException(400, "无可更新字段")
@@ -70,20 +70,20 @@ async def update_job(jid: int, req: CronUpdate, user=require_auth("*")):
 
 
 @router.delete("/{jid}")
-async def delete_job(jid: int, user=require_auth("*")):
+async def delete_job(jid: int, user=require_auth("cron:write")):
     get_ctx().cron.delete_job(jid)
     get_ctx().audit.log(user.get("u", ""), "cron_delete", f"删除定时任务 #{jid}")
     return {"ok": True}
 
 
 @router.put("/{jid}/toggle")
-async def toggle_job(jid: int, enabled: bool, user=require_auth("*")):
+async def toggle_job(jid: int, enabled: bool, user=require_auth("cron:write")):
     get_ctx().cron.set_enabled(jid, enabled)
     return {"ok": True}
 
 
 @router.post("/{jid}/run")
-async def run_now(jid: int, user=require_auth("*")):
+async def run_now(jid: int, user=require_auth("cron:write")):
     """手动立即触发一次（异步执行，返回本次结果）。"""
     out = await get_ctx().cron.run_now(jid)
     get_ctx().audit.log(user.get("u", ""), "cron_run", f"手动触发定时任务 #{jid}")
@@ -91,5 +91,5 @@ async def run_now(jid: int, user=require_auth("*")):
 
 
 @router.get("/{jid}/history")
-async def job_history(jid: int, limit: int = 20, user=require_auth("*")):
+async def job_history(jid: int, limit: int = 20, user=require_auth("cron:read")):
     return get_ctx().cron.history(jid, limit)

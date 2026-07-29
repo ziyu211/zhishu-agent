@@ -18,12 +18,25 @@ const app = useAppStore()
 const token = computed(() => getToken())
 const selectedKey = computed(() => route.name as string)
 
-// 管理类入口仅对 admin 可见（路由守卫已兜底，这里做 UI 层彻底隐藏）
-const adminKeys = new Set(['users', 'skills', 'plugins', 'mcp', 'memory', 'agents', 'system'])
+// 菜单可见性由角色权限驱动（与后端 RBAC 同源）：未配置 perm 的项对所有登录用户可见
+const PERM: Record<string, string> = {
+  chat: 'chat',
+  knowledge: 'knowledge:read',
+  models: 'models:read',
+  skills: 'modules:read',
+  plugins: 'modules:read',
+  mcp: 'modules:read',
+  memory: 'modules:read',
+  agents: 'agents:read',
+  cron: 'cron:read',
+  users: 'users:read',
+  system: 'system:read',
+  // settings：无权限要求，所有登录用户可见
+}
 const navGroups = computed(() =>
   groups.map((g) => ({
     ...g,
-    items: app.isAdmin ? g.items : g.items.filter((it) => !adminKeys.has(it.key)),
+    items: g.items.filter((it) => !PERM[it.key] || app.can(PERM[it.key])),
   })),
 )
 

@@ -78,18 +78,33 @@ class Crypto:
 
 # ----------------------------- 鉴权 / RBAC -----------------------------
 # 角色权限矩阵（"*" 表示全部权限）。
-#   admin    系统管理员：全部权限，含用户/模型/系统管理
-#   operator 运维/配置：可管理模型与知识库、查看审计，但不可管理用户
-#   user     普通用户：对话 + 知识库读写 + 模型查看
+# 权限命名规则：<模块>:<read|write>，写权限隐含读权限（见 AuthService.can）。
+#   admin    系统管理员：全部权限（含用户/系统管理）
+#   operator 运维/配置：可管理模型/知识库/技能插件MCP记忆/智能体/定时任务、查看审计，但不可管理用户与系统
+#   user     普通用户：对话 + 知识库读写 + 查看模型/技能插件MCP记忆/智能体
 #   viewer   只读访客：仅对话与模型查看
 ROLES: dict[str, list[str]] = {
     "admin": ["*"],
     "operator": [
-        "chat", "knowledge:read", "knowledge:write",
-        "models:read", "models:write", "audit:read",
+        "chat",
+        "knowledge:read", "knowledge:write",
+        "models:read", "models:write",
+        "modules:read", "modules:write",
+        "agents:read", "agents:write",
+        "cron:read", "cron:write",
+        "audit:read",
     ],
-    "user": ["chat", "knowledge:read", "knowledge:write", "models:read"],
-    "viewer": ["chat", "models:read"],
+    "user": [
+        "chat",
+        "knowledge:read", "knowledge:write",
+        "models:read",
+        "modules:read",
+        "agents:read",
+    ],
+    "viewer": [
+        "chat",
+        "models:read",
+    ],
 }
 
 ROLE_LABELS = {
@@ -282,6 +297,7 @@ class AuthService:
             "role": role,
             "role_label": ROLE_LABELS.get(role, role),
             "display_name": display_name,
+            "perms": ROLES.get(role, []),
         }
 
     def _token(self, user: str, role: str, ttl: int = 86400 * 7) -> str:
