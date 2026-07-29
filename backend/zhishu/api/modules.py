@@ -29,10 +29,43 @@ from ..core.modules import (
     register_plugin_tools,
     DISABLED_KEY,
 )
+from ..core.modules.runtime import can_view, can_edit, filter_tool_specs
 from ..core.modules.skills_io import import_archive, export_skills
 
 
 router = APIRouter(prefix="/api/v1", tags=["modules"])
+
+
+# ---------------------------------------------------------------------------
+# 多用户隔离（与 api/cron.py 同一范式）：
+#   * meta 无 owner = 系统级共享：全员可见可用，仅 admin 可管理
+#   * meta 有 owner = 私有：仅 owner + admin 可见/可管理
+#   * 越权访问他人私有模块 → 404（视同不存在，防枚举探测）
+# ---------------------------------------------------------------------------
+def _is_admin(user: dict) -> bool:
+    return (user.get("r") or "") == "admin"
+
+
+def _username(user: dict) -> str:
+    return (user.get("u") or "").strip()
+
+
+def _guard_view(sub: str, name: str, user: dict, label: str) -> dict:
+    """存在 + 可见性校验；通过则返回 meta，否则 404。"""
+    if not os.path.isdir(module_dir(sub, name)):
+        raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
+    meta = read_meta(sub, name)
+    if not can_view(meta.get("owner") or None, _username(user), _is_admin(user)):
+        raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
+    return meta
+
+
+def _guard_edit(sub: str, name: str, user: dict, label: str) -> dict:
+    """存在 + 可写性校验；不可见→404，可见不可写（共享模块的非 admin）→403。"""
+    meta = _guard_view(sub, name, user, label)
+    if not can_edit(meta.get("owner") or None, _username(user), _is_admin(user)):
+        raise HTTPException(status_code=403, detail=f"无权管理该{label}（系统级共享，仅管理员可修改）")
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +80,7 @@ def _mask_env(env: Optional[dict]) -> dict:
     return {k: (_ENV_MASK if str(v or "") else "") for k, v in (env or {}).items()}
 
 
-def _list_modules(sub: str) -> list:
+def _list_modules(sub: str, user: Optional[dict] = None) -> list:
     from ..core.modules import module_dir as _md
     base = _md(sub, "")
     state = load_state()
@@ -55,6 +88,8 @@ def _list_modules(sub: str) -> list:
     out: list = []
     if not os.path.isdir(base):
         return out
+    uname = _username(user) if user else ""
+    admin = _is_admin(user) if user else False
     for name in sorted(os.listdir(base)):
         d = os.path.join(base, name)
         if not os.path.isdir(d) or name in disabled:
@@ -62,11 +97,16 @@ def _list_modules(sub: str) -> list:
         info = read_meta(sub, name)
         if info.get("enabled") is False:
             continue
+        # 多用户隔离：仅返回「共享 + 本人」；admin 全量（含 owner 归属信息）
+        owner_val = info.get("owner") or None
+        if not can_view(owner_val, uname, admin):
+            continue
         item: dict[str, Any] = {
             "name": name,
             "description": info.get("description", ""),
             "version": info.get("version", ""),
             "enabled": name not in disabled,
+            "owner": owner_val,
         }
         if sub == "plugins":
             item["tool_count"] = len(info.get("tools") or [])
@@ -125,7 +165,7 @@ class SkillUpdate(BaseModel):
 
 @router.get("/skills")
 async def list_skills(user=require_auth("modules:read")):
-    return {"skills": _list_modules("skills")}
+    return {"skills": _list_modules("skills", user)}
 
 
 @router.post("/skills/import")
@@ -140,7 +180,9 @@ async def import_skills(file: UploadFile = File(...), user=require_auth("modules
     fn = (file.filename or "").lower()
     fmt = "tgz" if (fn.endswith(".tgz") or fn.endswith(".tar.gz")) else "zip"
     try:
-        res = import_archive(data, fmt, get_ctx().cfg.server.data_dir)
+        # 多用户隔离：非 admin 导入的技能归属本人（私有）；admin 导入为系统级共享
+        owner = None if _is_admin(user) else _username(user)
+        res = import_archive(data, fmt, get_ctx().cfg.server.data_dir, owner=owner)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"导入失败：{e}")
     return {"ok": True, **res}
@@ -148,8 +190,13 @@ async def import_skills(file: UploadFile = File(...), user=require_auth("modules
 
 @router.get("/skills/export")
 async def export_skills_all(user=require_auth("modules:read")):
-    """导出全部技能为 zip（智枢原生格式，兼容 Hermes 的 SKILL.md 约定）。"""
-    data = export_skills(get_ctx().cfg.server.data_dir)
+    """导出技能为 zip（智枢原生格式，兼容 Hermes 的 SKILL.md 约定）。
+
+    多用户隔离：admin 导出全部；普通用户仅导出「共享 + 本人」技能。"""
+    names = None
+    if not _is_admin(user):
+        names = [it["name"] for it in _list_modules("skills", user)]
+    data = export_skills(get_ctx().cfg.server.data_dir, names=names)
     return StreamingResponse(
         io.BytesIO(data),
         media_type="application/zip",
@@ -160,8 +207,7 @@ async def export_skills_all(user=require_auth("modules:read")):
 @router.get("/skills/{name}/export")
 async def export_skill_one(name: str, user=require_auth("modules:read")):
     """导出单个技能为 zip。"""
-    if not os.path.isdir(module_dir("skills", name)):
-        raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
+    _guard_view("skills", name, user, "技能")
     data = export_skills(get_ctx().cfg.server.data_dir, names=[name])
     return StreamingResponse(
         io.BytesIO(data),
@@ -172,10 +218,9 @@ async def export_skill_one(name: str, user=require_auth("modules:read")):
 
 @router.get("/skills/{name}")
 async def get_skill(name: str, user=require_auth("modules:read")):
-    if not os.path.isdir(module_dir("skills", name)):
-        raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
-    info = read_meta("skills", name)
+    info = _guard_view("skills", name, user, "技能")
     info["name"] = name
+    info["owner"] = info.get("owner") or None
     info["enabled"] = name not in set(load_state().get("skills_disabled", []))
     return info
 
@@ -194,15 +239,16 @@ async def create_skill(body: SkillBody, user=require_auth("modules:write")):
         "content": body.content,
         "enabled": body.enabled,
     }
+    # 多用户隔离：非 admin 创建的技能归属本人（私有）；admin 创建为系统级共享
+    if not _is_admin(user):
+        meta["owner"] = _username(user)
     write_meta("skills", name, meta)
     return {"ok": True, "name": name}
 
 
 @router.put("/skills/{name}")
 async def update_skill(name: str, body: SkillUpdate, user=require_auth("modules:write")):
-    if not os.path.isdir(module_dir("skills", name)):
-        raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
-    meta = read_meta("skills", name)
+    meta = _guard_edit("skills", name, user, "技能")
     for k in ("description", "version", "content", "enabled"):
         v = getattr(body, k)
         if v is not None:
@@ -213,14 +259,14 @@ async def update_skill(name: str, body: SkillUpdate, user=require_auth("modules:
 
 @router.delete("/skills/{name}")
 async def remove_skill(name: str, user=require_auth("modules:write")):
-    if not os.path.isdir(module_dir("skills", name)):
-        raise HTTPException(status_code=404, detail=f"未找到技能：{name}")
+    _guard_edit("skills", name, user, "技能")
     delete_module("skills", name)
     return {"ok": True, "name": name}
 
 
 @router.put("/skills/{name}/toggle")
 async def toggle_skill(name: str, body: _ToggleBody, user=require_auth("modules:write")):
+    _guard_edit("skills", name, user, "技能")
     return _toggle("skills", name, body.enabled)
 
 
@@ -258,7 +304,7 @@ class PluginUpdate(BaseModel):
 
 @router.get("/plugins")
 async def list_plugins(user=require_auth("modules:read")):
-    return {"plugins": _list_modules("plugins")}
+    return {"plugins": _list_modules("plugins", user)}
 
 
 def _mask_plugin_tools(tools: Optional[list]) -> list:
@@ -290,10 +336,9 @@ def _restore_plugin_tools(new_tools: list, old_tools: Optional[list]) -> list:
 
 @router.get("/plugins/{name}")
 async def get_plugin(name: str, user=require_auth("modules:read")):
-    if not os.path.isdir(module_dir("plugins", name)):
-        raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
-    info = read_meta("plugins", name)
+    info = _guard_view("plugins", name, user, "插件")
     info["name"] = name
+    info["owner"] = info.get("owner") or None
     # 安全：http 工具 headers 脱敏后再回传
     info["tools"] = _mask_plugin_tools(info.get("tools"))
     info["enabled"] = name not in set(load_state().get("plugins_disabled", []))
@@ -314,6 +359,9 @@ async def create_plugin(body: PluginBody, user=require_auth("modules:write")):
         "enabled": body.enabled,
         "tools": body.tools,
     }
+    # 多用户隔离：非 admin 创建的插件归属本人（私有）；admin 创建为系统级共享
+    if not _is_admin(user):
+        meta["owner"] = _username(user)
     write_meta("plugins", name, meta)
     _sync_plugins()
     return {"ok": True, "name": name}
@@ -321,9 +369,7 @@ async def create_plugin(body: PluginBody, user=require_auth("modules:write")):
 
 @router.put("/plugins/{name}")
 async def update_plugin(name: str, body: PluginUpdate, user=require_auth("modules:write")):
-    if not os.path.isdir(module_dir("plugins", name)):
-        raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
-    meta = read_meta("plugins", name)
+    meta = _guard_edit("plugins", name, user, "插件")
     for k in ("description", "version", "enabled"):
         v = getattr(body, k)
         if v is not None:
@@ -338,8 +384,7 @@ async def update_plugin(name: str, body: PluginUpdate, user=require_auth("module
 
 @router.delete("/plugins/{name}")
 async def remove_plugin(name: str, user=require_auth("modules:write")):
-    if not os.path.isdir(module_dir("plugins", name)):
-        raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
+    _guard_edit("plugins", name, user, "插件")
     delete_module("plugins", name)
     _sync_plugins()
     return {"ok": True, "name": name}
@@ -347,6 +392,7 @@ async def remove_plugin(name: str, user=require_auth("modules:write")):
 
 @router.put("/plugins/{name}/toggle")
 async def toggle_plugin(name: str, body: _ToggleBody, user=require_auth("modules:write")):
+    _guard_edit("plugins", name, user, "插件")
     res = _toggle("plugins", name, body.enabled)
     _sync_plugins()
     return res
@@ -373,6 +419,10 @@ async def install_plugin(body: PluginInstallBody, user=require_auth("modules:wri
     """
     from ..core import parsers
 
+    # 多用户隔离：安装产物为系统级共享插件；自定义 descriptor 仅 admin 可用，
+    # 防止普通用户注入全员生效的任意 shell/http 工具。内置编目安装不受限。
+    if body.descriptor is not None and not _is_admin(user):
+        raise HTTPException(status_code=403, detail="自定义插件描述符仅管理员可安装")
     try:
         result = parsers.install_plugin(body.name, body.descriptor)
     except ValueError as e:
@@ -409,7 +459,7 @@ class McpCallBody(BaseModel):
 
 @router.get("/mcp")
 async def list_mcp(user=require_auth("modules:read")):
-    items = _list_modules("mcp")
+    items = _list_modules("mcp", user)
     status = get_ctx().modules.status()
     for it in items:
         st = status.get(it["name"], {})
@@ -421,9 +471,11 @@ async def list_mcp(user=require_auth("modules:read")):
 
 @router.get("/tools")
 async def list_tools(user=require_auth("modules:read")):
-    """列出当前已注册到 Agent 的全部工具（含模块提供的 plugin__*/mcp__* 工具）。"""
+    """列出当前已注册到 Agent 的工具（含模块提供的 plugin__*/mcp__* 工具）。
+
+    多用户隔离：plugin__/mcp__ 工具按归属过滤（共享 + 本人；admin 全量）。"""
     from ..core.tools import ToolRegistry
-    specs = ToolRegistry.specs()
+    specs = filter_tool_specs(ToolRegistry.specs(), _username(user), _is_admin(user))
     out = []
     for s in specs:
         fn = s["function"]["name"]
@@ -438,10 +490,9 @@ async def list_tools(user=require_auth("modules:read")):
 
 @router.get("/mcp/{name}")
 async def get_mcp(name: str, user=require_auth("modules:read")):
-    if not os.path.isdir(module_dir("mcp", name)):
-        raise HTTPException(status_code=404, detail=f"未找到 MCP 服务器：{name}")
-    info = read_meta("mcp", name)
+    info = _guard_view("mcp", name, user, " MCP 服务器")
     info["name"] = name
+    info["owner"] = info.get("owner") or None
     # 安全：env 密钥脱敏后再回传
     info["env"] = _mask_env(info.get("env", {}))
     info["enabled"] = name not in set(load_state().get("mcp_disabled", []))
@@ -468,15 +519,16 @@ async def create_mcp(body: McpBody, user=require_auth("modules:write")):
         "args": body.args,
         "env": body.env,
     }
+    # 多用户隔离：非 admin 创建的 MCP 归属本人（私有）；admin 创建为系统级共享
+    if not _is_admin(user):
+        meta["owner"] = _username(user)
     write_meta("mcp", name, meta)
     return {"ok": True, "name": name}
 
 
 @router.put("/mcp/{name}")
 async def update_mcp(name: str, body: McpUpdate, user=require_auth("modules:write")):
-    if not os.path.isdir(module_dir("mcp", name)):
-        raise HTTPException(status_code=404, detail=f"未找到 MCP 服务器：{name}")
-    meta = read_meta("mcp", name)
+    meta = _guard_edit("mcp", name, user, " MCP 服务器")
     for k in ("description", "version", "enabled", "command", "args"):
         v = getattr(body, k)
         if v is not None:
@@ -494,8 +546,7 @@ async def update_mcp(name: str, body: McpUpdate, user=require_auth("modules:writ
 
 @router.delete("/mcp/{name}")
 async def remove_mcp(name: str, user=require_auth("modules:write")):
-    if not os.path.isdir(module_dir("mcp", name)):
-        raise HTTPException(status_code=404, detail=f"未找到 MCP 服务器：{name}")
+    _guard_edit("mcp", name, user, " MCP 服务器")
     # 先断开
     try:
         await get_ctx().modules._disconnect(name)
@@ -507,6 +558,7 @@ async def remove_mcp(name: str, user=require_auth("modules:write")):
 
 @router.put("/mcp/{name}/toggle")
 async def toggle_mcp(name: str, body: _ToggleBody, user=require_auth("modules:write")):
+    _guard_edit("mcp", name, user, " MCP 服务器")
     res = _toggle("mcp", name, body.enabled)
     # 停用时断开连接
     if not body.enabled:
@@ -525,12 +577,16 @@ async def refresh_mcp(user=require_auth("modules:write")):
 
 @router.post("/mcp/{name}/connect")
 async def connect_mcp(name: str, user=require_auth("modules:write")):
+    # 多用户隔离：他人私有 MCP 不可连接（视同不存在）
+    _guard_view("mcp", name, user, " MCP 服务器")
     st = await get_ctx().modules.connect_one(name)
     return {"ok": True, "name": name, **st}
 
 
 @router.post("/mcp/{name}/call")
 async def call_mcp(name: str, body: McpCallBody, user=require_auth("modules:write")):
+    # 多用户隔离：他人私有 MCP 工具不可调用（视同不存在）
+    _guard_view("mcp", name, user, " MCP 服务器")
     result = await get_ctx().modules.call_mcp_tool(name, body.tool, body.arguments)
     return {"ok": True, "name": name, "tool": body.tool, "result": result}
 

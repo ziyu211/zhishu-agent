@@ -24,16 +24,25 @@ from ..config import SecurityConfig
 _current_user: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "zhishu_current_user", default=None
 )
+_current_is_admin: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "zhishu_current_is_admin", default=False
+)
 
 
-def set_current_user(user: Optional[str]) -> None:
+def set_current_user(user: Optional[str], is_admin: bool = False) -> None:
     """在当前 asyncio 任务上下文中标记当前用户（task-local，不跨任务泄漏）。"""
     _current_user.set((user or "").strip() or "anonymous")
+    _current_is_admin.set(bool(is_admin))
 
 
 def get_current_user() -> str:
     """取当前任务的用户身份；未设置时 fail-closed 返回 "anonymous"。"""
     return _current_user.get() or "anonymous"
+
+
+def get_current_is_admin() -> bool:
+    """取当前任务的管理员标记；未设置时 fail-closed 返回 False。"""
+    return bool(_current_is_admin.get())
 
 
 @dataclass
@@ -42,15 +51,21 @@ class ToolContext:
     security: Optional[SecurityConfig] = None
     user: str = "anonymous"
     session: str = "default"
+    is_admin: bool = False
 
-    def for_run(self, user: Optional[str], session: Optional[str] = None) -> "ToolContext":
+    def for_run(
+        self,
+        user: Optional[str],
+        session: Optional[str] = None,
+        is_admin: bool = False,
+    ) -> "ToolContext":
         """派生一份**本次运行专用**的上下文副本（浅拷贝）。
 
         共享单例（AppContext.tool_ctx）保持只读，绝不在其上就地改 user/session，
         否则并发请求会互相覆盖身份（fail-open 串号）。
         """
         u = (user or "").strip() or "anonymous"
-        return replace(self, user=u, session=(session or self.session))
+        return replace(self, user=u, session=(session or self.session), is_admin=bool(is_admin))
 
 
 @dataclass

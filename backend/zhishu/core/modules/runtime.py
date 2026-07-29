@@ -100,6 +100,63 @@ def delete_module(sub: str, name: str) -> None:
         shutil.rmtree(d)
 
 
+# ---------------------------------------------------------------------------
+# 归属与可见性（多用户隔离）
+#   * meta 无 owner（None/空）= 系统级共享：全员可见可用，仅 admin 可管理
+#   * meta 有 owner          = 私有：仅 owner 与 admin 可见/可管理
+# ---------------------------------------------------------------------------
+def module_owner(sub: str, name: str) -> Optional[str]:
+    """返回模块归属用户名；None 表示系统级共享。"""
+    owner = (read_meta(sub, name) or {}).get("owner")
+    return str(owner) if owner else None
+
+
+def can_view(owner_val: Optional[str], username: Optional[str], is_admin: bool) -> bool:
+    """可见性：共享（owner=None）全员可见；私有仅本人 + admin。"""
+    if is_admin or owner_val is None:
+        return True
+    return bool(username) and owner_val == username
+
+
+def can_edit(owner_val: Optional[str], username: Optional[str], is_admin: bool) -> bool:
+    """可写性：admin 全可写；共享模块仅 admin；私有模块仅 owner 本人。
+    fail-closed：无法确定身份（username 为空）时一律拒绝。"""
+    if is_admin:
+        return True
+    if owner_val is None:
+        return False
+    return bool(username) and owner_val == username
+
+
+def _tool_module(tool_name: str) -> Optional[tuple[str, str]]:
+    """从工具名解析所属模块：plugin__<插件>__<工具> / mcp__<服务器>__<工具>。
+    非模块工具（builtin）返回 None。"""
+    for prefix, sub in (("plugin__", "plugins"), ("mcp__", "mcp")):
+        if tool_name.startswith(prefix):
+            rest = tool_name[len(prefix):]
+            mod = rest.split("__", 1)[0]
+            return sub, mod
+    return None
+
+
+def tool_visible_to(tool_name: str, username: Optional[str], is_admin: bool = False) -> bool:
+    """运行时守卫：plugin__/mcp__ 工具仅对「共享模块 + 本人模块」可见/可执行。
+    builtin 工具不受限；admin 不受私有归属过滤（否则 admin 自建私有工具失效）。"""
+    hit = _tool_module(tool_name)
+    if hit is None:
+        return True
+    if is_admin:
+        return True
+    sub, mod = hit
+    owner_val = module_owner(sub, mod)
+    return owner_val is None or (bool(username) and owner_val == username)
+
+
+def filter_tool_specs(specs: list, username: Optional[str], is_admin: bool = False) -> list:
+    """按用户过滤工具声明列表（plugin__/mcp__ 按归属，builtin 保留）。"""
+    return [s for s in specs if tool_visible_to(s["function"]["name"], username, is_admin)]
+
+
 class ModuleIntegrator:
     """连接 MCP、注册插件与 MCP 工具，供 Agent 运行时调用。"""
 

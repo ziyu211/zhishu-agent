@@ -53,6 +53,7 @@ def build_system_prompt(
     owner: Optional[str] = None,
     kb: Optional[KnowledgeBase] = None,
     query: Optional[str] = None,
+    is_admin: bool = False,
 ) -> str:
     """组装系统提示。
 
@@ -66,8 +67,8 @@ def build_system_prompt(
     stable = cfg.system_prompt
 
     volatile: list[str] = []
-    # 已启用技能 + 长期记忆（MEMORY/USER/SOUL.md，按 owner 用户隔离）
-    extra = build_agent_context_prompt(cfg, owner=owner)
+    # 已启用技能 + 长期记忆（MEMORY/USER/SOUL.md，均按 owner 用户隔离）
+    extra = build_agent_context_prompt(cfg, owner=owner, is_admin=is_admin)
     if extra:
         volatile.append(extra)
     # 知识库检索增强

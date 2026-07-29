@@ -26,26 +26,31 @@ async def delegate_to_agent(args: dict, ctx) -> str:
     """
     from ....context import get_ctx
     from ...agent import Agent
-    from ...agents_runtime import get_agent_meta, is_enabled
+    from ...agents_runtime import agent_owner, get_agent_meta, is_enabled
+    from ...modules.runtime import can_view
 
     g = get_ctx()
     name = args.get("agent_name") or args.get("agent")
     task = (args.get("task") or "").strip()
     if not name or not task:
         return "[委派失败] 缺少 agent_name 或 task 参数"
+    is_admin = bool(getattr(ctx, "is_admin", False))
     meta = get_agent_meta(name)
     if not meta:
+        return f"[委派失败] 未找到子智能体：{name}"
+    # 多用户隔离：他人私有子智能体视同不存在（防枚举探测）
+    if not can_view(agent_owner(name), ctx.user, is_admin):
         return f"[委派失败] 未找到子智能体：{name}"
     if not is_enabled(name):
         return f"[委派失败] 子智能体已停用：{name}"
     sub_ctx = ToolContext(
         kb=g.kb, security=g.cfg.security,
-        user=ctx.user or "anonymous", session=ctx.session,
+        user=ctx.user or "anonymous", session=ctx.session, is_admin=is_admin,
     )
     sub = Agent(g.cfg, g.llm, g.kb, g.memory, sub_ctx, media=g.media)
     chunks = []
     async for ev in sub.run(task, ctx.session, model=meta.get("model"),
-                            owner=ctx.user, agent_name=name):
+                            owner=ctx.user, agent_name=name, is_admin=is_admin):
         if ev.get("type") == "token":
             chunks.append(ev["text"])
     return ("【子智能体 %s 返回】\n" % name) + "".join(chunks)

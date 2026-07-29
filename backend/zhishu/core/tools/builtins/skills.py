@@ -30,6 +30,14 @@ async def read_skill(args: dict, ctx) -> str:
     d = os.path.join(base, "skills", name)
     if not os.path.isdir(d):
         return f"[read_skill] 未找到技能：{name}"
+    # 多用户隔离：他人私有技能视同不存在（防枚举探测 + 正文泄露）。
+    # 身份优先取 ctx（本次运行专用副本），缺失时回退 contextvars（task-local）。
+    from ...modules.runtime import module_owner, can_view
+    from ..base import get_current_user, get_current_is_admin
+    _user = getattr(ctx, "user", None) or get_current_user()
+    _is_admin = bool(getattr(ctx, "is_admin", False)) or get_current_is_admin()
+    if not can_view(module_owner("skills", name), _user, _is_admin):
+        return f"[read_skill] 未找到技能：{name}"
     md = os.path.join(d, "SKILL.md")
     if os.path.isfile(md):
         try:

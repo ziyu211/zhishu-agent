@@ -13,10 +13,43 @@ from pydantic import BaseModel
 from .auth import require_auth
 from ..core.agents_runtime import (
     list_agents, read_agent_meta, write_agent_meta, delete_agent,
-    sanitize_name, is_enabled, set_enabled,
+    sanitize_name, is_enabled, set_enabled, agent_owner,
 )
+from ..core.modules.runtime import can_view, can_edit
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
+
+
+# ---------------------------------------------------------------------------
+# 多用户隔离 helper（与 modules.py 同款范式）
+#   * meta 无 owner（None/空）= 系统级共享：全员可见可用，仅 admin 可管理
+#   * meta 有 owner          = 私有：仅 owner 与 admin 可见/可管理
+#   * fail-closed：身份为空一律拒绝
+# ---------------------------------------------------------------------------
+def _is_admin(user: dict) -> bool:
+    return (user.get("r") or "") == "admin"
+
+
+def _username(user: dict) -> str:
+    return (user.get("u") or "").strip()
+
+
+def _guard_view(name: str, user: dict, label: str = "子智能体") -> dict:
+    """存在 + 可见性校验；通过则返回 meta，否则 404（防枚举探测）。"""
+    if not os.path.isdir(os.path.join(_agents_base(), name)):
+        raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
+    meta = read_agent_meta(name)
+    if not can_view(agent_owner(name), _username(user), _is_admin(user)):
+        raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
+    return meta
+
+
+def _guard_edit(name: str, user: dict, label: str = "子智能体") -> dict:
+    """存在 + 可写性校验；不可见→404，可见不可写（共享模块的非 admin）→403。"""
+    meta = _guard_view(name, user, label)
+    if not can_edit(agent_owner(name), _username(user), _is_admin(user)):
+        raise HTTPException(status_code=403, detail=f"无权管理该{label}（系统级共享，仅管理员可修改）")
+    return meta
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +85,7 @@ class _ToggleBody(BaseModel):
 # ---------------------------------------------------------------------------
 @router.get("")
 async def get_agents(user=require_auth("agents:read")):
-    return {"agents": list_agents()}
+    return {"agents": list_agents(_username(user), _is_admin(user))}
 
 
 @router.get("/options")
@@ -60,15 +93,14 @@ async def get_agent_options(user=require_auth("agents:read")):
     """供聊天页选择器使用：返回已启用子智能体（name + description）。"""
     items = [
         {"name": a["name"], "description": a.get("description", "")}
-        for a in list_agents() if a.get("enabled")
+        for a in list_agents(_username(user), _is_admin(user)) if a.get("enabled")
     ]
     return {"agents": items}
 
 
 @router.get("/{name}")
 async def get_agent(name: str, user=require_auth("agents:read")):
-    if not os.path.isdir(os.path.join(_agents_base(), name)):
-        raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
+    _guard_view(name, user)
     info = read_agent_meta(name)
     info["name"] = name
     info["enabled"] = is_enabled(name)
@@ -92,6 +124,8 @@ async def create_agent(body: AgentBody, user=require_auth("agents:write")):
         "tools": body.tools,
         "max_steps": body.max_steps,
     }
+    if not _is_admin(user):
+        meta["owner"] = _username(user)
     write_agent_meta(name, meta)
     if not body.enabled:
         set_enabled(name, False)
@@ -100,8 +134,7 @@ async def create_agent(body: AgentBody, user=require_auth("agents:write")):
 
 @router.put("/{name}")
 async def update_agent(name: str, body: AgentUpdate, user=require_auth("agents:write")):
-    if not os.path.isdir(os.path.join(_agents_base(), name)):
-        raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
+    _guard_edit(name, user)
     meta = read_agent_meta(name)
     for k in ("description", "version", "system_prompt", "model", "tools", "max_steps"):
         v = getattr(body, k)
@@ -113,16 +146,14 @@ async def update_agent(name: str, body: AgentUpdate, user=require_auth("agents:w
 
 @router.delete("/{name}")
 async def remove_agent(name: str, user=require_auth("agents:write")):
-    if not os.path.isdir(os.path.join(_agents_base(), name)):
-        raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
+    _guard_edit(name, user)
     delete_agent(name)
     return {"ok": True, "name": name}
 
 
 @router.put("/{name}/toggle")
 async def toggle_agent(name: str, body: _ToggleBody, user=require_auth("agents:write")):
-    if not os.path.isdir(os.path.join(_agents_base(), name)):
-        raise HTTPException(status_code=404, detail=f"未找到子智能体：{name}")
+    _guard_edit(name, user)
     set_enabled(name, body.enabled)
     return {"ok": True, "name": name, "enabled": body.enabled}
 

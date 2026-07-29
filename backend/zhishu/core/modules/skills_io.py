@@ -224,8 +224,12 @@ def _copy_companions(src_dir: str, dst_dir: str, skip: str | None = None) -> Non
                 continue
 
 
-def import_archive(archive_bytes: bytes, fmt: str, data_dir: str) -> dict:
-    """解压、嗅探、转换并写入 data/skills/。返回结构化结果。"""
+def import_archive(archive_bytes: bytes, fmt: str, data_dir: str,
+                   owner: Optional[str] = None) -> dict:
+    """解压、嗅探、转换并写入 data/skills/。返回结构化结果。
+
+    多用户隔离：owner 非空时写入各技能 meta 的 owner 字段（私有归属），
+    None/空 = 系统级共享（仅 admin 导入时使用）。"""
     tmp = tempfile.mkdtemp(prefix="skill_import_")
     results: dict = {"imported": [], "skipped": [], "errors": [], "detected_format": []}
     try:
@@ -262,6 +266,8 @@ def import_archive(archive_bytes: bytes, fmt: str, data_dir: str) -> dict:
                 "content": content,
                 "imported": True,
             }
+            if owner:
+                meta["owner"] = owner
             try:
                 with open(os.path.join(target, MODULE_JSON), "w", encoding="utf-8") as f:
                     json.dump(meta, f, ensure_ascii=False, indent=2)

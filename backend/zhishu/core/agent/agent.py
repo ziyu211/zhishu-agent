@@ -25,11 +25,13 @@ from ..memory import MemoryStore, MemoryManager
 from ..modules import build_agent_context_prompt
 from ..agents_runtime import (
     DELEGATE_TOOL_NAME,
+    agent_owner,
     get_agent_meta,
     is_enabled,
     resolve_tools,
     build_agent_system_prompt,
 )
+from ..modules.runtime import can_view, filter_tool_specs
 from ..config import ZhishuConfig, classify_model
 from .system_prompt import build_system_prompt
 from .context_engine import NoOpContextEngine, ContextEngine, CompressionContextEngine
@@ -70,14 +72,15 @@ class Agent:
         owner: Optional[str] = None,
         agent_name: Optional[str] = None,
         attachments: Optional[list] = None,
+        is_admin: bool = False,
     ) -> AsyncIterator[dict]:
         # 让工具（知识库/文件等）能感知当前用户，按归属隔离文档。
         # 安全（防并发串号）：绝不在共享单例 ToolContext 上就地改 user ——
         # 并发请求会互相覆盖身份。这里派生**本次运行专用**的副本，并把身份
         # 写入 contextvars（task-local），owner 为空时 fail-closed 落到 anonymous，
         # 绝不继承上一个请求的身份。
-        self.ctx = self.ctx.for_run(owner, session)
-        set_current_user(self.ctx.user)
+        self.ctx = self.ctx.for_run(owner, session, is_admin=is_admin)
+        set_current_user(self.ctx.user, is_admin=is_admin)
         # ---- 0. 按模型类型分流：图像 / 视频 走生成分支，文本走 ReAct 循环 ----
         try:
             pc, mdl = self.cfg.resolve_model(model)
@@ -111,7 +114,7 @@ class Agent:
             system = await asyncio.to_thread(
                 build_system_prompt,
                 self.cfg, agent_name=agent_name, owner=owner,
-                kb=self.kb, query=user_message,
+                kb=self.kb, query=user_message, is_admin=is_admin,
             )
         except Exception as e:
             # 上下文组装异常（知识库/分词等）若冲出生成器会掐断 SSE → 浏览器报 network error。
@@ -173,16 +176,19 @@ class Agent:
             yield {"type": "done"}
             return
 
-        # 工具集：子智能体按 tools 字段裁剪；主管使用全部（含委派工具）
+        # 工具集：子智能体按 tools 字段裁剪；主管使用全部（含委派工具）。
+        # 多用户隔离：plugin__/mcp__ 工具按归属过滤（共享 + 本人；admin 全量），
+        # 防止 A 用户的 Agent 调用 B 用户的私有插件/MCP 工具。
         if agent_name:
-            specs = resolve_tools(get_agent_meta(agent_name).get("tools", "all"))
+            specs = resolve_tools(get_agent_meta(agent_name).get("tools", "all"),
+                                  username=owner, is_admin=is_admin)
             specs = [s for s in specs if s["function"]["name"] != DELEGATE_TOOL_NAME]
             try:
                 max_steps = int(get_agent_meta(agent_name).get("max_steps") or MAX_STEPS)
             except (TypeError, ValueError):
                 max_steps = MAX_STEPS
         else:
-            specs = ToolRegistry.specs()
+            specs = filter_tool_specs(ToolRegistry.specs(), owner, is_admin)
             max_steps = MAX_STEPS
 
         # ---- MoA 多智能体 facade：把单轮对话路由到并行聚合 ----
@@ -237,7 +243,7 @@ class Agent:
                     yield {"type": "tool_call", "name": name, "args": args}
                     if name == DELEGATE_TOOL_NAME and agent_name is None:
                         result = ""
-                        async for ev in self._run_delegate(args, session, owner):
+                        async for ev in self._run_delegate(args, session, owner, is_admin):
                             if ev.get("type") == "delegate_end":
                                 # 捕获最终结果用于主消息，同时将 delegate_end 转发给前端
                                 # 以关闭委派 UI（与 delegate_start 对称）
@@ -474,7 +480,8 @@ class Agent:
     # =====================================================================
     # 多 Agent 委派：主管调用 delegate_to_agent 时，实时运行子智能体并转发事件
     # =====================================================================
-    async def _run_delegate(self, args: dict, session: str, owner: Optional[str]) -> AsyncIterator[dict]:
+    async def _run_delegate(self, args: dict, session: str, owner: Optional[str],
+                            is_admin: bool = False) -> AsyncIterator[dict]:
         from ...context import get_ctx
 
         name = args.get("agent_name") or args.get("agent")
@@ -486,6 +493,11 @@ class Agent:
             yield {"type": "delegate_end", "agent": name,
                    "result": f"[委派失败] 未找到子智能体：{name}"}
             return
+        # 多用户隔离：他人私有子智能体对当前用户不可见 → 视同不存在（防枚举探测）。
+        if not can_view(agent_owner(name), owner, is_admin):
+            yield {"type": "delegate_end", "agent": name,
+                   "result": f"[委派失败] 未找到子智能体：{name}"}
+            return
         if not is_enabled(name):
             yield {"type": "delegate_end", "agent": name,
                    "result": f"[委派失败] 子智能体已停用：{name}"}
@@ -494,14 +506,14 @@ class Agent:
         g = get_ctx()
         sub_ctx = ToolContext(
             kb=g.kb, security=g.cfg.security,
-            user=owner or "anonymous", session=session,
+            user=owner or "anonymous", session=session, is_admin=is_admin,
         )
         sub = Agent(g.cfg, g.llm, g.kb, g.memory, sub_ctx, media=g.media,
                     context_engine=self.context_engine,
                     memory_manager=g.memory_manager)
         collected = []
         async for ev in sub.run(task, session, model=meta.get("model"),
-                                owner=owner, agent_name=name):
+                                owner=owner, agent_name=name, is_admin=is_admin):
             et = ev.get("type")
             if et == "token":
                 collected.append(ev["text"])

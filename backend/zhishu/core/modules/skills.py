@@ -39,9 +39,14 @@ def _read_skill_content(name: str) -> str:
     return ""
 
 
-def _enabled_skills(cfg: Optional[ZhishuConfig] = None) -> list[dict]:
-    """返回已启用技能的 [{"name","description","content"}] 列表。"""
-    from .runtime import load_state, read_meta, DISABLED_KEY
+def _enabled_skills(cfg: Optional[ZhishuConfig] = None,
+                    username: Optional[str] = None,
+                    is_admin: bool = False) -> list[dict]:
+    """返回已启用技能的 [{"name","description","content"}] 列表。
+
+    多用户隔离：仅返回「共享（无 owner）+ 本人」技能；admin 全量。
+    防止把 A 用户的私有技能正文注入 B 用户的系统提示（泄露面）。"""
+    from .runtime import load_state, read_meta, DISABLED_KEY, can_view
 
     try:
         if cfg is None:
@@ -61,6 +66,8 @@ def _enabled_skills(cfg: Optional[ZhishuConfig] = None) -> list[dict]:
             continue
         meta = read_meta("skills", name)
         if meta.get("enabled") is False:
+            continue
+        if not can_view(meta.get("owner") or None, username, is_admin):
             continue
         out.append({
             "name": name,
@@ -103,17 +110,19 @@ def _read_memory_files(cfg: ZhishuConfig, owner: str | None = None) -> list[str]
     return out
 
 
-def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None) -> str:
+def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None,
+                               is_admin: bool = False) -> str:
     """组装注入系统提示的 volatile 部分：已启用技能 + 长期记忆文件。
 
     开启 cfg.agent.skills_progressive 时改为「技能清单」模式（渐进披露）。
     无技能/记忆时返回空字符串（与重构前行为一致，不污染系统提示）。
-    长期记忆按 owner 隔离（见 user_memory_dir），防止跨用户记忆泄露。
+    长期记忆按 owner 隔离（见 user_memory_dir）；技能按 owner+is_admin 过滤，
+    防止跨用户记忆/技能泄露。
     """
     parts: list[str] = []
 
     progressive = getattr(getattr(cfg, "agent", None), "skills_progressive", False)
-    skills = _enabled_skills(cfg)
+    skills = _enabled_skills(cfg, username=owner, is_admin=is_admin)
     if skills:
         if progressive:
             lines = ["可用技能（调用 read_skill 工具并按需读取其完整指令）："]
@@ -180,7 +189,9 @@ async def maybe_learn(cfg, llm, *, user_message: str, answer: str,
         if not body:
             return None
 
-        # 元信息（module.json）供 modules API 读取/开关
+        # 元信息（module.json）供 modules API 读取/开关。
+        # 多用户隔离：自动沉淀的技能归属触发它的用户（私有）；
+        # 匿名/后台任务（anonymous/system）不写 owner，保持系统级共享。
         meta = {
             "name": slug,
             "description": (body.split("\n", 1)[0].lstrip("#").strip()
@@ -190,6 +201,8 @@ async def maybe_learn(cfg, llm, *, user_message: str, answer: str,
             "created_at": __import__("time").strftime("%Y-%m-%d %H:%M:%S"),
             "source_task": user_message[:200],
         }
+        if owner and owner not in ("anonymous", "system"):
+            meta["owner"] = owner
         with open(os.path.join(target, "module.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
         with open(os.path.join(target, "SKILL.md"), "w", encoding="utf-8") as f:

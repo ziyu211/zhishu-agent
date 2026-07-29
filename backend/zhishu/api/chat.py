@@ -205,6 +205,7 @@ async def chat(req: ChatReq, user=require_auth("chat")):
         # 不存在则按当前用户创建（保证 owner 隔离）
         conv = ctx.conversations.create(username, title="新对话", cid=req.session)
     owner = conv["owner"]
+    is_admin = role == "admin"
     # 记忆命名空间隔离：owner:session，即使 session id 相同也不会串号
     memory_session = f"{owner}:{req.session}"
 
@@ -214,12 +215,14 @@ async def chat(req: ChatReq, user=require_auth("chat")):
         memory_manager=ctx.memory_manager,
     )
 
-    # 指定子智能体时做存在/启用校验（避免越权或拼写错误）
+    # 指定子智能体时做存在/启用/归属校验（避免越权或拼写错误）
     target = None
     if req.agent:
-        from ..core.agents_runtime import get_agent_meta
+        from ..core.agents_runtime import get_agent_meta, agent_owner
+        from ..core.modules.runtime import can_view
         meta = get_agent_meta(req.agent)
-        if not meta:
+        # 多用户隔离：他人私有子智能体视同不存在（防枚举探测）
+        if not meta or not can_view(agent_owner(req.agent), username, is_admin):
             raise HTTPException(status_code=404, detail=f"未找到子智能体：{req.agent}")
         if not meta.get("enabled"):
             raise HTTPException(status_code=403, detail=f"子智能体已停用：{req.agent}")
@@ -229,7 +232,7 @@ async def chat(req: ChatReq, user=require_auth("chat")):
         try:
             async for ev in agent.run(req.message, memory_session, req.model,
                                       image=req.image, owner=owner, agent_name=target,
-                                      attachments=req.attachments):
+                                      attachments=req.attachments, is_admin=is_admin):
                 # SSE data 行；前端 EventSource.onmessage 解析 JSON
                 yield {"data": json.dumps(ev, ensure_ascii=False)}
         except Exception as e:  # noqa: BLE001
