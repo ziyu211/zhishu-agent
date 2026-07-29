@@ -7,11 +7,33 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+import contextvars
+from dataclasses import dataclass, field, replace
 from typing import Awaitable, Callable, Any, Optional
 
 from ..rag import KnowledgeBase
 from ..config import SecurityConfig
+
+# ---------------------------------------------------------------------------
+# 任务级用户身份（对标 hermes-agent session_context 的 contextvars 方案）
+#
+#   * 每个 asyncio 任务（即每个请求 / 每次 Agent.run）拥有独立的身份视图，
+#     并发请求之间互不覆盖 —— 杜绝共享可变对象导致的「身份串号」。
+#   * fail-closed：读取不到身份时返回 "anonymous"，绝不继承其他请求的值。
+# ---------------------------------------------------------------------------
+_current_user: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "zhishu_current_user", default=None
+)
+
+
+def set_current_user(user: Optional[str]) -> None:
+    """在当前 asyncio 任务上下文中标记当前用户（task-local，不跨任务泄漏）。"""
+    _current_user.set((user or "").strip() or "anonymous")
+
+
+def get_current_user() -> str:
+    """取当前任务的用户身份；未设置时 fail-closed 返回 "anonymous"。"""
+    return _current_user.get() or "anonymous"
 
 
 @dataclass
@@ -20,6 +42,15 @@ class ToolContext:
     security: Optional[SecurityConfig] = None
     user: str = "anonymous"
     session: str = "default"
+
+    def for_run(self, user: Optional[str], session: Optional[str] = None) -> "ToolContext":
+        """派生一份**本次运行专用**的上下文副本（浅拷贝）。
+
+        共享单例（AppContext.tool_ctx）保持只读，绝不在其上就地改 user/session，
+        否则并发请求会互相覆盖身份（fail-open 串号）。
+        """
+        u = (user or "").strip() or "anonymous"
+        return replace(self, user=u, session=(session or self.session))
 
 
 @dataclass

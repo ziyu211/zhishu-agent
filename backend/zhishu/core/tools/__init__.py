@@ -5,7 +5,10 @@
 """
 from __future__ import annotations
 
-from .base import Tool, ToolContext, Toolset, tool
+from .base import (
+    Tool, ToolContext, Toolset, tool,
+    set_current_user, get_current_user,
+)
 from .registry import ToolRegistry
 from .toolsets import TOOLSETS
 
@@ -15,4 +18,5 @@ ToolRegistry.discover_builtin_tools()
 __all__ = [
     "Tool", "ToolContext", "Toolset", "tool",
     "ToolRegistry", "TOOLSETS",
+    "set_current_user", "get_current_user",
 ]

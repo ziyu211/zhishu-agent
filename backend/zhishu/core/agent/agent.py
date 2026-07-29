@@ -19,7 +19,7 @@ import time
 from typing import AsyncIterator, Optional
 
 from ..providers.client import LLMClient
-from ..tools import ToolRegistry, ToolContext
+from ..tools import ToolRegistry, ToolContext, set_current_user
 from ..rag import KnowledgeBase
 from ..memory import MemoryStore, MemoryManager
 from ..modules import build_agent_context_prompt
@@ -71,9 +71,13 @@ class Agent:
         agent_name: Optional[str] = None,
         attachments: Optional[list] = None,
     ) -> AsyncIterator[dict]:
-        # 让工具（知识库/文件等）能感知当前用户，按归属隔离文档
-        if owner:
-            self.ctx.user = owner
+        # 让工具（知识库/文件等）能感知当前用户，按归属隔离文档。
+        # 安全（防并发串号）：绝不在共享单例 ToolContext 上就地改 user ——
+        # 并发请求会互相覆盖身份。这里派生**本次运行专用**的副本，并把身份
+        # 写入 contextvars（task-local），owner 为空时 fail-closed 落到 anonymous，
+        # 绝不继承上一个请求的身份。
+        self.ctx = self.ctx.for_run(owner, session)
+        set_current_user(self.ctx.user)
         # ---- 0. 按模型类型分流：图像 / 视频 走生成分支，文本走 ReAct 循环 ----
         try:
             pc, mdl = self.cfg.resolve_model(model)
