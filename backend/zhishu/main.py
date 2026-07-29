@@ -62,6 +62,25 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
                   "  3. 仅限本地开发：设置 ZHISHU_ALLOW_INSECURE_DEFAULTS=1 跳过本检查。",
                   file=sys.stderr, flush=True)
             raise SystemExit(2)
+    # 安全自检：enable_auth=False 时所有请求以 anonymous+admin 身份运行、数据不分
+    # 用户混存。仅适合本机单人使用；若同时监听非回环地址（对外可达），等同把
+    # 管理员权限暴露给整个网络，硬性拒绝启动（ZHISHU_ALLOW_INSECURE_DEFAULTS=1 可放行）。
+    if not cfg.security.enable_auth:
+        _loopback = str(getattr(cfg.server, "host", "")).strip() in (
+            "127.0.0.1", "localhost", "::1")
+        if _loopback or os.environ.get("ZHISHU_ALLOW_INSECURE_DEFAULTS") == "1":
+            print("[智枢][安全警告] 鉴权已关闭(enable_auth=false)：所有请求以匿名 admin "
+                  "运行、数据不分用户隔离，仅限本机单人使用！",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"[智枢][安全错误] 鉴权已关闭(enable_auth=false)且监听非回环地址 "
+                  f"({cfg.server.host})：任何能访问本服务的人都将获得匿名管理员权限。"
+                  "已拒绝启动。请任选其一：\n"
+                  "  1. 在部署配置(zhishu.yaml)中开启 security.enable_auth: true；\n"
+                  "  2. 将 server.host 改为 127.0.0.1（仅本机访问）；\n"
+                  "  3. 明确接受风险：设置 ZHISHU_ALLOW_INSECURE_DEFAULTS=1 跳过本检查。",
+                  file=sys.stderr, flush=True)
+            raise SystemExit(2)
     if cfg.security.admin_password == "zhishu@2026":
         print("[智枢][安全警告] 正在使用默认管理员口令，存在未授权登录风险！"
               "请在部署配置(zhishu.yaml)中修改 security.admin_password。",

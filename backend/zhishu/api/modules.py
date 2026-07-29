@@ -38,6 +38,15 @@ router = APIRouter(prefix="/api/v1", tags=["modules"])
 # ---------------------------------------------------------------------------
 # 通用：列表 / 启停
 # ---------------------------------------------------------------------------
+_ENV_MASK = "******"
+
+
+def _mask_env(env: Optional[dict]) -> dict:
+    """脱敏 MCP env：仅回传键名与掩码，绝不把密钥明文返回给前端。
+    前端保存时若某键的值仍为掩码，则视为未修改、保留原值（见 update_mcp）。"""
+    return {k: (_ENV_MASK if str(v or "") else "") for k, v in (env or {}).items()}
+
+
 def _list_modules(sub: str) -> list:
     from ..core.modules import module_dir as _md
     base = _md(sub, "")
@@ -64,7 +73,7 @@ def _list_modules(sub: str) -> list:
         if sub == "mcp":
             item["command"] = info.get("command", "")
             item["args"] = info.get("args", [])
-            item["env"] = info.get("env", {})
+            item["env"] = _mask_env(info.get("env", {}))
         out.append(item)
     return out
 
@@ -252,12 +261,41 @@ async def list_plugins(user=require_auth("modules:read")):
     return {"plugins": _list_modules("plugins")}
 
 
+def _mask_plugin_tools(tools: Optional[list]) -> list:
+    """脱敏插件工具定义中的 http headers（可能含 Authorization/API Key）。"""
+    out = []
+    for t in tools or []:
+        if isinstance(t, dict) and t.get("headers"):
+            t = dict(t)
+            t["headers"] = _mask_env(t.get("headers"))
+        out.append(t)
+    return out
+
+
+def _restore_plugin_tools(new_tools: list, old_tools: Optional[list]) -> list:
+    """保存插件时：headers 中值为掩码的键视为未修改，从旧配置恢复明文。"""
+    old_by_name = {t.get("name"): t for t in (old_tools or []) if isinstance(t, dict)}
+    out = []
+    for t in new_tools or []:
+        if isinstance(t, dict) and t.get("headers"):
+            t = dict(t)
+            old_h = (old_by_name.get(t.get("name")) or {}).get("headers") or {}
+            t["headers"] = {
+                k: (old_h.get(k, "") if str(v) == _ENV_MASK else v)
+                for k, v in dict(t["headers"]).items()
+            }
+        out.append(t)
+    return out
+
+
 @router.get("/plugins/{name}")
 async def get_plugin(name: str, user=require_auth("modules:read")):
     if not os.path.isdir(module_dir("plugins", name)):
         raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
     info = read_meta("plugins", name)
     info["name"] = name
+    # 安全：http 工具 headers 脱敏后再回传
+    info["tools"] = _mask_plugin_tools(info.get("tools"))
     info["enabled"] = name not in set(load_state().get("plugins_disabled", []))
     return info
 
@@ -286,10 +324,13 @@ async def update_plugin(name: str, body: PluginUpdate, user=require_auth("module
     if not os.path.isdir(module_dir("plugins", name)):
         raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
     meta = read_meta("plugins", name)
-    for k in ("description", "version", "enabled", "tools"):
+    for k in ("description", "version", "enabled"):
         v = getattr(body, k)
         if v is not None:
             meta[k] = v
+    if body.tools is not None:
+        # 安全：headers 中掩码值恢复为原明文，防止掩码覆盖真实密钥
+        meta["tools"] = _restore_plugin_tools(body.tools, meta.get("tools"))
     write_meta("plugins", name, meta)
     _sync_plugins()
     return {"ok": True, "name": name}
@@ -401,6 +442,8 @@ async def get_mcp(name: str, user=require_auth("modules:read")):
         raise HTTPException(status_code=404, detail=f"未找到 MCP 服务器：{name}")
     info = read_meta("mcp", name)
     info["name"] = name
+    # 安全：env 密钥脱敏后再回传
+    info["env"] = _mask_env(info.get("env", {}))
     info["enabled"] = name not in set(load_state().get("mcp_disabled", []))
     st = get_ctx().modules.status().get(name, {})
     info["connected"] = st.get("connected", False)
@@ -434,10 +477,17 @@ async def update_mcp(name: str, body: McpUpdate, user=require_auth("modules:writ
     if not os.path.isdir(module_dir("mcp", name)):
         raise HTTPException(status_code=404, detail=f"未找到 MCP 服务器：{name}")
     meta = read_meta("mcp", name)
-    for k in ("description", "version", "enabled", "command", "args", "env"):
+    for k in ("description", "version", "enabled", "command", "args"):
         v = getattr(body, k)
         if v is not None:
             meta[k] = v
+    if body.env is not None:
+        # 安全：值为掩码（******）的键视为未修改，保留原有明文，防止掩码覆盖真实密钥
+        old_env = meta.get("env") or {}
+        new_env = {}
+        for k, v in body.env.items():
+            new_env[k] = old_env.get(k, "") if str(v) == _ENV_MASK else v
+        meta["env"] = new_env
     write_meta("mcp", name, meta)
     return {"ok": True, "name": name}
 
