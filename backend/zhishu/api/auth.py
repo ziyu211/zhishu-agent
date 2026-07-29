@@ -1,12 +1,27 @@
 """智枢智能体 —— 鉴权路由 + 依赖。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Header
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, HTTPException, Header, Response
 from pydantic import BaseModel
 
 from ..context import get_ctx
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+
+# /media 静态资源鉴权 Cookie 名（main.py 的 media 闸门中间件校验）。
+# 浏览器 <img src="/media/..."> 不携带 Authorization 头，故在登录 /
+# 会话校验时种一个 HttpOnly Cookie（作用域限 /media），实现同源受保护访问。
+MEDIA_COOKIE = "zs_media_token"
+
+
+def _set_media_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        MEDIA_COOKIE, quote(token, safe=""),
+        path="/media", httponly=True, samesite="lax",
+        max_age=86400 * 7,
+    )
 
 
 class LoginReq(BaseModel):
@@ -31,13 +46,14 @@ async def auth_status():
 
 
 @router.post("/login")
-async def login(req: LoginReq):
+async def login(req: LoginReq, response: Response):
     ctx = get_ctx()
     session = ctx.auth.login(req.username, req.password)
     if not session:
         ctx.audit.log(req.username, "login_failed", "用户名或密码错误")
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     ctx.audit.log(req.username, "login", f"登录成功（{session['role_label']}）")
+    _set_media_cookie(response, session["token"])
     return session
 
 
@@ -58,9 +74,14 @@ def _current(authorization: str | None) -> dict:
 
 
 @router.get("/me")
-async def me(authorization: str | None = Header(None)):
+async def me(response: Response, authorization: str | None = Header(None)):
     from ..core.security import ROLE_LABELS, ROLES
     data = _current(authorization)
+    # 已在线会话（token 存 localStorage）打开页面时经 /me 刷新 media Cookie，
+    # 使旧会话无需重新登录即可访问受保护的 /media 资源。
+    token = _extract_token(authorization)
+    if token:
+        _set_media_cookie(response, token)
     role = data.get("r", "")
     return {
         "user": data.get("u", ""),

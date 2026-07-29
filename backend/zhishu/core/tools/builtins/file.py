@@ -33,12 +33,17 @@ _IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff", ".svg"}
 
 
 def _resolve_read_path(path: str) -> str | None:
-    """把各类路径解析为磁盘绝对路径，且必须落在 data_dir / 其上级工作区 / sandbox 内（防越权）。
+    """把各类路径解析为磁盘绝对路径，且必须落在 media 托管目录或 sandbox 内（防越权）。
 
-    支持：/media/ URL、data_dir 内绝对路径、相对 data_dir 或 sandbox 的路径、
-    以及带 file:// 前缀的绝对路径（模型常返回此类）。
-    允许范围放宽到 data_dir 的上级（即 backend 工作区根），以兼容不同 cwd 启动时
-    stored_path 落在 data/generated/... 等情况；内网 agent 工作区可读属预期。
+    支持：/media/ URL、附件 stored_path（绝对路径，位于 media 目录内）、
+    相对 media 或 sandbox 的路径、以及带 file:// 前缀的绝对路径（模型常返回此类）。
+
+    安全（收紧后的白名单）：仅允许
+      1. data_dir/<media.store_dir>（附件与生成产物托管目录）
+      2. code_exec 沙箱目录
+    显式排除 data_dir 根与后端工作区根 —— 那里存放 providers.json（模型密钥）、
+    users.json（口令哈希）、config.override.json、各 SQLite 库、按用户隔离的
+    memory/ 目录以及后端源码，一律不得经 read_file 读取。
     """
     from ....context import get_ctx
 
@@ -47,20 +52,23 @@ def _resolve_read_path(path: str) -> str | None:
     if p.startswith("file://"):
         p = p[len("file://"):]
     p = p.strip().strip('"').strip("'")
-    # 统一转绝对，确保 stored_path（绝对）与 data_dir/sandbox 前缀比对一致
+    # 统一转绝对，确保 stored_path（绝对）与 media/sandbox 前缀比对一致
     data_dir = os.path.abspath(c.cfg.server.data_dir)
-    work_root = os.path.dirname(data_dir)  # backend 工作区根
+    media_root = os.path.normpath(os.path.join(data_dir, c.cfg.media.store_dir))
     sb = os.path.abspath(SANDBOX_ROOT)
     if p.startswith("/media/"):
         p = p[len("/media/"):]
-        cand = os.path.normpath(os.path.join(data_dir, c.cfg.media.store_dir, p))
+        cand = os.path.normpath(os.path.join(media_root, p))
     elif os.path.isabs(p):
         cand = os.path.normpath(p)
     else:
+        in_media = os.path.normpath(os.path.join(media_root, p))
         in_data = os.path.normpath(os.path.join(data_dir, p))
         in_sb = os.path.normpath(os.path.join(sb, p))
-        cand = in_data if os.path.isfile(in_data) else in_sb
-    allowed = [data_dir, work_root, sb]
+        # 相对路径优先按 media → sandbox 解析（data_dir 前缀仅为兼容
+        # "generated/xx" 之类的历史相对写法，最终仍受白名单校验）
+        cand = next((x for x in (in_media, in_data, in_sb) if os.path.isfile(x)), in_sb)
+    allowed = [media_root, sb]
     if not any(cand == a or cand.startswith(a + os.sep) for a in allowed):
         return None
     return cand

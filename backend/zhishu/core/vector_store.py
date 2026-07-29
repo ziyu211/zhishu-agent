@@ -88,6 +88,10 @@ class VectorStore:
         meta: Optional[dict] = None,
     ):
         meta = meta or {}
+        # 安全/一致性：同一 doc_id 重复入库时，先清掉旧分块向量再写入，
+        # 避免 documents 行被 UPSERT（归属/内容已更新）而 vectors 表残留
+        # 旧内容分块 —— 旧实现会导致检索命中已被覆盖文档的历史内容（串库）。
+        self._conn.execute("DELETE FROM vectors WHERE doc_id=?", (doc_id,))
         cur = self._conn.executemany(
             "INSERT INTO vectors (doc_id, text, meta, vec) VALUES (?,?,?,?)",
             [
@@ -163,10 +167,14 @@ class VectorStore:
         # 内存索引内计算余弦相似度（O(n)，n=向量数，通常数千级，亚秒级）
         cand = self._index
         if owner is not None:
-            # owner 过滤：仅本人文档 + owner IS NULL 的共享文档
+            # owner 过滤：仅本人文档 + owner IS NULL 的共享文档。
+            # 防御：doc_id 必须存在于 owner_map 中，否则视为未知/脏数据一律隐藏
+            # （宁可漏显也不外泄），杜绝因内存索引未及时重建导致私有文档被误判为
+            # 共享文档而跨用户泄露。
             cand = [
                 (i, d, v) for (i, d, v) in self._index
-                if (self._owner_map.get(d) == owner) or (self._owner_map.get(d) is None)
+                if d in self._owner_map
+                and (self._owner_map[d] == owner or self._owner_map[d] is None)
             ]
         scored = []
         for _id, doc_id, v in cand:

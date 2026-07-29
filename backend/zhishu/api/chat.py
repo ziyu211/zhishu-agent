@@ -145,11 +145,18 @@ async def chat_parse(
     """
     ctx = get_ctx()
     p = (path or "").strip()
+    media_root = os.path.normpath(os.path.abspath(
+        os.path.join(ctx.cfg.server.data_dir, ctx.cfg.media.store_dir)))
     if p.startswith("/media/"):
         p = p[len("/media/"):]
-        abs_path = os.path.join(ctx.cfg.server.data_dir, ctx.cfg.media.store_dir, p)
+        abs_path = os.path.normpath(os.path.join(media_root, p))
     else:
-        abs_path = p  # 已是 chat/attach 返回的 stored_path（位于 data_dir 内）
+        # chat/attach 返回的 stored_path（绝对路径），必须位于 media 托管目录内
+        abs_path = os.path.normpath(os.path.abspath(p))
+    # 安全：白名单校验 —— 只允许解析 media 目录内的已落盘附件，
+    # 拒绝任意绝对路径（防止读取 providers.json、users.json、他人记忆、源码等）
+    if not (abs_path == media_root or abs_path.startswith(media_root + os.sep)):
+        raise HTTPException(status_code=403, detail="非法附件路径")
     if not abs_path or not os.path.isfile(abs_path):
         raise HTTPException(status_code=404, detail="附件不存在")
     owner = user.get("u")

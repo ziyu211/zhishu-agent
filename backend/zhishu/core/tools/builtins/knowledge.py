@@ -14,7 +14,8 @@ from ..base import tool
 async def knowledge_search(args: dict, ctx) -> str:
     if not ctx.kb:
         return "[提示] 未初始化知识库。"
-    hits = ctx.kb.query(args.get("question", ""), int(args.get("top_k", 5)))
+    # 安全：必须按当前用户过滤（owner + 全局共享文档），防止跨用户知识泄露
+    hits = ctx.kb.query(args.get("question", ""), int(args.get("top_k", 5)), owner=ctx.user)
     if not hits:
         return "知识库暂无相关结果。"
     out = []

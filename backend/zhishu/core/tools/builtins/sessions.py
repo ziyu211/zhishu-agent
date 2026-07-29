@@ -30,19 +30,25 @@ def _preview(text: str, n: int = _MAX_SNIPPET) -> str:
     return t[:n] + ("…" if len(t) > n else "")
 
 
-def _discover(conn, query: str, limit: int) -> str:
-    """跨会话 FTS 检索，按会话去重。FTS 不可用时降级 LIKE。"""
+def _discover(conn, query: str, limit: int, owner_prefix: str) -> str:
+    """跨会话 FTS 检索，按会话去重。FTS 不可用时降级 LIKE。
+
+    安全：所有查询强制按 ``owner_prefix``（``{owner}:%``）过滤，
+    仅检索当前用户自己的会话，防止跨用户历史泄露。
+    """
     rows: list[tuple] = []
     try:
         rows = conn.execute(
             "SELECT session, content FROM turns_fts WHERE turns_fts MATCH ? "
-            "ORDER BY rank LIMIT 100", (query,)).fetchall()
+            "AND session LIKE ? ORDER BY rank LIMIT 100",
+            (query, owner_prefix)).fetchall()
     except sqlite3.OperationalError:
         pass
     if not rows:
         rows = conn.execute(
             "SELECT session, content FROM turns WHERE content LIKE ? "
-            "ORDER BY id DESC LIMIT 100", (f"%{query}%",)).fetchall()
+            "AND session LIKE ? ORDER BY id DESC LIMIT 100",
+            (f"%{query}%", owner_prefix)).fetchall()
     if not rows:
         return f"[session_search] 未在历史会话中检索到「{query}」相关内容。"
     # 按会话去重（保留首个命中片段）
@@ -63,10 +69,13 @@ def _discover(conn, query: str, limit: int) -> str:
     return "\n".join(lines)
 
 
-def _scroll(conn, session_id: str, window: int) -> str:
+def _scroll(conn, session_id: str, window: int, owner: str) -> str:
+    # 安全：session 键为 "owner:session" 格式。无论模型传入什么 session_id，
+    # 都强制归一化到当前用户命名空间，杜绝翻阅他人会话。
+    sid = session_id if session_id.startswith(f"{owner}:") else f"{owner}:{session_id}"
     rows = conn.execute(
         "SELECT role, content, ts FROM turns WHERE session=? "
-        "ORDER BY id DESC LIMIT ?", (session_id, window)).fetchall()
+        "ORDER BY id DESC LIMIT ?", (sid, window)).fetchall()
     if not rows:
         return f"[session_search] 会话 {session_id} 不存在或无消息。"
     lines = [f"[session_search] 会话 {session_id} 最近 {len(rows)} 条消息（旧→新）："]
@@ -75,10 +84,12 @@ def _scroll(conn, session_id: str, window: int) -> str:
     return "\n".join(lines)
 
 
-def _browse(conn, limit: int) -> str:
+def _browse(conn, limit: int, owner_prefix: str) -> str:
     rows = conn.execute(
         "SELECT session, MAX(ts) AS last_ts, COUNT(*) AS n FROM turns "
-        "GROUP BY session ORDER BY last_ts DESC LIMIT ?", (limit,)).fetchall()
+        "WHERE session LIKE ? "
+        "GROUP BY session ORDER BY last_ts DESC LIMIT ?",
+        (owner_prefix, limit)).fetchall()
     if not rows:
         return "[session_search] 尚无历史会话。"
     lines = [f"[session_search] 最近 {len(rows)} 个会话："]
@@ -111,15 +122,21 @@ async def session_search(args: dict, ctx: ToolContext) -> str:
         conn = _conn()
     except Exception as e:
         return f"[session_search] 会话记忆不可用：{e}"
+    # 安全：以当前用户为命名空间（turns.session 格式为 "owner:session"），
+    # 所有模式一律仅访问本人会话，防止跨用户历史泄露。
+    owner = (getattr(ctx, "user", None) or "").strip()
+    if not owner:
+        return "[session_search] 无法确定当前用户身份，已拒绝访问历史会话。"
+    owner_prefix = f"{owner}:%"
     limit = max(1, min(int(args.get("limit") or _MAX_SESSIONS), 20))
     window = max(1, min(int(args.get("window") or 20), _MAX_WINDOW))
     query = (args.get("query") or "").strip()
     session_id = (args.get("session_id") or "").strip()
     try:
         if session_id:
-            return _scroll(conn, session_id, window)
+            return _scroll(conn, session_id, window, owner)
         if query:
-            return _discover(conn, query, limit)
-        return _browse(conn, limit)
+            return _discover(conn, query, limit, owner_prefix)
+        return _browse(conn, limit, owner_prefix)
     except Exception as e:  # noqa: BLE001
         return f"[session_search 失败] {e}"

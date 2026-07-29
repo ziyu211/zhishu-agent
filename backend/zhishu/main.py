@@ -40,14 +40,34 @@ async def lifespan(app: FastAPI):
 
 
 def create_app(cfg: ZhishuConfig) -> FastAPI:
-    init_ctx(cfg)
-    # 安全自检：使用默认签名密钥或可猜测的管理员口令时发出告警（不阻断启动，
-    # 但提醒运维在部署配置中覆盖 security.secret / security.admin_password）。
-    if cfg.security.secret == "change-me-zhishu-secret" or cfg.security.admin_password == "zhishu@2026":
-        import sys
-        print("[智枢][安全警告] 正在使用默认 secret / 管理员口令，存在 token 伪造与未授权登录风险！"
-              "请在部署配置(zhishu.yaml)中修改 security.secret 与 security.admin_password。",
+    import sys
+
+    # 环境变量覆盖签名密钥（便于容器部署无需改配置文件）
+    env_secret = os.environ.get("ZHISHU_SECRET", "").strip()
+    if env_secret:
+        cfg.security.secret = env_secret
+
+    # 安全自检（硬闸门）：默认签名密钥意味着任何人都能离线伪造任意用户/角色的
+    # token（含 admin），等同鉴权完全失效。开启鉴权时禁止以默认密钥启动，
+    # 仅当显式设置 ZHISHU_ALLOW_INSECURE_DEFAULTS=1（本地开发）才放行。
+    if cfg.security.enable_auth and cfg.security.secret == "change-me-zhishu-secret":
+        if os.environ.get("ZHISHU_ALLOW_INSECURE_DEFAULTS") == "1":
+            print("[智枢][安全警告] 默认 secret + ZHISHU_ALLOW_INSECURE_DEFAULTS=1：仅限本地开发！",
+                  file=sys.stderr, flush=True)
+        else:
+            print("[智枢][安全错误] 检测到默认签名密钥(change-me-zhishu-secret)，"
+                  "存在 token 伪造风险，已拒绝启动。请任选其一：\n"
+                  "  1. 在部署配置(zhishu.yaml)中设置 security.secret 为强随机值；\n"
+                  "  2. 设置环境变量 ZHISHU_SECRET=<强随机值>；\n"
+                  "  3. 仅限本地开发：设置 ZHISHU_ALLOW_INSECURE_DEFAULTS=1 跳过本检查。",
+                  file=sys.stderr, flush=True)
+            raise SystemExit(2)
+    if cfg.security.admin_password == "zhishu@2026":
+        print("[智枢][安全警告] 正在使用默认管理员口令，存在未授权登录风险！"
+              "请在部署配置(zhishu.yaml)中修改 security.admin_password。",
               file=sys.stderr, flush=True)
+
+    init_ctx(cfg)
     app = FastAPI(title="智枢智能体 Zhishu Agent", version="1.0.0", lifespan=lifespan)
 
     # 同源部署（FastAPI 直接托管前端）下本不需 CORS；保留以兼容独立前端/调试。
@@ -76,6 +96,31 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
         return {"status": "ok", "service": "zhishu-agent", "version": "1.0.0"}
 
     # ---- 多模态产物托管（/media，需在 SPA catch-all 之前挂载）----
+    # 安全：/media 存放所有用户的附件与生成产物，挂载鉴权闸门中间件，
+    # 未登录（无有效 token）一律 401。token 来源三选一：
+    #   Authorization 头（API 调用） / ?token= 查询参数（外部工具） /
+    #   HttpOnly Cookie（浏览器 <img>/<a>，登录及 /auth/me 时自动种下）。
+    @app.middleware("http")
+    async def media_auth_gate(request, call_next):
+        p = request.url.path
+        if p == "/media" or p.startswith("/media/"):
+            ctx = get_ctx()
+            if ctx.cfg.security.enable_auth:
+                from urllib.parse import unquote
+                token = None
+                auth_hdr = request.headers.get("authorization") or ""
+                if auth_hdr:
+                    token = auth_hdr[7:] if auth_hdr.startswith("Bearer ") else auth_hdr
+                if not token:
+                    token = request.query_params.get("token")
+                if not token:
+                    raw_cookie = request.cookies.get("zs_media_token")
+                    token = unquote(raw_cookie) if raw_cookie else None
+                if not token or not ctx.auth.verify(token):
+                    return JSONResponse({"detail": "未登录或登录已过期，无法访问受保护资源"},
+                                        status_code=401)
+        return await call_next(request)
+
     media_dir = os.path.join(cfg.server.data_dir, cfg.media.store_dir)
     os.makedirs(media_dir, exist_ok=True)
     app.mount("/media", StaticFiles(directory=media_dir), name="media")

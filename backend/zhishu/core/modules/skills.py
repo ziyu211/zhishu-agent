@@ -70,10 +70,32 @@ def _enabled_skills(cfg: Optional[ZhishuConfig] = None) -> list[dict]:
     return out
 
 
-def _read_memory_files(cfg: ZhishuConfig) -> list[str]:
+def user_memory_dir(data_dir: str, owner: str | None) -> str:
+    """按用户隔离的长期记忆目录（安全）。
+
+    - 有明确用户（多用户鉴权开启）→ ``data_dir/memory/{owner}/``，
+      每个用户独立的 MEMORY.md / USER.md / SOUL.md，互不可见。
+    - 无用户上下文（enable_auth=False 的 anonymous / system 后台任务）→
+      退回 ``data_dir`` 根（历史全局文件，单用户部署行为不变）。
+    owner 会被清洗为安全目录名，防止路径穿越。
+    """
+    if not owner or owner in ("anonymous", "system"):
+        return data_dir
+    import re as _re
+    safe = _re.sub(r"[^\w.\-]", "_", str(owner))[:64] or "_"
+    d = os.path.join(data_dir, "memory", safe)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return data_dir
+    return d
+
+
+def _read_memory_files(cfg: ZhishuConfig, owner: str | None = None) -> list[str]:
     out = []
+    base = user_memory_dir(cfg.server.data_dir, owner)
     for key, fn in (("memory", "MEMORY.md"), ("user", "USER.md"), ("soul", "SOUL.md")):
-        p = os.path.join(cfg.server.data_dir, fn)
+        p = os.path.join(base, fn)
         if os.path.isfile(p):
             txt = open(p, encoding="utf-8").read().strip()
             if txt:
@@ -81,11 +103,12 @@ def _read_memory_files(cfg: ZhishuConfig) -> list[str]:
     return out
 
 
-def build_agent_context_prompt(cfg: ZhishuConfig) -> str:
+def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None) -> str:
     """组装注入系统提示的 volatile 部分：已启用技能 + 长期记忆文件。
 
     开启 cfg.agent.skills_progressive 时改为「技能清单」模式（渐进披露）。
     无技能/记忆时返回空字符串（与重构前行为一致，不污染系统提示）。
+    长期记忆按 owner 隔离（见 user_memory_dir），防止跨用户记忆泄露。
     """
     parts: list[str] = []
 
@@ -102,7 +125,7 @@ def build_agent_context_prompt(cfg: ZhishuConfig) -> str:
             if blocks:
                 parts.append("【已启用技能 Skills】\n" + "\n\n".join(blocks))
 
-    parts.extend(_read_memory_files(cfg))
+    parts.extend(_read_memory_files(cfg, owner))
     return "\n\n".join(p for p in parts if p)
 
 
@@ -238,7 +261,9 @@ async def maybe_reflect(cfg, llm, *, user_message: str, answer: str,
             return None
 
         from ...context import get_ctx
-        mem_path = _os.path.join(get_ctx().cfg.server.data_dir, "MEMORY.md")
+        # 安全：反思沉淀写入当前用户自己的记忆目录，不污染他人/全局记忆
+        mem_path = _os.path.join(
+            user_memory_dir(get_ctx().cfg.server.data_dir, owner), "MEMORY.md")
         new_block = "\n".join(f"- {f}" for f in facts)
         with _REFLECT_LOCK:
             head = ""

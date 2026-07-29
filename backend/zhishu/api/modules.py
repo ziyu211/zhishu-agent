@@ -491,10 +491,16 @@ async def call_mcp(name: str, body: McpCallBody, user=require_auth("modules:writ
 _MEMORY_FILES = {"memory": "MEMORY.md", "user": "USER.md", "soul": "SOUL.md"}
 
 
+def _memory_base(user: dict) -> str:
+    """安全：记忆端点按登录用户隔离（data_dir/memory/{owner}/），
+    与 Agent 的 memory 工具、系统提示注入使用同一命名空间。"""
+    from ..core.modules.skills import user_memory_dir
+    return user_memory_dir(get_ctx().cfg.server.data_dir, user.get("u"))
+
+
 @router.get("/memory")
 async def get_memory(user=require_auth("modules:read")):
-    ctx = get_ctx()
-    base = ctx.cfg.server.data_dir
+    base = _memory_base(user)
     out: dict = {}
     for key, fn in _MEMORY_FILES.items():
         p = os.path.join(base, fn)
@@ -510,8 +516,7 @@ class _MemoryBody(BaseModel):
 
 @router.put("/memory")
 async def save_memory(body: _MemoryBody, user=require_auth("modules:write")):
-    ctx = get_ctx()
-    base = ctx.cfg.server.data_dir
+    base = _memory_base(user)
     os.makedirs(base, exist_ok=True)
     payload = body.model_dump(exclude_none=True)
     for key, fn in _MEMORY_FILES.items():
@@ -523,8 +528,7 @@ async def save_memory(body: _MemoryBody, user=require_auth("modules:write")):
 
 @router.get("/memory/export")
 async def export_memory(user=require_auth("modules:read")):
-    ctx = get_ctx()
-    base = ctx.cfg.server.data_dir
+    base = _memory_base(user)
     parts = []
     for key, fn in _MEMORY_FILES.items():
         p = os.path.join(base, fn)
@@ -535,8 +539,7 @@ async def export_memory(user=require_auth("modules:read")):
 
 @router.get("/memory/search")
 async def search_memory(q: str = "", user=require_auth("modules:read")):
-    ctx = get_ctx()
-    base = ctx.cfg.server.data_dir
+    base = _memory_base(user)
     hits: list = []
     if q:
         for key, fn in _MEMORY_FILES.items():

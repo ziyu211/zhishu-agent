@@ -66,8 +66,8 @@ def build_system_prompt(
     stable = cfg.system_prompt
 
     volatile: list[str] = []
-    # 已启用技能 + 长期记忆（MEMORY/USER/SOUL.md）
-    extra = build_agent_context_prompt(cfg)
+    # 已启用技能 + 长期记忆（MEMORY/USER/SOUL.md，按 owner 用户隔离）
+    extra = build_agent_context_prompt(cfg, owner=owner)
     if extra:
         volatile.append(extra)
     # 知识库检索增强

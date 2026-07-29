@@ -924,7 +924,14 @@ class KnowledgeBase:
     ) -> dict:
         """从上传的二进制内容解析并入库。失败时抛出 ValueError。"""
         text, file_type = read_file_text(filename, raw, self.media_dir)
-        doc_id = doc_id or os.path.splitext(filename)[0] or uuid.uuid4().hex[:12]
+        if not doc_id:
+            # 安全：doc_id 以「owner+文件名」哈希命名空间化 —— 不同用户上传同名
+            # 文件不会碰撞（旧实现直接用文件名，B 上传同名文件会顶掉 A 的文档
+            # 归属并造成向量串库）；同一用户重复上传同名文件仍覆盖自己的旧文档。
+            import hashlib
+            stem = os.path.splitext(filename)[0] or filename or "doc"
+            doc_id = hashlib.sha1(
+                f"{owner or ''}:{stem}".encode("utf-8")).hexdigest()[:16]
         raw_path = self._save_raw(doc_id, filename, raw)
         return self.ingest_text(
             text,

@@ -24,17 +24,19 @@ _FILES = {
 _KEY_LABEL = {"memory": "长期记忆", "user": "用户画像", "soul": "人格设定"}
 
 
-def _data_dir() -> str:
+def _base_dir(owner: Optional[str]) -> str:
+    """按用户隔离的记忆目录（安全：防止跨用户读写他人长期记忆）。"""
     from ....context import get_ctx
-    return get_ctx().cfg.server.data_dir
+    from ...modules.skills import user_memory_dir
+    return user_memory_dir(get_ctx().cfg.server.data_dir, owner)
 
 
-def _path(key: str) -> str:
-    return os.path.join(_data_dir(), _FILES.get(key, "MEMORY.md"))
+def _path(key: str, owner: Optional[str]) -> str:
+    return os.path.join(_base_dir(owner), _FILES.get(key, "MEMORY.md"))
 
 
-def _read(key: str) -> str:
-    p = _path(key)
+def _read(key: str, owner: Optional[str]) -> str:
+    p = _path(key, owner)
     if not os.path.isfile(p):
         return ""
     try:
@@ -43,8 +45,8 @@ def _read(key: str) -> str:
         return ""
 
 
-def _append(key: str, text: str) -> None:
-    p = _path(key)
+def _append(key: str, text: str, owner: Optional[str]) -> None:
+    p = _path(key, owner)
     with _LOCK:
         head = ""
         if os.path.isfile(p):
@@ -56,16 +58,16 @@ def _append(key: str, text: str) -> None:
             f.write(head + text.rstrip() + "\n")
 
 
-def _replace_section(key: str, text: str) -> None:
+def _replace_section(key: str, text: str, owner: Optional[str]) -> None:
     """整体覆盖某个记忆文件（用于 user/soul 画像更新）。"""
-    p = _path(key)
+    p = _path(key, owner)
     with _LOCK:
         with open(p, "w", encoding="utf-8") as f:
             f.write(text.strip() + "\n")
 
 
-def _forget(key: str, keyword: str) -> int:
-    p = _path(key)
+def _forget(key: str, keyword: str, owner: Optional[str]) -> int:
+    p = _path(key, owner)
     if not os.path.isfile(p) or not keyword:
         return 0
     with _LOCK:
@@ -120,6 +122,9 @@ async def memory(args: dict, ctx) -> str:
     key = (args.get("key") or "memory").lower()
     if key not in _FILES:
         key = "memory"
+    # 安全：记忆读写以当前用户为命名空间（data_dir/memory/{owner}/），
+    # 防止用户 A 读取/篡改用户 B 的长期记忆。
+    owner = getattr(ctx, "user", None)
 
     # ---- recall ----
     if action == "recall":
@@ -127,7 +132,7 @@ async def memory(args: dict, ctx) -> str:
         parts: list[str] = []
         targets = [key] if key != "memory" else list(_FILES.keys())
         for k in targets:
-            txt = _read(k)
+            txt = _read(k, owner)
             if not txt:
                 continue
             if q:
@@ -148,7 +153,7 @@ async def memory(args: dict, ctx) -> str:
         # 规整为单行条目
         content = re.sub(r"\s+", " ", content)
         k = "user" if key == "user" else "memory"
-        _append(k, f"- {content}")
+        _append(k, f"- {content}", owner)
         return f"[memory] 已保存到{_KEY_LABEL[k]}：{content[:120]}"
 
     # ---- update_user（整体覆盖 USER.md）----
@@ -156,7 +161,7 @@ async def memory(args: dict, ctx) -> str:
         content = (args.get("content") or "").strip()
         if not content:
             return "[memory] update_user 需要提供 content"
-        _replace_section("user", content)
+        _replace_section("user", content, owner)
         return f"[memory] 已更新用户画像(USER.md)，共 {len(content.splitlines())} 行"
 
     # ---- forget ----
@@ -164,7 +169,7 @@ async def memory(args: dict, ctx) -> str:
         kw = (args.get("keyword") or "").strip()
         if not kw:
             return "[memory] forget 需要提供 keyword"
-        removed = _forget(key, kw)
+        removed = _forget(key, kw, owner)
         return f"[memory] 从{_KEY_LABEL[key]}删除 {removed} 条包含「{kw}」的记忆"
 
     return f"[memory] 未知 action：{action}"
