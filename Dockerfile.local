@@ -1,18 +1,8 @@
 # 智枢智能体 —— 本机专用镜像（零代理依赖，适配受限/离线网络）
-# 基础镜像走华为云 SWR ddn-k8s 镜像代理（直连可达，无需 docker.io / 代理）
-# npm 走 npmmirror、pip 走腾讯云镜像（均直连可达）
+# 前端产物已预构建并提交到 backend/zhishu/static/，本镜像直接 COPY。
 # 构建：docker build -t zsagent:1.0.0 -f Dockerfile.local .
 
-# ---------- 阶段1：构建前端（Vue3 + Vite + Naive UI）----------
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/node:18-alpine AS fe
-WORKDIR /app
-# 使用国内 npm 镜像（直连可达）
-RUN npm config set registry https://registry.npmmirror.com
-COPY frontend/ ./frontend/
-RUN cd frontend && npm install && npm run build   # 产物输出到 /app/backend/zhishu/static
-
-# ---------- 阶段2：Python 运行环境 ----------
-FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim AS be
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim
 WORKDIR /app
 
 # 使用国内 pip 镜像（直连可达）
@@ -21,7 +11,6 @@ RUN pip config set global.index-url https://mirrors.cloud.tencent.com/pypi/simpl
 # 安装 Python 依赖（requirements.txt 在项目根，需一并复制进 backend/）
 COPY backend/ ./backend/
 COPY requirements.txt ./backend/requirements.txt
-COPY --from=fe /app/backend/zhishu/static ./backend/zhishu/static
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
 # 拷贝配置（使用已入库的 example，避免提交含密钥的真实配置）
