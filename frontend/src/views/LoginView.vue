@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { api, setToken, saveUser } from '@/api/client'
+import { api, setToken } from '@/api/client'
+import { useAppStore } from '@/stores/app'
 
 const router = useRouter()
 const route = useRoute()
+const app = useAppStore()
 
 const username = ref('')
 const password = ref('')
@@ -26,7 +28,7 @@ async function handleLogin() {
   try {
     const res = await api.login(username.value.trim(), password.value)
     setToken(res.token)
-    saveUser({
+    app.setUser({
       user: res.user,
       role: res.role,
       role_label: res.role_label,
