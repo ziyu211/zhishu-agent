@@ -1,10 +1,10 @@
 ---
-name: zlbook
-description: 智枢 zhishu-agent 平台的「业务功能闭环」审查与优化方法论（蒸馏思维框架）。当用户要求对 zhishu-agent 的功能模块逐模块审查、使其形成「权限→后端→前端→自助→持久化」完整业务闭环，或排查「功能存在却用不上」的断点时触发；也适用于把一次完整工程实践蒸馏成可复用的思维框架 / 检查清单。
+name: zhishu-closure
+description: 智枢 zhishu-agent 平台的「业务功能闭环」审查与优化方法论。当用户要求对 zhishu-agent 的功能模块逐模块审查、使其形成「权限→后端→前端→自助→持久化」完整业务闭环，或排查「功能存在却用不上」的断点时触发；也适用于把一次完整工程实践蒸馏成可复用的思维框架 / 检查清单。
 agent_created: true
 ---
 
-# zlbook — 智枢业务功能闭环蒸馏框架
+# zhishu-closure — 智枢业务功能闭环蒸馏框架
 
 ## Overview
 

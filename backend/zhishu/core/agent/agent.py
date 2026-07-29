@@ -297,6 +297,26 @@ class Agent:
 
             final = choice.get("content", "")
             if not final:
+                # 模型未返回文本但已执行工具：基于轨迹生成可见的「完成摘要」，
+                # 避免聊天窗口表现为「无结果 / 没回复」（典型场景：上传大文档→建技能后
+                # 模型因上下文过满而空回复，工作其实已完成，用户却看不到任何反馈）。
+                if tool_total > 0:
+                    bits = [f"- {t['name']}: {t['result'][:160]}" for t in traj_tools[-3:]]
+                    summary = (
+                        f"已为你完成操作（本次共执行 {tool_total} 个工具步骤）：\n"
+                        + "\n".join(bits)
+                        + "\n\n（模型未给出文字总结，以上为工具执行轨迹摘要。）"
+                    )
+                    yield {"type": "token", "text": summary}
+                    if self.memory:
+                        self.memory.append(session, "assistant", summary)
+                    if self.memory_manager is not None:
+                        try:
+                            await self._sync_memory(owner, "assistant", summary)
+                        except Exception:
+                            pass
+                    yield {"type": "done"}
+                    return
                 yield {"type": "done", "note": "模型未返回内容"}
                 return
             collected = []
@@ -329,6 +349,17 @@ class Agent:
             yield {"type": "done"}
             return
 
+        # 达最大步数退出：若已执行工具，给出轨迹摘要而非静默 done（前端通常不展示 note）
+        if tool_total > 0:
+            bits = [f"- {t['name']}: {t['result'][:160]}" for t in traj_tools[-3:]]
+            summary = (
+                f"已达到最大推理步数（{max_steps}），本次已执行 {tool_total} 个工具步骤：\n"
+                + "\n".join(bits)
+                + "\n\n如需继续，可补充指令让任务延续。"
+            )
+            yield {"type": "token", "text": summary}
+            if self.memory:
+                self.memory.append(session, "assistant", summary)
         yield {"type": "done", "note": f"已达到最大推理步数({max_steps})"}
 
     # =====================================================================
