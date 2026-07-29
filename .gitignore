@@ -49,3 +49,7 @@ Thumbs.db
 !backend/data/mcp/echo-demo/
 !backend/data/mcp/echo-demo/mcp.json
 !backend/data/mcp/echo-demo/server.py
+
+# ===== 例外：部署用 Dockerfile（构建必需，需入库；但真实配置 zhishu.yaml 仍不入库）=====
+!Dockerfile.local
+!deploy/Dockerfile.local
