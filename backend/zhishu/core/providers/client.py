@@ -299,10 +299,15 @@ class LLMClient:
         resp = await self._request_with_retry("GET", url, headers=headers)
         data = resp.json()
         status = (data.get("status") or "").lower()
-        video_url = (
-            data.get("video_url") or data.get("url")
-            or (data.get("data") or [{}])[0].get("url") if isinstance(data.get("data"), list) else None
-        )
+        # 优先取顶层 video_url / url；仅当二者皆空且 data 为列表时，再回退到列表首项。
+        # 注意：此前整段表达式被三元运算符 `if isinstance(data.get("data"), list)` 包裹，
+        # 导致「无 data 键但顶层已有 video_url」时被错误地置为 None。此处显式分离。
+        video_url = data.get("video_url") or data.get("url")
+        if not video_url:
+            data_list = data.get("data")
+            if isinstance(data_list, list) and data_list:
+                first = data_list[0] if isinstance(data_list[0], dict) else {}
+                video_url = first.get("url")
         return {"status": status, "progress": data.get("progress"),
                 "video_url": video_url, "error": data.get("error"), "raw": data}
 

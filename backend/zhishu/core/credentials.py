@@ -1,13 +1,13 @@
 """智枢智能体 —— Provider 凭证层（对标 Hermes `agent/credential_pool.py`）。
 
-  两层职责：
+  职责：
     * ProviderStore  —— 持久层：把用户在界面上对 Provider 的增删改（含默认模型）
                           持久化到 data/providers.json，并直接作用于内存中的
                           cfg.providers，使 LLMClient 立即生效（无需重启）。
                           api_key 落盘前用 Crypto(SM4/XOR) 混淆。
-    * CredentialPool —— 运行期凭证池：在 ProviderStore 之上提供「多源优先级 +
-                          临时不可用标记 + 刷新」能力。LLMClient 的回退链可直接消费
-                          pool.candidates()，命中连续失败时把该 provider 临时移出本轮链。
+
+  注：LLMClient 的回退链直接消费 cfg.ordered_providers()（按优先级遍历，单轮内失败即
+  跳到下一 Provider），无需额外的运行期凭证池；故此处只保留持久层 ProviderStore。
 """
 from __future__ import annotations
 
@@ -145,46 +145,3 @@ class ProviderStore:
         self._save()
         return {"ok": True, "default_model": model}
 
-
-# ---------------------------------------------------------------------------
-# 运行期：CredentialPool（多源优先级 + 临时不可用 + 刷新）
-# ---------------------------------------------------------------------------
-class CredentialPool:
-    """在 ProviderStore 之上提供运行期凭证池。
-
-    * candidates()      —— 按优先级返回当前可用的 Provider 列表（供回退链消费）。
-    * mark_unavailable(name) —— 把某 provider 临时移出本轮链（内存态，不落盘）。
-    * refresh()         —— 从 providers.json 重新载入（密钥变更后无需重启）。
-    * get(name)         —— 取指定 provider 配置。
-    """
-
-    def __init__(self, store: ProviderStore):
-        self.store = store
-        self._unavailable: set[str] = set()
-
-    def candidates(self) -> list[ProviderConfig]:
-        out = []
-        for p in self.store.cfg.ordered_providers():
-            if p.name in self._unavailable:
-                continue
-            out.append(p)
-        return out
-
-    def mark_unavailable(self, name: str) -> None:
-        self._unavailable.add(name)
-
-    def is_available(self, name: str) -> bool:
-        return name not in self._unavailable
-
-    def refresh(self) -> None:
-        self._unavailable.clear()
-        self.store._load()
-
-    def get(self, name: str) -> Optional[ProviderConfig]:
-        return self.store.cfg.providers.get(name)
-
-    def default(self) -> Optional[ProviderConfig]:
-        try:
-            return self.store.cfg.resolve_model(self.store.cfg.default_model)[0]
-        except Exception:
-            return None

@@ -14,6 +14,7 @@ import * as plugins from './plugins'
 import * as mcp from './mcp'
 import * as agents from './agents'
 import * as memory from './memory'
+import * as settings from './settings'
 
 export * from './http'
 export * from './types'
@@ -28,6 +29,7 @@ export * from './plugins'
 export * from './mcp'
 export * from './agents'
 export * from './memory'
+export * from './settings'
 
 export const api = {
   ...auth.authApi,
@@ -41,4 +43,5 @@ export const api = {
   ...mcp.mcpApi,
   ...agents.agentsApi,
   ...memory.memoryApi,
+  ...settings.settingsApi,
 }

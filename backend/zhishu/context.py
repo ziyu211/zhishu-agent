@@ -5,6 +5,7 @@ LLM 客户端、知识库、记忆、鉴权、审计、工具上下文。
 """
 from __future__ import annotations
 
+import json
 import os
 
 from .core.config import ZhishuConfig
@@ -13,7 +14,7 @@ from .core.rag import KnowledgeBase
 from .core.memory import MemoryStore, MemoryManager
 from .core.security import AuthService, AuditLog, UserStore, Crypto
 from .core.redact import Redactor, set_default as set_default_redactor
-from .core.credentials import ProviderStore, CredentialPool
+from .core.credentials import ProviderStore
 from .core.conversations import ConversationStore
 from .core.tools import ToolContext
 from .core.media import MediaStore
@@ -27,6 +28,9 @@ class AppContext:
         self.cfg = cfg
         self.llm = LLMClient(cfg)
         os.makedirs(cfg.server.data_dir, exist_ok=True)
+        # 运行时设置覆盖（用户自助开关，如长期记忆；持久化于 data_dir/config.override.json）
+        self._override_path = os.path.join(cfg.server.data_dir, "config.override.json")
+        self._apply_override()
         # 多用户存储（首个 admin 由配置引导）
         crypto = Crypto(cfg.security.enable_sm)
         self.users = UserStore(
@@ -49,8 +53,6 @@ class AppContext:
             path=os.path.join(cfg.server.data_dir, "providers.json"),
             crypto=crypto,
         )
-        # 运行期凭证池（多源优先级 + 临时不可用 + 刷新），供回退链消费
-        self.credential_pool = CredentialPool(self.providers)
         self.kb = KnowledgeBase(cfg.embedding, cfg.vector_store, cfg.server.data_dir, app_cfg=cfg)
         self.memory = MemoryStore(path=os.path.join(cfg.server.data_dir, "zhishu_memory.db"))
         # 记忆管理器：内置会话记忆（Agent 直管） + 至多一个外部向量 provider（opt-in）
@@ -71,6 +73,60 @@ class AppContext:
         self.modules = ModuleIntegrator(cfg)
         # 定时任务调度器（生命周期在 main lifespan 中 start/stop）
         self.cron = CronScheduler(cfg)
+
+    # ------------------------------------------------------------------
+    # 运行时设置（用户自助开关，持久化于 config.override.json，重启后自动复现）
+    # ------------------------------------------------------------------
+    def _apply_override(self) -> None:
+        """启动时把 data_dir/config.override.json 中的设置并入 cfg。"""
+        try:
+            if not os.path.exists(self._override_path):
+                return
+            with open(self._override_path, "r", encoding="utf-8") as f:
+                ov = json.load(f) or {}
+            mem = ov.get("memory") or {}
+            if isinstance(mem.get("vector_enabled"), bool):
+                self.cfg.memory.vector_enabled = mem["vector_enabled"]
+            if isinstance(mem.get("vector_top_k"), int) and mem["vector_top_k"] > 0:
+                self.cfg.memory.vector_top_k = mem["vector_top_k"]
+        except Exception:
+            pass
+
+    async def apply_settings(self, patch: dict) -> dict:
+        """应用设置补丁、持久化覆盖、并重建记忆管理器使开关立即生效。"""
+        mem = patch.get("memory") or {}
+        if isinstance(mem.get("vector_enabled"), bool):
+            self.cfg.memory.vector_enabled = mem["vector_enabled"]
+        if isinstance(mem.get("vector_top_k"), int) and mem["vector_top_k"] > 0:
+            self.cfg.memory.vector_top_k = mem["vector_top_k"]
+        # 持久化覆盖（重启后由 _apply_override 复现）
+        try:
+            os.makedirs(os.path.dirname(self._override_path), exist_ok=True)
+            with open(self._override_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "memory": {
+                            "vector_enabled": self.cfg.memory.vector_enabled,
+                            "vector_top_k": self.cfg.memory.vector_top_k,
+                        }
+                    },
+                    f, ensure_ascii=False, indent=2,
+                )
+        except Exception:
+            pass
+        # 重建记忆管理器（切换向量长期记忆开关立即生效；无 embedding 后端时优雅降级为 None）
+        try:
+            new_mm = MemoryManager(
+                self.cfg, self.cfg.server.data_dir, builtin_store=self.memory
+            )
+            await new_mm.initialize()
+            self.memory_manager = new_mm
+        except Exception:
+            pass
+        return {
+            "vector_enabled": self.cfg.memory.vector_enabled,
+            "vector_top_k": self.cfg.memory.vector_top_k,
+        }
 
     def build_agent(self, owner: str | None = None) -> "Agent":
         """构造一个会话级 Agent 实例（对话接口与定时任务共用，保证行为一致）。"""

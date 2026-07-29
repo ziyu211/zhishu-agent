@@ -69,6 +69,7 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
     app.include_router(api_pkg.modules_router)
     app.include_router(api_pkg.agents_router)
     app.include_router(api_pkg.cron_router)
+    app.include_router(api_pkg.settings_router)
 
     @app.get("/health")
     async def health():

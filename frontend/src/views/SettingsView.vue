@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { NButton, NInput, NSelect, NCard, useMessage } from 'naive-ui'
+import { NButton, NInput, NSelect, NCard, NSwitch, NInputNumber, useMessage } from 'naive-ui'
 import { api } from '@/api/client'
 import { useTheme } from '@/composables/useTheme'
 import { useAppStore } from '@/stores/app'
@@ -14,6 +14,10 @@ const newPwd = ref('')
 const confirmPwd = ref('')
 const modelOptions = ref<any[]>([])
 const selectedDefault = ref('')
+// 长期记忆（admin 自助开关）
+const vectorEnabled = ref(false)
+const vectorTopK = ref(5)
+const memoryLoading = ref(false)
 
 async function loadModels() {
   try {
@@ -51,7 +55,31 @@ function setDefault() {
     .catch((e: any) => message.error(e?.message || '操作失败'))
 }
 
-onMounted(loadModels)
+async function loadMemorySettings() {
+  try {
+    const r = await api.getSettings()
+    vectorEnabled.value = !!r.memory?.vector_enabled
+    vectorTopK.value = r.memory?.vector_top_k ?? 5
+  } catch { /* 静默 */ }
+}
+function saveMemorySettings() {
+  memoryLoading.value = true
+  api.updateSettings({
+    memory: { vector_enabled: vectorEnabled.value, vector_top_k: vectorTopK.value },
+  })
+    .then((r) => {
+      vectorEnabled.value = !!r.memory?.vector_enabled
+      vectorTopK.value = r.memory?.vector_top_k ?? vectorTopK.value
+      message.success('长期记忆设置已保存')
+    })
+    .catch((e: any) => message.error(e?.message || '保存失败'))
+    .finally(() => { memoryLoading.value = false })
+}
+
+onMounted(() => {
+  loadModels()
+  if (app.isAdmin) loadMemorySettings()
+})
 </script>
 
 <template>
@@ -88,6 +116,24 @@ onMounted(loadModels)
           <div class="inline-form">
             <NSelect v-model:value="selectedDefault" :options="modelOptions" placeholder="选择默认模型" size="small" style="min-width: 260px" />
             <NButton size="small" @click="setDefault">应用</NButton>
+          </div>
+        </div>
+      </section>
+
+      <section class="card-block" v-if="app.isAdmin">
+        <h3 class="block-title">长期记忆</h3>
+        <div class="form-row">
+          <label>向量记忆</label>
+          <div class="inline-form">
+            <NSwitch v-model:value="vectorEnabled" />
+            <span class="val">跨会话语义召回（需配置可用的 Embedding 模型，否则自动关闭）</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>召回条数</label>
+          <div class="inline-form">
+            <NInputNumber v-model:value="vectorTopK" :min="1" :max="20" size="small" style="width: 110px" />
+            <NButton size="small" :loading="memoryLoading" @click="saveMemorySettings">保存</NButton>
           </div>
         </div>
       </section>

@@ -184,6 +184,13 @@ export interface AdminStatus {
   knowledge_base: { vectors?: number; documents?: number } | any
   tools: string[]
 }
+export interface MemorySettings {
+  vector_enabled: boolean
+  vector_top_k: number
+}
+export interface SettingsResp {
+  memory: MemorySettings
+}
 export interface AuditItem {
   ts: string
   user?: string

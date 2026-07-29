@@ -173,7 +173,12 @@ class EmbeddingEngine:
         return [self._hash_vec(t) for t in texts]
 
     def _embed_provider(self, texts: List[str]) -> List[List[float]]:
-        """走配置的模型 Provider 的 /embeddings（网络）。与 LLM 共用解析链。"""
+        """走配置的模型 Provider 的 /embeddings（网络）。与 LLM 共用解析链。
+
+        优化：OpenAI 兼容 /embeddings 接受 input 为字符串数组，一次性批量请求，
+        把 N 段文本（知识库切片常达数百）的 N 次串行 HTTP 合并为 1 次，显著降低
+        入库延迟。批量失败（个别 Provider 不支持批量输入）时退化为逐条请求以保兼容。
+        """
         pc = self._provider_pc
         url = pc.base_url.rstrip("/") + "/embeddings"
         headers = {"Content-Type": "application/json"}
@@ -184,6 +189,21 @@ class EmbeddingEngine:
         if self._http is None:
             self._http = httpx.Client(
                 timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=10.0))
+        # 1) 批量请求
+        try:
+            r = self._http.post(url, json={"model": model, "input": list(texts)}, headers=headers)
+            r.raise_for_status()
+            data = r.json().get("data") or []
+            if len(data) != len(texts):
+                raise ValueError(
+                    f"embedding 返回条数 {len(data)} 与输入 {len(texts)} 不符")
+            out = [d["embedding"] for d in data]
+            self._dim = len(out[0]) if out else self._dim
+            return out
+        except Exception as e:
+            logger.warning(
+                "批量 embedding 失败，退化为逐条请求：%s", e)
+        # 2) 逐条退化（兼容不支持批量 input 的端点）
         out = []
         for t in texts:
             r = self._http.post(url, json={"model": model, "input": t}, headers=headers)

@@ -19,6 +19,7 @@ backend_run.log
 # 本地 dev build 请勿误提交；如需忽略本地改动，可用 git update-index --skip-worktree。
 !backend/zhishu/static/
 frontend/vite.config.ts.timestamp-*.mjs
+frontend/tmp/
 
 # ===== 真实配置（含密钥，禁止入库；请用 zhishu.yaml.example 复制）=====
 deploy/zhishu.yaml
