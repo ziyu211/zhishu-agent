@@ -24,7 +24,7 @@ export const useAgentsStore = defineStore('agents', () => {
   async function load() {
     loading.value = true
     try {
-      agents.value = await listAgents()
+      agents.value = (await listAgents()).agents || []
     } catch (e: any) {
       toast('error', e?.message || '加载智能体失败')
     } finally {

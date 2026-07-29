@@ -2,9 +2,9 @@
  * MCP 服务器 API（含已注册工具清单 listTools）。
  */
 import { request } from './http'
-import type { McpItem, ToolItem } from './types'
+import type { McpItem, McpResp, ToolItem, ToolsResp } from './types'
 
-export const listMcp = () => request<McpItem[]>('/api/v1/mcp')
+export const listMcp = () => request<McpResp>('/api/v1/mcp')
 export const getMcp = (name: string) =>
   request<McpItem>(`/api/v1/mcp/${encodeURIComponent(name)}`)
 export const createMcp = (body: any) => request<any>('/api/v1/mcp', { method: 'POST', body })
@@ -25,7 +25,7 @@ export const callMcp = (name: string, tool: string, args: any) =>
     method: 'POST',
     body: { tool, arguments: args },
   })
-export const listTools = () => request<ToolItem[]>('/api/v1/tools')
+export const listTools = () => request<ToolsResp>('/api/v1/tools')
 
 export const mcpApi = {
   listMcp,

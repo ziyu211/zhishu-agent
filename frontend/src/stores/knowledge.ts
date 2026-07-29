@@ -21,7 +21,7 @@ export const useKnowledgeStore = defineStore('knowledge', () => {
   async function load(scope: 'mine' | 'all' = 'mine') {
     loading.value = true
     try {
-      documents.value = await listDocuments(scope)
+      documents.value = (await listDocuments(scope)).documents || []
     } catch (e: any) {
       toast('error', e?.message || '加载文档失败')
     } finally {

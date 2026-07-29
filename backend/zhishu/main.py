@@ -41,11 +41,21 @@ async def lifespan(app: FastAPI):
 
 def create_app(cfg: ZhishuConfig) -> FastAPI:
     init_ctx(cfg)
+    # 安全自检：使用默认签名密钥或可猜测的管理员口令时发出告警（不阻断启动，
+    # 但提醒运维在部署配置中覆盖 security.secret / security.admin_password）。
+    if cfg.security.secret == "change-me-zhishu-secret" or cfg.security.admin_password == "zhishu@2026":
+        import sys
+        print("[智枢][安全警告] 正在使用默认 secret / 管理员口令，存在 token 伪造与未授权登录风险！"
+              "请在部署配置(zhishu.yaml)中修改 security.secret 与 security.admin_password。",
+              file=sys.stderr, flush=True)
     app = FastAPI(title="智枢智能体 Zhishu Agent", version="1.0.0", lifespan=lifespan)
 
+    # 同源部署（FastAPI 直接托管前端）下本不需 CORS；保留以兼容独立前端/调试。
+    # 采用 Bearer Token 鉴权（非 Cookie），故 credentials 置 False，避免
+    # allow_origins="*" 与 allow_credentials=True 的浏览器安全冲突。
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True,
+        allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=False,
     )
 
     # ---- 业务路由（需在静态托管前注册）----

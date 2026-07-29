@@ -2,9 +2,9 @@
  * 技能 Skills API。
  */
 import { request, downloadFile } from './http'
-import type { SkillItem } from './types'
+import type { SkillItem, SkillsResp } from './types'
 
-export const listSkills = () => request<SkillItem[]>('/api/v1/skills')
+export const listSkills = () => request<SkillsResp>('/api/v1/skills')
 export const getSkill = (name: string) =>
   request<SkillItem>(`/api/v1/skills/${encodeURIComponent(name)}`)
 export const createSkill = (body: any) => request<any>('/api/v1/skills', { method: 'POST', body })

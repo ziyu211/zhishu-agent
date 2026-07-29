@@ -35,7 +35,7 @@ export const useModelsStore = defineStore('models', () => {
   }
   async function loadProviders() {
     try {
-      providers.value = await listProviders()
+      providers.value = (await listProviders()).providers || []
     } catch (e: any) {
       toast('error', e?.message || '加载 Provider 失败')
     }

@@ -40,8 +40,8 @@ function changePassword() {
     message.error('两次输入的新密码不一致')
     return
   }
-  api.changePassword(oldPwd.value, newPwd.value)
-    .then(() => { message.success('密码已修改'); oldPwd.value = ''; newPwd.value = ''; confirmPwd.value = '' })
+  api.changePassword({ old_password: oldPwd.value, new_password: newPwd.value })
+    .then(() => { message.success('密码已修改，请使用新密码重新登录'); oldPwd.value = ''; newPwd.value = ''; confirmPwd.value = '' })
     .catch((e: any) => message.error(e?.message || '修改失败'))
 }
 function setDefault() {

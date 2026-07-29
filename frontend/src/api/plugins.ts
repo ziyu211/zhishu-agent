@@ -2,9 +2,9 @@
  * 插件 Plugins API。
  */
 import { request } from './http'
-import type { PluginItem } from './types'
+import type { PluginItem, PluginsResp } from './types'
 
-export const listPlugins = () => request<PluginItem[]>('/api/v1/plugins')
+export const listPlugins = () => request<PluginsResp>('/api/v1/plugins')
 export const getPlugin = (name: string) =>
   request<PluginItem>(`/api/v1/plugins/${encodeURIComponent(name)}`)
 export const createPlugin = (body: any) => request<any>('/api/v1/plugins', { method: 'POST', body })

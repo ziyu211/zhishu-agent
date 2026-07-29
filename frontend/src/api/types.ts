@@ -1,13 +1,16 @@
 /**
  * 智枢智能体 —— 共享 TypeScript 接口
  * 按域组织，供各 api/<domain>.ts 与 stores 复用（对标 hermes-web-ui 在每个 api 模块内联手写接口）。
+ *
+ * 约定：列表类接口后端统一以 {key:[...]} 包裹返回（与 hermes 一致），故此处
+ * 相应声明为包裹对象（如 SkillsResp），视图/store 解包 .skills / .plugins 等。
  */
 
 // ─── 鉴权 ───────────────────────────────────────────────
 export interface AuthStatus {
-  authenticated: boolean
-  user?: string
-  role?: string
+  auth_enabled: boolean
+  password_login: boolean
+  user_count: number
 }
 export interface LoginResp {
   token: string
@@ -35,6 +38,10 @@ export interface ModelsResp {
   providers: ModelGroup[]
   default_model: string
 }
+export interface ProvidersResp {
+  default_model: string
+  providers: Provider[]
+}
 export interface Provider {
   name: string
   type: string
@@ -55,11 +62,20 @@ export interface UserItem {
   role: string
   role_label?: string
   display_name?: string
+  status?: string        // active | disabled
   created_at?: string
+  last_login?: string
 }
 export interface RoleItem {
-  role: string
+  value: string         // 后端返回 value（非 role），前端据此取值
   label: string
+  perms?: string[]
+}
+export interface UsersResp {
+  users: UserItem[]
+}
+export interface RolesResp {
+  roles: RoleItem[]
 }
 
 // ─── 对话 / 会话 ───────────────────────────────────────
@@ -96,12 +112,28 @@ export interface DocumentItem {
 export interface DocumentDetail extends DocumentItem {
   content: string
 }
+export interface DocumentsResp {
+  documents: DocumentItem[]
+  scope?: string
+  owner?: string
+  total?: number
+}
 export interface KnowledgeStats {
-  document_count: number
-  chunk_count: number
+  backend: string
+  embedding_dim: number
+  vectors: number
+  documents: number
+}
+export interface KnowledgeSearchHit {
+  text: string
+  score: number
+  doc_id?: string
+  title?: string
+  meta?: Record<string, any>
 }
 export interface KnowledgeSearchResp {
-  results: { doc_id: string; title: string; score: number; snippet: string }[]
+  query: string
+  hits: KnowledgeSearchHit[]
 }
 export interface UploadFileResp {
   doc_id: string
@@ -143,16 +175,24 @@ export interface AttachParseResp {
 
 // ─── 管理 / 审计 ───────────────────────────────────────
 export interface AdminStatus {
-  healthy: boolean
-  version?: string
-  uptime?: number
+  auth_enabled: boolean
+  sm_enabled: boolean
+  audit_enabled: boolean
+  outbound_allowed: boolean
+  providers: string[]
+  default_model: string
+  knowledge_base: { vectors?: number; documents?: number } | any
+  tools: string[]
 }
 export interface AuditItem {
-  id?: number
-  time?: string
+  ts: string
+  user?: string
   action: string
-  actor?: string
   detail?: string
+  ip?: string
+}
+export interface AuditResp {
+  records: AuditItem[]
 }
 
 // ─── 技能 / 插件 / MCP / 工具 ──────────────────────────
@@ -182,6 +222,19 @@ export interface ToolItem {
   description?: string
   source?: string
 }
+export interface SkillsResp {
+  skills: SkillItem[]
+}
+export interface PluginsResp {
+  plugins: PluginItem[]
+}
+export interface McpResp {
+  servers: McpItem[]
+}
+export interface ToolsResp {
+  tools: ToolItem[]
+  count: number
+}
 
 // ─── 子智能体（多 Agent 协作成员） ─────────────────────
 export interface AgentItem {
@@ -195,8 +248,12 @@ export interface AgentItem {
   tools?: string[] | 'all' | 'none'
   tools_mode?: 'all' | 'none' | 'custom'
   created_at?: string
+  tool_count?: number
 }
 export interface AgentDetail extends AgentItem {}
+export interface AgentsResp {
+  agents: AgentItem[]
+}
 export interface AgentOptionsResp {
   agents: { name: string; description?: string }[]
 }
@@ -208,7 +265,33 @@ export interface MemoryData {
   soul?: string
 }
 export interface MemoryExport extends MemoryData {
+  combined?: string   // 三文件合并导出内容
   raw?: string
+}
+
+// ─── 定时任务 ───────────────────────────────────────────
+export interface CronJob {
+  id: number
+  name: string
+  schedule_type: 'interval' | 'daily' | 'cron'
+  cron?: string
+  interval_seconds?: number
+  daily_time?: string
+  action: 'chat' | 'shell'
+  prompt?: string
+  command?: string
+  enabled: boolean
+  last_run?: string
+  next_run?: string
+  last_status?: string
+}
+export interface CronHistoryItem {
+  id: number
+  job_id: number
+  started_at: string
+  finished_at?: string
+  status: string
+  output?: string
 }
 
 // ─── 流式对话事件（SSE） ───────────────────────────────

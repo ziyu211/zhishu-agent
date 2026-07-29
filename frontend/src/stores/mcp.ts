@@ -26,7 +26,7 @@ export const useMcpStore = defineStore('mcp', () => {
   async function load() {
     loading.value = true
     try {
-      servers.value = await listMcp()
+      servers.value = (await listMcp()).servers || []
     } catch (e: any) {
       toast('error', e?.message || '加载 MCP 失败')
     } finally {
@@ -35,7 +35,7 @@ export const useMcpStore = defineStore('mcp', () => {
   }
   async function loadTools() {
     try {
-      tools.value = await listTools()
+      tools.value = (await listTools()).tools || []
     } catch {
       /* noop */
     }

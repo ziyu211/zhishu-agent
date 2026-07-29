@@ -2,11 +2,11 @@
  * 模型 / Provider 相关 API。
  */
 import { request } from './http'
-import type { ModelsResp, Provider, RemoteModelsResp } from './types'
+import type { ModelsResp, ProvidersResp, Provider, RemoteModelsResp } from './types'
 
 export const listModels = () => request<ModelsResp>('/api/v1/models')
 export const listPresets = () => request<any>('/api/v1/models/presets')
-export const listProviders = () => request<Provider[]>('/api/v1/providers')
+export const listProviders = () => request<ProvidersResp>('/api/v1/providers')
 export const addProvider = (body: Partial<Provider>) =>
   request<any>('/api/v1/providers', { method: 'POST', body })
 export const updateProvider = (name: string, body: Partial<Provider>) =>

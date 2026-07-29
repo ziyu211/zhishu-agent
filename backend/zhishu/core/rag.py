@@ -743,7 +743,12 @@ def read_file_text(filename: str, raw: bytes) -> tuple[str, str]:
             try:
                 import fitz  # type: ignore
                 doc = fitz.open(stream=io.BytesIO(raw), filetype="pdf")
-                base = os.path.join("data", "generated", "pdf_render")
+                # 渲染图写入媒体托管目录（/media 由 main.py 挂载在 data_dir/media.store_dir），
+                # 确保返回的 /media/pdf_render/... URL 可被前端正确访问。
+                if media_dir:
+                    base = os.path.join(media_dir, "pdf_render")
+                else:
+                    base = os.path.join("data", "generated", "pdf_render")
                 os.makedirs(base, exist_ok=True)
                 safe = re.sub(r"[^\w\-.]", "_", os.path.basename(filename)) or "doc"
                 out_dir = os.path.join(base, safe + "_" + uuid.uuid4().hex[:8])
@@ -865,6 +870,12 @@ class KnowledgeBase:
         # 知识图谱层（关键词共现网络，离线）。data_dir 解析为绝对路径，
         # 与向量库平行持久化于 data_dir/zhishu_kg.db。
         self.data_dir = os.path.abspath(data_dir) if data_dir else None
+        # 媒体托管目录：扫描件 PDF 渲染图写入此处，经 /media 同源托管
+        self.media_dir = None
+        if self.data_dir and app_cfg is not None:
+            _store = getattr(getattr(app_cfg, "media", None), "store_dir", None)
+            if _store:
+                self.media_dir = os.path.join(self.data_dir, _store)
         self.graph = KnowledgeGraph(self.data_dir)
 
     # ------------------------- 入库（带归属与元数据） -------------------------
@@ -912,7 +923,7 @@ class KnowledgeBase:
         title: str = None,
     ) -> dict:
         """从上传的二进制内容解析并入库。失败时抛出 ValueError。"""
-        text, file_type = read_file_text(filename, raw)
+        text, file_type = read_file_text(filename, raw, self.media_dir)
         doc_id = doc_id or os.path.splitext(filename)[0] or uuid.uuid4().hex[:12]
         raw_path = self._save_raw(doc_id, filename, raw)
         return self.ingest_text(
@@ -953,7 +964,7 @@ class KnowledgeBase:
             raw = f.read()
         filename = doc.get("source") or f"{doc_id}.bin"
         try:
-            text, file_type = read_file_text(filename, raw)
+            text, file_type = read_file_text(filename, raw, self.media_dir)
         except ValueError as e:
             raise ValueError(f"重新解析失败：{e}")
         if not text.strip():

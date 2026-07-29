@@ -8,6 +8,22 @@ const loading = ref(false)
 const status = ref<any>(null)
 const records = ref<any[]>([])
 
+const redactInput = ref('张三 手机 13800138000 邮箱 zhang@corp.com 身份证 110101199003071234 卡号 6222021234567890')
+const redactResult = ref('')
+const redactLoading = ref(false)
+async function runRedact() {
+  if (!redactInput.value.trim()) return
+  redactLoading.value = true
+  try {
+    const r = await api.adminRedact(redactInput.value)
+    redactResult.value = r.enabled ? r.result : '（脱敏未启用）' + (r.result || '')
+  } catch (e: any) {
+    message.error(e?.message || '脱敏自测失败')
+  } finally {
+    redactLoading.value = false
+  }
+}
+
 async function load() {
   loading.value = true
   try {
@@ -56,6 +72,16 @@ onMounted(load)
       </section>
 
       <section class="card-block">
+        <h3 class="block-title">数据脱敏自测</h3>
+        <p class="block-hint">验证 PII 脱敏（手机号 / 邮箱 / 身份证 / 银行卡等）是否在落库与输出前被正则遮蔽。仅本地计算，不会上传。</p>
+        <div class="redact-box">
+          <textarea v-model="redactInput" class="redact-input" rows="3" placeholder="输入含敏感信息的文本"></textarea>
+          <NButton size="small" :loading="redactLoading" type="primary" @click="runRedact">运行脱敏</NButton>
+        </div>
+        <div v-if="redactResult" class="redact-out mono">{{ redactResult }}</div>
+      </section>
+
+      <section class="card-block">
         <h3 class="block-title">审计日志（最近 {{ records.length }} 条）</h3>
         <div v-if="!records.length" class="hint-empty">暂无审计记录</div>
         <table v-else class="audit-table">
@@ -89,6 +115,12 @@ onMounted(load)
 .chips { margin-top: 14px; display: flex; flex-direction: column; gap: 10px; }
 .chip-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .chip-label { font-size: 12px; color: $text-muted; width: 64px; flex-shrink: 0; }
+.block-hint { font-size: 12px; color: $text-muted; margin: 0 0 12px; }
+.redact-box { display: flex; flex-direction: column; gap: 10px; }
+.redact-input { width: 100%; resize: vertical; border: 1px solid $border-color; border-radius: $radius-sm;
+  padding: 10px 12px; font-size: 13px; font-family: $font-code; background: $bg-secondary; color: $text-primary; }
+.redact-out { margin-top: 10px; padding: 10px 12px; background: $bg-secondary; border: 1px solid $border-light;
+  border-radius: $radius-sm; font-size: 13px; color: $text-primary; word-break: break-all; }
 .chip { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: $bg-secondary; color: $text-secondary; border: 1px solid $border-light; }
 
 .audit-table { width: 100%; border-collapse: collapse; font-size: 13px;

@@ -46,7 +46,8 @@ Thumbs.db
 *.swp
 
 # ===== 例外：内置 MCP 演示服务（静态示例，随仓库分发；非用户运行时数据）=====
-!backend/data/
+# 注意：不要整体放开 backend/data/，否则记忆库/沙箱/身份文件等运行时数据会被误入库；
+# 仅按需放开内置演示服务所需的子目录。
 !backend/data/mcp/
 !backend/data/mcp/echo-demo/
 !backend/data/mcp/echo-demo/mcp.json

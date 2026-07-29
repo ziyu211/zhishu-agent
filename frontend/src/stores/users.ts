@@ -22,7 +22,7 @@ export const useUsersStore = defineStore('users', () => {
   async function load() {
     loading.value = true
     try {
-      users.value = await listUsers()
+      users.value = (await listUsers()).users || []
     } catch (e: any) {
       toast('error', e?.message || '加载用户失败')
     } finally {
@@ -31,7 +31,7 @@ export const useUsersStore = defineStore('users', () => {
   }
   async function loadRoles() {
     try {
-      roles.value = await listRoles()
+      roles.value = (await listRoles()).roles || []
     } catch {
       /* noop */
     }

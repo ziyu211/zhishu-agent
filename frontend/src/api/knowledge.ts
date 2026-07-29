@@ -5,6 +5,7 @@ import { request } from './http'
 import type {
   DocumentItem,
   DocumentDetail,
+  DocumentsResp,
   KnowledgeStats,
   KnowledgeSearchResp,
   UploadFileResp,
@@ -19,7 +20,7 @@ export const uploadFile = (file: File) => {
   return request<UploadFileResp>('/api/v1/knowledge/upload', { method: 'POST', formData: fd })
 }
 export const listDocuments = (scope: 'mine' | 'all' = 'mine', q?: string) =>
-  request<DocumentItem[]>(
+  request<DocumentsResp>(
     `/api/v1/knowledge/documents?scope=${scope}${q ? `&q=${encodeURIComponent(q)}` : ''}`,
   )
 export const getDocument = (doc_id: string) =>

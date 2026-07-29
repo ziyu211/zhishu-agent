@@ -21,7 +21,7 @@ export const useSkillsStore = defineStore('skills', () => {
   async function load() {
     loading.value = true
     try {
-      skills.value = await listSkills()
+      skills.value = (await listSkills()).skills || []
     } catch (e: any) {
       toast('error', e?.message || '加载技能失败')
     } finally {

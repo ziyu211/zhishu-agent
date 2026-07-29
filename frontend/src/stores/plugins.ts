@@ -22,7 +22,7 @@ export const usePluginsStore = defineStore('plugins', () => {
   async function load() {
     loading.value = true
     try {
-      plugins.value = await listPlugins()
+      plugins.value = (await listPlugins()).plugins || []
     } catch (e: any) {
       toast('error', e?.message || '加载插件失败')
     } finally {

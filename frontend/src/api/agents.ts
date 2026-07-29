@@ -2,9 +2,9 @@
  * 子智能体（多 Agent 协作成员）API。
  */
 import { request } from './http'
-import type { AgentItem, AgentDetail, AgentOptionsResp } from './types'
+import type { AgentItem, AgentDetail, AgentOptionsResp, AgentsResp } from './types'
 
-export const listAgents = () => request<AgentItem[]>('/api/v1/agents')
+export const listAgents = () => request<AgentsResp>('/api/v1/agents')
 export const getAgent = (name: string) =>
   request<AgentDetail>(`/api/v1/agents/${encodeURIComponent(name)}`)
 export const createAgent = (body: any) => request<any>('/api/v1/agents', { method: 'POST', body })

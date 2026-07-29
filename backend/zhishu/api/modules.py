@@ -26,6 +26,7 @@ from ..core.modules import (
     delete_module,
     sanitize_name,
     module_dir,
+    register_plugin_tools,
     DISABLED_KEY,
 )
 from ..core.modules.skills_io import import_archive, export_skills
@@ -80,6 +81,15 @@ def _toggle(sub: str, name: str, enabled: bool) -> dict:
     state[DISABLED_KEY[sub]] = sorted(disabled)
     save_state(state)
     return {"name": name, "enabled": enabled}
+
+
+def _sync_plugins():
+    """插件增删改/启停后即时把已启用插件的工具注册进 ToolRegistry，
+    使模块改动立即生效，无需手动『刷新』或重启。"""
+    try:
+        register_plugin_tools()
+    except Exception:
+        pass
 
 
 class _ToggleBody(BaseModel):
@@ -267,6 +277,7 @@ async def create_plugin(body: PluginBody, user=require_auth("modules:write")):
         "tools": body.tools,
     }
     write_meta("plugins", name, meta)
+    _sync_plugins()
     return {"ok": True, "name": name}
 
 
@@ -280,6 +291,7 @@ async def update_plugin(name: str, body: PluginUpdate, user=require_auth("module
         if v is not None:
             meta[k] = v
     write_meta("plugins", name, meta)
+    _sync_plugins()
     return {"ok": True, "name": name}
 
 
@@ -288,12 +300,15 @@ async def remove_plugin(name: str, user=require_auth("modules:write")):
     if not os.path.isdir(module_dir("plugins", name)):
         raise HTTPException(status_code=404, detail=f"未找到插件：{name}")
     delete_module("plugins", name)
+    _sync_plugins()
     return {"ok": True, "name": name}
 
 
 @router.put("/plugins/{name}/toggle")
 async def toggle_plugin(name: str, body: _ToggleBody, user=require_auth("modules:write")):
-    return _toggle("plugins", name, body.enabled)
+    res = _toggle("plugins", name, body.enabled)
+    _sync_plugins()
+    return res
 
 
 @router.post("/plugins/refresh")

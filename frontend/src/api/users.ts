@@ -2,10 +2,10 @@
  * 用户管理 API（管理员）。
  */
 import { request } from './http'
-import type { UserItem, RoleItem } from './types'
+import type { UserItem, RoleItem, UsersResp, RolesResp } from './types'
 
-export const listUsers = () => request<UserItem[]>('/api/v1/users')
-export const listRoles = () => request<RoleItem[]>('/api/v1/users/roles')
+export const listUsers = () => request<UsersResp>('/api/v1/users')
+export const listRoles = () => request<RolesResp>('/api/v1/users/roles')
 export const createUser = (body: any) => request<any>('/api/v1/users', { method: 'POST', body })
 export const updateUser = (uid: number, body: any) =>
   request<any>(`/api/v1/users/${uid}`, { method: 'PUT', body })
