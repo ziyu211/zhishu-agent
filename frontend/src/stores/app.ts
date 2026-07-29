@@ -17,13 +17,19 @@ export const useAppStore = defineStore('app', {
     isAdmin: (s) => s.user?.role === 'admin',
     /** 当前用户权限集合（来自后端 ROLES，admin 为 ['*']） */
     perms: (s) => (s.user as any)?.perms || [],
-    /** 扁平化模型选项：provider/model */
+    /** 扁平化模型选项：provider/model。
+     * 兜底：已选模型若不在加载结果中（如后端未启用/加载失败），仍保留为可选项，
+     * 避免下拉框被禁用导致普通用户无法切换模型。 */
     modelOptions: (s) => {
       const opt: { value: string; label: string; provider: string }[] = []
       for (const p of s.models) {
         for (const m of p.models) {
           opt.push({ value: `${p.provider}/${m}`, label: `${m}`, provider: p.provider })
         }
+      }
+      if (s.selectedModel && !opt.some((o) => o.value === s.selectedModel)) {
+        const [provider, ...rest] = s.selectedModel.split('/')
+        opt.unshift({ value: s.selectedModel, label: rest.join('/'), provider })
       }
       return opt
     },
@@ -69,7 +75,8 @@ export const useAppStore = defineStore('app', {
           }
         }
       } catch (e) {
-        // 忽略，保持现状
+        // 保持现状，但输出日志便于排查模型列表为空导致选择器被禁用的问题
+        console.error('[app] loadModels failed:', e)
       } finally {
         this.loadingModels = false
       }
