@@ -69,12 +69,13 @@ export const useAppStore = defineStore('app', {
         const r = await api.listModels()
         this.models = r.providers || []
         this.defaultModel = r.default_model || ''
-        // 校验已恢复的选择是否仍可用；失效则回退默认
-        const valid = this.modelOptions.some((o) => o.value === this.selectedModel)
+        // 校验已恢复的选择是否仍可用；失效则回退默认，默认也失效则回退第一个可用模型
+        let valid = this.modelOptions.some((o) => o.value === this.selectedModel)
         if (!this.selectedModel || !valid) {
-          this.selectedModel = this.defaultModel
+          valid = this.modelOptions.some((o) => o.value === this.defaultModel)
+          this.selectedModel = valid ? this.defaultModel : (this.modelOptions[0]?.value || '')
           try {
-            if (this.defaultModel) localStorage.setItem(MODEL_KEY, this.defaultModel)
+            if (this.selectedModel) localStorage.setItem(MODEL_KEY, this.selectedModel)
           } catch {
             /* noop */
           }

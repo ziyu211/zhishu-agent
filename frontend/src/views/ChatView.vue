@@ -81,7 +81,14 @@ async function loadModels() {
       if (groups[k].length) opts.push({ type: 'group', label: groupLabel[k], key: k, children: groups[k] })
     }
     modelOptions.value = opts
-    if (!app.selectedModel && r.default_model) app.selectModel(r.default_model)
+    // 若当前选择无效或为空，回退到 default_model；default_model 也无效则选第一个可用模型
+    const first = opts.flatMap((g: any) => g.children || []).find((c: any) => c.value)?.value || ''
+    const current = app.selectedModel
+    const inOptions = (v: string) =>
+      opts.flatMap((g: any) => g.children || []).some((c: any) => c.value === v)
+    if (!current || !inOptions(current)) {
+      app.selectModel(inOptions(r.default_model || '') ? r.default_model : first)
+    }
   } catch {
     /* 静默 */
   }
