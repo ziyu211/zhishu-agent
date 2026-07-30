@@ -41,10 +41,11 @@ def _read_skill_content(name: str) -> str:
 
 def _enabled_skills(cfg: Optional[ZhishuConfig] = None,
                     username: Optional[str] = None,
-                    is_admin: bool = False) -> list[dict]:
+                    is_admin: bool = False,
+                    user_role: Optional[str] = None) -> list[dict]:
     """返回已启用技能的 [{"name","description","content"}] 列表。
 
-    多用户隔离：仅返回「共享（无 owner）+ 本人」技能；admin 全量。
+    多用户隔离：仅返回「共享（无 owner）+ 本人 + 角色命中」技能；admin 全量。
     防止把 A 用户的私有技能正文注入 B 用户的系统提示（泄露面）。"""
     from .runtime import load_state, read_meta, DISABLED_KEY, can_view
 
@@ -67,7 +68,8 @@ def _enabled_skills(cfg: Optional[ZhishuConfig] = None,
         meta = read_meta("skills", name)
         if meta.get("enabled") is False:
             continue
-        if not can_view(meta.get("owner") or None, username, is_admin, bool(meta.get("shared"))):
+        if not can_view(meta.get("owner") or None, username, is_admin,
+                        bool(meta.get("shared")), meta.get("share_with") or None, user_role):
             continue
         out.append({
             "name": name,
@@ -111,18 +113,19 @@ def _read_memory_files(cfg: ZhishuConfig, owner: str | None = None) -> list[str]
 
 
 def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None,
-                               is_admin: bool = False) -> str:
+                               is_admin: bool = False,
+                               user_role: Optional[str] = None) -> str:
     """组装注入系统提示的 volatile 部分：已启用技能 + 长期记忆文件。
 
     开启 cfg.agent.skills_progressive 时改为「技能清单」模式（渐进披露）。
     无技能/记忆时返回空字符串（与重构前行为一致，不污染系统提示）。
-    长期记忆按 owner 隔离（见 user_memory_dir）；技能按 owner+is_admin 过滤，
+    长期记忆按 owner 隔离（见 user_memory_dir）；技能按 owner+is_admin+角色 过滤，
     防止跨用户记忆/技能泄露。
     """
     parts: list[str] = []
 
     progressive = getattr(getattr(cfg, "agent", None), "skills_progressive", False)
-    skills = _enabled_skills(cfg, username=owner, is_admin=is_admin)
+    skills = _enabled_skills(cfg, username=owner, is_admin=is_admin, user_role=user_role)
     if skills:
         if progressive:
             lines = ["可用技能（调用 read_skill 工具并按需读取其完整指令）："]

@@ -104,6 +104,8 @@ ROLES: dict[str, list[str]] = {
     "viewer": [
         "chat",
         "models:read",
+        "modules:read",
+        "agents:read",
     ],
 }
 

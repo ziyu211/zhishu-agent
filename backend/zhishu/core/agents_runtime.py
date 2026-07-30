@@ -130,11 +130,12 @@ def agent_owner(name: str) -> "str | None":
     return str(owner) if owner else None
 
 
-def list_agents(username: "str | None" = None, is_admin: bool = False) -> list[dict]:
+def list_agents(username: "str | None" = None, is_admin: bool = False,
+                user_role: "str | None" = None) -> list[dict]:
     """列出子智能体（含启用状态与工具数）。
 
     多用户隔离：默认（username=None 且非 admin）视为匿名，仅见共享智能体；
-    普通用户见「共享 + 本人」；admin 见全部。"""
+    普通用户见「共享 + 本人 + 角色命中」；admin 见全部。"""
     from ..context import get_ctx
     from .modules.runtime import can_view
     base = os.path.join(get_ctx().cfg.server.data_dir, AGENT_SUB)
@@ -150,16 +151,19 @@ def list_agents(username: "str | None" = None, is_admin: bool = False) -> list[d
         if not meta:
             continue
         owner_val = meta.get("owner") or None
-        if not can_view(owner_val, username, is_admin, bool(meta.get("shared"))):
+        if not can_view(owner_val, username, is_admin, bool(meta.get("shared")),
+                        meta.get("share_with") or None, user_role):
             continue
         meta = dict(meta)
         meta["name"] = name
         meta["owner"] = owner_val
         meta["shared"] = bool(meta.get("shared"))
+        meta["share_with"] = list(meta.get("share_with") or [])
         meta["enabled"] = name not in disabled
         try:
             meta["tool_count"] = len(resolve_tools(
-                meta.get("tools", "all"), username=username, is_admin=is_admin))
+                meta.get("tools", "all"), username=username, is_admin=is_admin,
+                user_role=user_role))
         except Exception:
             meta["tool_count"] = 0
         out.append(meta)
@@ -182,7 +186,8 @@ def _match(name: str, entry: str) -> bool:
     return name.startswith(entry + "__") or name == entry
 
 
-def resolve_tools(field, username: "str | None" = None, is_admin: bool = False) -> list[dict]:
+def resolve_tools(field, username: "str | None" = None, is_admin: bool = False,
+                  user_role: "str | None" = None) -> list[dict]:
     """返回该子智能体可见的工具声明（OpenAI function-calling 格式）。
 
     field:
@@ -190,11 +195,11 @@ def resolve_tools(field, username: "str | None" = None, is_admin: bool = False) 
       "none"               -> 空
       [..]                 -> 按条目过滤（条目可为 builtin/plugin/mcp/具体名/前缀）
 
-    多用户隔离：plugin__/mcp__ 工具先按归属裁剪（共享 + 本人；admin 全量），
+    多用户隔离：plugin__/mcp__ 工具先按归属裁剪（共享 + 本人 + 角色命中；admin 全量），
     防止子智能体 tools 字段写入他人私有模块即可越权调用。
     """
     from .modules.runtime import filter_tool_specs
-    all_specs = filter_tool_specs(ToolRegistry.specs(), username, is_admin)
+    all_specs = filter_tool_specs(ToolRegistry.specs(), username, is_admin, user_role)
     if field is None or field == "all":
         return all_specs
     if field == "none":

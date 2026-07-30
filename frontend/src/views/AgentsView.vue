@@ -7,6 +7,7 @@ import {
 import { api } from '@/api/client'
 import { actAs } from '@/api/actas'
 import { useAppStore } from '@/stores/app'
+import ShareScopeSelector from '@/components/modules/ShareScopeSelector.vue'
 
 const message = useMessage()
 const app = useAppStore()
@@ -37,6 +38,7 @@ const form = reactive<{
   tools: string[]
   max_steps: string | null
   shared: boolean
+  share_with: string[]
 }>({
   name: '',
   description: '',
@@ -48,6 +50,7 @@ const form = reactive<{
   tools: [],
   max_steps: null,
   shared: false,
+  share_with: [],
 })
 
 async function load() {
@@ -89,6 +92,7 @@ function openCreate() {
     tools: [],
     max_steps: null,
     shared: false,
+    share_with: [],
   })
   showModal.value = true
 }
@@ -113,6 +117,7 @@ async function openEdit(it: any) {
       tools: custom,
       max_steps: d.max_steps ?? null,
       shared: !!d.shared,
+      share_with: d.share_with || [],
     })
     showModal.value = true
   } catch (e: any) {
@@ -137,6 +142,7 @@ function buildPayload() {
     tools,
     max_steps: ms,
     shared: form.shared,
+    share_with: form.share_with,
   }
 }
 
@@ -232,7 +238,8 @@ watch(actAs, () => load())
               <span v-if="a.version" class="ver-tag">{{ a.version }}</span>
               <span class="tool-tag">{{ a.tool_count ?? 0 }} 工具</span>
               <span v-if="a.model" class="model-tag">{{ a.model }}</span>
-              <NTag v-if="a.shared" size="tiny" type="info" :bordered="false">共享</NTag>
+              <NTag v-if="a.shared" size="tiny" type="info" :bordered="false">共享·全员</NTag>
+              <NTag v-else-if="a.share_with && a.share_with.length" size="tiny" type="warning" :bordered="false">共享·按角色</NTag>
               <NTag v-else-if="a.owner" size="tiny" :bordered="false">{{ a.owner }}</NTag>
               <NTag v-else size="tiny" :bordered="false">公共</NTag>
             </div>
@@ -268,9 +275,8 @@ watch(actAs, () => load())
         <NFormItem label="启用">
           <NSwitch v-model:value="form.enabled" />
         </NFormItem>
-        <NFormItem label="共享给所有用户">
-          <NSwitch v-model:value="form.shared" />
-          <span class="share-hint">开启后其他用户可见并可使用（不可编辑）</span>
+        <NFormItem label="共享范围">
+          <ShareScopeSelector v-model:shared="form.shared" v-model:share-with="form.share_with" />
         </NFormItem>
         <NFormItem label="人设 / 系统提示词">
           <NInput

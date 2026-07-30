@@ -7,6 +7,7 @@ import { importSkills, exportSkills, exportSkill } from '@/api/skills'
 import { actAs } from '@/api/actas'
 import { useAppStore } from '@/stores/app'
 import ModuleList from '@/components/modules/ModuleList.vue'
+import ShareScopeSelector from '@/components/modules/ShareScopeSelector.vue'
 
 const message = useMessage()
 const app = useAppStore()
@@ -16,13 +17,14 @@ const skills = ref<any[]>([])
 const showModal = ref(false)
 const submitting = ref(false)
 const editing = ref<string | null>(null)
-const form = reactive<{ name: string; description: string; version: string; content: string; enabled: boolean; shared: boolean }>({
+const form = reactive<{ name: string; description: string; version: string; content: string; enabled: boolean; shared: boolean; share_with: string[] }>({
   name: '',
   description: '',
   version: '1.0.0',
   content: '',
   enabled: true,
   shared: false,
+  share_with: [],
 })
 
 /** 本条目当前用户是否可编辑：admin 恒可；owner 为自己可；历史无主条目仅 admin 可 */
@@ -53,7 +55,7 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', description: '', version: '1.0.0', content: '', enabled: true, shared: false })
+  Object.assign(form, { name: '', description: '', version: '1.0.0', content: '', enabled: true, shared: false, share_with: [] })
   showModal.value = true
 }
 
@@ -68,6 +70,7 @@ async function openEdit(it: any) {
       content: d.content || '',
       enabled: d.enabled !== false,
       shared: !!d.shared,
+      share_with: d.share_with || [],
     })
     showModal.value = true
   } catch (e: any) {
@@ -89,6 +92,7 @@ async function submit() {
         content: form.content,
         enabled: form.enabled,
         shared: form.shared,
+        share_with: form.share_with,
       })
       message.success('已更新')
     } else {
@@ -99,6 +103,7 @@ async function submit() {
         content: form.content,
         enabled: form.enabled,
         shared: form.shared,
+        share_with: form.share_with,
       })
       message.success('已创建')
     }
@@ -252,9 +257,8 @@ watch(actAs, () => load())
         <NFormItem label="启用">
           <NSwitch v-model:value="form.enabled" />
         </NFormItem>
-        <NFormItem label="共享给所有用户">
-          <NSwitch v-model:value="form.shared" />
-          <span class="share-hint">开启后其他用户可见并可使用（不可编辑）</span>
+        <NFormItem label="共享范围">
+          <ShareScopeSelector v-model:shared="form.shared" v-model:share-with="form.share_with" />
         </NFormItem>
         <NFormItem label="指令内容（注入 Agent）">
           <NInput

@@ -73,19 +73,20 @@ class Agent:
         agent_name: Optional[str] = None,
         attachments: Optional[list] = None,
         is_admin: bool = False,
+        user_role: Optional[str] = None,
     ) -> AsyncIterator[dict]:
         # 让工具（知识库/文件等）能感知当前用户，按归属隔离文档。
         # 安全（防并发串号）：绝不在共享单例 ToolContext 上就地改 user ——
         # 并发请求会互相覆盖身份。这里派生**本次运行专用**的副本，并把身份
         # 写入 contextvars（task-local），owner 为空时 fail-closed 落到 anonymous，
         # 绝不继承上一个请求的身份。
-        self.ctx = self.ctx.for_run(owner, session, is_admin=is_admin)
-        set_current_user(self.ctx.user, is_admin=is_admin)
+        self.ctx = self.ctx.for_run(owner, session, is_admin=is_admin, user_role=user_role)
+        set_current_user(self.ctx.user, is_admin=is_admin, user_role=user_role)
         # 按用户隔离模型：把 cfg/llm 收窄为「当前 owner 可见」的配置副本
-        # （仅本人 + 共享 Provider 及其默认模型）。admin 视为可见全部，返回原 cfg。
+        # （仅本人 + 共享 Provider + 角色命中 Provider 及其默认模型）。admin 视为可见全部，返回原 cfg。
         # 注意：Agent 实例为每轮请求独立创建，此处改写 self.cfg/self.llm 不会产生并发串号。
         if owner:
-            self.cfg = self.cfg.for_user(owner, is_admin)
+            self.cfg = self.cfg.for_user(owner, is_admin, user_role=user_role)
             self.llm = LLMClient(self.cfg, self.llm.api_mode)
         # ---- 0. 按模型类型分流：图像 / 视频 走生成分支，文本走 ReAct 循环 ----
         try:
@@ -120,7 +121,7 @@ class Agent:
             system = await asyncio.to_thread(
                 build_system_prompt,
                 self.cfg, agent_name=agent_name, owner=owner,
-                kb=self.kb, query=user_message, is_admin=is_admin,
+                kb=self.kb, query=user_message, is_admin=is_admin, user_role=user_role,
             )
         except Exception as e:
             # 上下文组装异常（知识库/分词等）若冲出生成器会掐断 SSE → 浏览器报 network error。
@@ -187,14 +188,14 @@ class Agent:
         # 防止 A 用户的 Agent 调用 B 用户的私有插件/MCP 工具。
         if agent_name:
             specs = resolve_tools(get_agent_meta(agent_name).get("tools", "all"),
-                                  username=owner, is_admin=is_admin)
+                                  username=owner, is_admin=is_admin, user_role=user_role)
             specs = [s for s in specs if s["function"]["name"] != DELEGATE_TOOL_NAME]
             try:
                 max_steps = int(get_agent_meta(agent_name).get("max_steps") or MAX_STEPS)
             except (TypeError, ValueError):
                 max_steps = MAX_STEPS
         else:
-            specs = filter_tool_specs(ToolRegistry.specs(), owner, is_admin)
+            specs = filter_tool_specs(ToolRegistry.specs(), owner, is_admin, user_role)
             max_steps = MAX_STEPS
 
         # ---- MoA 多智能体 facade：把单轮对话路由到并行聚合 ----
@@ -500,7 +501,8 @@ class Agent:
                    "result": f"[委派失败] 未找到子智能体：{name}"}
             return
         # 多用户隔离：他人私有子智能体对当前用户不可见 → 视同不存在（防枚举探测）。
-        if not can_view(meta.get("owner") or None, owner, is_admin, bool(meta.get("shared"))):
+        if not can_view(meta.get("owner") or None, owner, is_admin, bool(meta.get("shared")),
+                        meta.get("share_with") or None, user_role):
             yield {"type": "delegate_end", "agent": name,
                    "result": f"[委派失败] 未找到子智能体：{name}"}
             return
@@ -519,7 +521,8 @@ class Agent:
                     memory_manager=g.memory_manager)
         collected = []
         async for ev in sub.run(task, session, model=meta.get("model"),
-                                owner=owner, agent_name=name, is_admin=is_admin):
+                                owner=owner, agent_name=name, is_admin=is_admin,
+                                user_role=user_role):
             et = ev.get("type")
             if et == "token":
                 collected.append(ev["text"])

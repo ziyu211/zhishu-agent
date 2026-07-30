@@ -1,7 +1,7 @@
 """多 Agent 委派工具（仅主管智能体可用；实时流由 Agent.run 拦截转发）。"""
 from __future__ import annotations
 
-from ..base import tool, ToolContext
+from ..base import tool, ToolContext, get_current_role
 
 
 @tool(
@@ -35,11 +35,13 @@ async def delegate_to_agent(args: dict, ctx) -> str:
     if not name or not task:
         return "[委派失败] 缺少 agent_name 或 task 参数"
     is_admin = bool(getattr(ctx, "is_admin", False))
+    user_role = getattr(ctx, "user_role", None) or get_current_role()
     meta = get_agent_meta(name)
     if not meta:
         return f"[委派失败] 未找到子智能体：{name}"
-    # 多用户隔离：他人私有子智能体视同不存在（防枚举探测）
-    if not can_view(meta.get("owner") or None, ctx.user, is_admin, bool(meta.get("shared"))):
+    # 多用户隔离：他人私有/非角色命中子智能体视同不存在（防枚举探测）
+    if not can_view(meta.get("owner") or None, ctx.user, is_admin, bool(meta.get("shared")),
+                    meta.get("share_with") or None, user_role):
         return f"[委派失败] 未找到子智能体：{name}"
     if not is_enabled(name):
         return f"[委派失败] 子智能体已停用：{name}"

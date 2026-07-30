@@ -4,6 +4,7 @@ import {
   NModal, NForm, NFormItem, NInput, NSelect, NSwitch, NInputNumber, NButton, useMessage,
 } from 'naive-ui'
 import { useModelsStore } from '@/stores/models'
+import ShareScopeSelector from '@/components/modules/ShareScopeSelector.vue'
 
 const props = defineProps<{
   show: boolean
@@ -29,6 +30,7 @@ const local = ref(false)
 const priority = ref(50)
 const enabled = ref(true)
 const shared = ref(false)
+const share_with = ref<string[]>([])
 
 // 探测模型得到的候选（与 hermes-web-ui 对齐：下拉可搜索、可手输）
 const modelOptions = computed(() => props.presets
@@ -104,6 +106,7 @@ watch(
       priority.value = p.priority ?? 50
       enabled.value = p.enabled !== false
       shared.value = !!p.shared
+      share_with.value = p.share_with || []
     } else {
       presetKey.value = props.presets[0]?.provider || '__custom__'
       name.value = ''
@@ -116,6 +119,7 @@ watch(
       priority.value = 50
       enabled.value = true
       shared.value = false
+      share_with.value = []
       applyPreset()
     }
   },
@@ -137,6 +141,7 @@ function handleSave() {
     local: local.value,
     priority: priority.value,
     shared: shared.value,
+    share_with: share_with.value,
   }
   if (props.mode === 'edit') {
     payload.enabled = enabled.value
@@ -217,10 +222,8 @@ function handleSave() {
           </div>
         </NFormItem>
       </div>
-      <NFormItem label="共享给所有用户">
-        <div class="switch-cell">
-          <NSwitch v-model:value="shared" /><span>其他用户可使用该 Provider（密钥对其脱敏，不可编辑）</span>
-        </div>
+      <NFormItem label="共享范围">
+        <ShareScopeSelector v-model:shared="shared" v-model:share-with="share_with" />
       </NFormItem>
       <div class="form-foot" v-if="mode === 'edit'">
         <NSwitch v-model:value="enabled" /><span>启用</span>

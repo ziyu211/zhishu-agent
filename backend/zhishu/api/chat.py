@@ -222,7 +222,8 @@ async def chat(req: ChatReq, user=require_auth("chat")):
         from ..core.modules.runtime import can_view
         meta = get_agent_meta(req.agent)
         # 多用户隔离：他人私有子智能体视同不存在（防枚举探测）
-        if not meta or not can_view(meta.get("owner") or None, username, is_admin, bool(meta.get("shared"))):
+        if not meta or not can_view(meta.get("owner") or None, username, is_admin,
+                                    bool(meta.get("shared")), meta.get("share_with") or None, role):
             raise HTTPException(status_code=404, detail=f"未找到子智能体：{req.agent}")
         if not meta.get("enabled"):
             raise HTTPException(status_code=403, detail=f"子智能体已停用：{req.agent}")
@@ -232,7 +233,8 @@ async def chat(req: ChatReq, user=require_auth("chat")):
         try:
             async for ev in agent.run(req.message, memory_session, req.model,
                                       image=req.image, owner=owner, agent_name=target,
-                                      attachments=req.attachments, is_admin=is_admin):
+                                      attachments=req.attachments, is_admin=is_admin,
+                                      user_role=role):
                 # SSE data 行；前端 EventSource.onmessage 解析 JSON
                 yield {"data": json.dumps(ev, ensure_ascii=False)}
         except Exception as e:  # noqa: BLE001

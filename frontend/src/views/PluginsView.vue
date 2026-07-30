@@ -6,6 +6,7 @@ import { api } from '@/api/client'
 import { actAs } from '@/api/actas'
 import { useAppStore } from '@/stores/app'
 import ModuleList from '@/components/modules/ModuleList.vue'
+import ShareScopeSelector from '@/components/modules/ShareScopeSelector.vue'
 
 const message = useMessage()
 const app = useAppStore()
@@ -21,6 +22,7 @@ const form = reactive<{
   version: string
   enabled: boolean
   shared: boolean
+  share_with: string[]
   tools: any[]
 }>({
   name: '',
@@ -28,6 +30,7 @@ const form = reactive<{
   version: '0.1',
   enabled: true,
   shared: false,
+  share_with: [],
   tools: [],
 })
 
@@ -56,7 +59,7 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', description: '', version: '0.1', enabled: true, shared: false, tools: [blankTool()] })
+  Object.assign(form, { name: '', description: '', version: '0.1', enabled: true, shared: false, share_with: [], tools: [blankTool()] })
   showModal.value = true
 }
 
@@ -70,6 +73,7 @@ async function openEdit(it: any) {
       version: d.version || '0.1',
       enabled: d.enabled !== false,
       shared: !!d.shared,
+      share_with: d.share_with || [],
       tools: (d.tools && d.tools.length ? d.tools : [blankTool()]).map((t: any) => ({
         name: t.name || '',
         description: t.description || '',
@@ -127,6 +131,7 @@ async function submit() {
         version: form.version,
         enabled: form.enabled,
         shared: form.shared,
+        share_with: form.share_with,
         tools,
       })
       message.success('已更新')
@@ -137,6 +142,7 @@ async function submit() {
         version: form.version,
         enabled: form.enabled,
         shared: form.shared,
+        share_with: form.share_with,
         tools,
       })
       message.success('已创建')
@@ -223,9 +229,8 @@ watch(actAs, () => load())
         <NFormItem label="启用">
           <NSwitch v-model:value="form.enabled" />
         </NFormItem>
-        <NFormItem label="共享给所有用户">
-          <NSwitch v-model:value="form.shared" />
-          <span class="share-hint">开启后其他用户可见并可使用（不可编辑）</span>
+        <NFormItem label="共享范围">
+          <ShareScopeSelector v-model:shared="form.shared" v-model:share-with="form.share_with" />
         </NFormItem>
 
         <div class="tools-head">

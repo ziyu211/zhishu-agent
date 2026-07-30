@@ -24,6 +24,10 @@ def _username(user: dict) -> str:
     return (user.get("u") or "").strip()
 
 
+def _role(user: dict) -> str:
+    return (user.get("r") or "").strip()
+
+
 class AddProviderReq(BaseModel):
     provider_key: str | None = None   # 预设 key（如 qwen），自定义则为 None
     name: str | None = None
@@ -36,6 +40,7 @@ class AddProviderReq(BaseModel):
     priority: int = 50
     context_length: int | None = None
     shared: bool = False              # 显式共享：对他人可见可用（共享后他人可用其密钥，密钥对其脱敏）
+    share_with: list[str] = []        # 角色级共享：仅这些角色可见可用（shared=False 时生效）
 
 
 class UpdateProviderReq(BaseModel):
@@ -45,6 +50,7 @@ class UpdateProviderReq(BaseModel):
     base_url: str | None = None
     models: list[str] | None = None
     shared: bool | None = None
+    share_with: Optional[list[str]] = None
 
 
 class DefaultModelReq(BaseModel):
@@ -61,7 +67,7 @@ async def list_models(user=require_auth("models:read")):
     """对话页/选择器用：仅当前用户可见（本人 + 共享）的 Provider 及生效默认模型。"""
     ctx = get_ctx()
     uname, admin = _username(user), _is_admin(user)
-    cfg = ctx.cfg.for_user(uname, admin)
+    cfg = ctx.cfg.for_user(uname, admin, _role(user))
     providers = []
     for pc in cfg.ordered_providers():
         providers.append({
@@ -87,7 +93,7 @@ async def list_providers(user=require_auth("models:read")):
     uname, admin = _username(user), _is_admin(user)
     return {
         "default_model": ctx.providers.effective_default(None if admin else uname),
-        "providers": ctx.providers.list(uname, admin),
+        "providers": ctx.providers.list(uname, admin, _role(user)),
     }
 
 
@@ -121,7 +127,7 @@ async def add_provider(req: AddProviderReq, user=require_auth("models:write")):
             name=name, label=label or name, base_url=req.base_url,
             api_key=req.api_key, models=models, local=local,
             priority=req.priority, context_length=req.context_length,
-            owner=_username(user), shared=req.shared,
+            owner=_username(user), shared=req.shared, share_with=req.share_with,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -136,7 +142,8 @@ async def update_provider(name: str, req: UpdateProviderReq, user=require_auth("
         r = ctx.providers.update(
             name, api_key=req.api_key, enabled=req.enabled,
             priority=req.priority, base_url=req.base_url, models=req.models,
-            shared=req.shared, username=_username(user), is_admin=_is_admin(user),
+            shared=req.shared, share_with=req.share_with,
+            username=_username(user), is_admin=_is_admin(user),
         )
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))

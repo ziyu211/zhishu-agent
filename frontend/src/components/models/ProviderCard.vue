@@ -32,7 +32,8 @@ const masked = computed(() => props.provider.api_key_masked || (props.provider.h
       <span class="pc-key">{{ provider.provider }}</span>
       <NTag v-if="provider.local" size="tiny" :bordered="false" class="pc-tag">本地</NTag>
       <NTag v-if="provider.builtin" size="tiny" :bordered="false" class="pc-tag">内置</NTag>
-      <NTag v-if="provider.shared" size="tiny" type="info" :bordered="false">共享</NTag>
+      <NTag v-if="provider.shared" size="tiny" type="info" :bordered="false">共享·全员</NTag>
+      <NTag v-else-if="provider.share_with && provider.share_with.length" size="tiny" type="warning" :bordered="false">共享·按角色</NTag>
       <NTag v-else-if="provider.owner" size="tiny" :bordered="false" class="pc-tag">{{ provider.owner }}</NTag>
       <NTag v-else size="tiny" :bordered="false" class="pc-tag">公共</NTag>
     </div>

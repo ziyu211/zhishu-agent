@@ -50,6 +50,9 @@ export interface Provider {
   models?: string[]
   enabled?: boolean
   local?: boolean
+  owner?: string
+  shared?: boolean
+  share_with?: string[]
 }
 export interface RemoteModelsResp {
   models: string[]
@@ -208,6 +211,9 @@ export interface SkillItem {
   description?: string
   enabled: boolean
   source?: string
+  owner?: string
+  shared?: boolean
+  share_with?: string[]
 }
 export interface PluginItem {
   name: string
@@ -215,6 +221,9 @@ export interface PluginItem {
   enabled: boolean
   version?: string
   source?: string
+  owner?: string
+  shared?: boolean
+  share_with?: string[]
 }
 export interface McpItem {
   name: string
@@ -223,6 +232,9 @@ export interface McpItem {
   status?: string
   tools?: string[]
   config?: Record<string, any>
+  owner?: string
+  shared?: boolean
+  share_with?: string[]
 }
 export interface ToolItem {
   name: string
@@ -256,6 +268,9 @@ export interface AgentItem {
   tools_mode?: 'all' | 'none' | 'custom'
   created_at?: string
   tool_count?: number
+  owner?: string
+  shared?: boolean
+  share_with?: string[]
 }
 export interface AgentDetail extends AgentItem {}
 export interface AgentsResp {

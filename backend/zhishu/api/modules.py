@@ -50,18 +50,22 @@ def _username(user: dict) -> str:
     return (user.get("u") or "").strip()
 
 
+def _role(user: dict) -> str:
+    return (user.get("r") or "").strip()
+
+
 def _guard_view(sub: str, name: str, user: dict, label: str) -> dict:
     """存在 + 可见性校验；通过则返回 meta，否则 404。"""
     if not os.path.isdir(module_dir(sub, name)):
         raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
     meta = read_meta(sub, name)
-    if not can_view_meta(meta, _username(user), _is_admin(user)):
+    if not can_view_meta(meta, _username(user), _is_admin(user), _role(user)):
         raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
     return meta
 
 
 def _guard_edit(sub: str, name: str, user: dict, label: str) -> dict:
-    """存在 + 可写性校验；不可见→404，可见不可写（共享模块的非 owner）→403。"""
+    """存在 + 可写性校验；不可见→404，可见不可写（共享/角色共享项的非 owner）→403。"""
     meta = _guard_view(sub, name, user, label)
     if not can_edit_meta(meta, _username(user), _is_admin(user)):
         raise HTTPException(status_code=403, detail=f"无权管理该{label}（共享项仅创建者可修改）")
@@ -90,6 +94,7 @@ def _list_modules(sub: str, user: Optional[dict] = None) -> list:
         return out
     uname = _username(user) if user else ""
     admin = _is_admin(user) if user else False
+    urole = _role(user) if user else ""
     for name in sorted(os.listdir(base)):
         d = os.path.join(base, name)
         if not os.path.isdir(d) or name in disabled:
@@ -97,9 +102,9 @@ def _list_modules(sub: str, user: Optional[dict] = None) -> list:
         info = read_meta(sub, name)
         if info.get("enabled") is False:
             continue
-        # 多用户隔离：仅返回「共享 + 本人」；admin 全量（含 owner 归属信息）
+        # 多用户隔离：仅返回「共享 + 本人 + 角色命中」；admin 全量（含 owner 归属信息）
         owner_val = info.get("owner") or None
-        if not can_view_meta(info, uname, admin):
+        if not can_view_meta(info, uname, admin, urole):
             continue
         item: dict[str, Any] = {
             "name": name,
@@ -108,6 +113,7 @@ def _list_modules(sub: str, user: Optional[dict] = None) -> list:
             "enabled": name not in disabled,
             "owner": owner_val,
             "shared": bool(info.get("shared")),
+            "share_with": list(info.get("share_with") or []),
         }
         if sub == "plugins":
             item["tool_count"] = len(info.get("tools") or [])
@@ -156,6 +162,7 @@ class SkillBody(BaseModel):
     content: str = ""
     enabled: bool = True
     shared: bool = False          # 显式共享：对他人可见可用
+    share_with: list[str] = []    # 角色级共享：仅这些角色可见可用（shared=False 时生效）
 
 
 class SkillUpdate(BaseModel):
@@ -164,6 +171,7 @@ class SkillUpdate(BaseModel):
     content: Optional[str] = None
     enabled: Optional[bool] = None
     shared: Optional[bool] = None
+    share_with: Optional[list[str]] = None
 
 
 @router.get("/skills")
@@ -225,6 +233,7 @@ async def get_skill(name: str, user=require_auth("modules:read")):
     info["name"] = name
     info["owner"] = info.get("owner") or None
     info["shared"] = bool(info.get("shared"))
+    info["share_with"] = list(info.get("share_with") or [])
     info["enabled"] = name not in set(load_state().get("skills_disabled", []))
     return info
 
@@ -236,7 +245,7 @@ async def create_skill(body: SkillBody, user=require_auth("modules:write")):
         raise HTTPException(status_code=400, detail="技能名称非法")
     if os.path.isdir(module_dir("skills", name)):
         raise HTTPException(status_code=409, detail=f"技能已存在：{name}")
-    # 默认私有：归属创建者（含 admin 自身）；shared=True 才对他人可见可用。
+    # 默认私有：归属创建者（含 admin 自身）；shared=True 或 share_with 才对他人可见可用。
     meta = {
         "name": name,
         "description": body.description,
@@ -245,6 +254,7 @@ async def create_skill(body: SkillBody, user=require_auth("modules:write")):
         "enabled": body.enabled,
         "owner": _username(user),
         "shared": bool(body.shared),
+        "share_with": list(body.share_with or []),
     }
     write_meta("skills", name, meta)
     return {"ok": True, "name": name}
@@ -257,6 +267,8 @@ async def update_skill(name: str, body: SkillUpdate, user=require_auth("modules:
         v = getattr(body, k)
         if v is not None:
             meta[k] = v
+    if body.share_with is not None:
+        meta["share_with"] = list(body.share_with or [])
     write_meta("skills", name, meta)
     return {"ok": True, "name": name}
 
@@ -298,6 +310,7 @@ class PluginBody(BaseModel):
     enabled: bool = True
     tools: list = []
     shared: bool = False          # 显式共享：对他人可见可用
+    share_with: list[str] = []    # 角色级共享：仅这些角色可见可用（shared=False 时生效）
 
 
 class PluginUpdate(BaseModel):
@@ -306,6 +319,7 @@ class PluginUpdate(BaseModel):
     enabled: Optional[bool] = None
     tools: Optional[list] = None
     shared: Optional[bool] = None
+    share_with: Optional[list[str]] = None
 
 
 @router.get("/plugins")
@@ -346,6 +360,7 @@ async def get_plugin(name: str, user=require_auth("modules:read")):
     info["name"] = name
     info["owner"] = info.get("owner") or None
     info["shared"] = bool(info.get("shared"))
+    info["share_with"] = list(info.get("share_with") or [])
     # 安全：http 工具 headers 脱敏后再回传
     info["tools"] = _mask_plugin_tools(info.get("tools"))
     info["enabled"] = name not in set(load_state().get("plugins_disabled", []))
@@ -367,6 +382,7 @@ async def create_plugin(body: PluginBody, user=require_auth("modules:write")):
         "tools": body.tools,
         "owner": _username(user),
         "shared": bool(body.shared),
+        "share_with": list(body.share_with or []),
     }
     write_meta("plugins", name, meta)
     _sync_plugins()
@@ -380,6 +396,8 @@ async def update_plugin(name: str, body: PluginUpdate, user=require_auth("module
         v = getattr(body, k)
         if v is not None:
             meta[k] = v
+    if body.share_with is not None:
+        meta["share_with"] = list(body.share_with or [])
     if body.tools is not None:
         # 安全：headers 中掩码值恢复为原明文，防止掩码覆盖真实密钥
         meta["tools"] = _restore_plugin_tools(body.tools, meta.get("tools"))
@@ -448,6 +466,7 @@ class McpBody(BaseModel):
     args: list = []
     env: dict = {}
     shared: bool = False          # 显式共享：对他人可见可用
+    share_with: list[str] = []    # 角色级共享：仅这些角色可见可用（shared=False 时生效）
 
 
 class McpUpdate(BaseModel):
@@ -458,6 +477,7 @@ class McpUpdate(BaseModel):
     args: Optional[list] = None
     env: Optional[dict] = None
     shared: Optional[bool] = None
+    share_with: Optional[list[str]] = None
 
 
 class McpCallBody(BaseModel):
@@ -483,7 +503,7 @@ async def list_tools(user=require_auth("modules:read")):
 
     多用户隔离：plugin__/mcp__ 工具按归属过滤（共享 + 本人；admin 全量）。"""
     from ..core.tools import ToolRegistry
-    specs = filter_tool_specs(ToolRegistry.specs(), _username(user), _is_admin(user))
+    specs = filter_tool_specs(ToolRegistry.specs(), _username(user), _is_admin(user), _role(user))
     out = []
     for s in specs:
         fn = s["function"]["name"]
@@ -502,6 +522,7 @@ async def get_mcp(name: str, user=require_auth("modules:read")):
     info["name"] = name
     info["owner"] = info.get("owner") or None
     info["shared"] = bool(info.get("shared"))
+    info["share_with"] = list(info.get("share_with") or [])
     # 安全：env 密钥脱敏后再回传
     info["env"] = _mask_env(info.get("env", {}))
     info["enabled"] = name not in set(load_state().get("mcp_disabled", []))
@@ -529,6 +550,7 @@ async def create_mcp(body: McpBody, user=require_auth("modules:write")):
         "env": body.env,
         "owner": _username(user),
         "shared": bool(body.shared),
+        "share_with": list(body.share_with or []),
     }
     write_meta("mcp", name, meta)
     return {"ok": True, "name": name}
@@ -541,6 +563,8 @@ async def update_mcp(name: str, body: McpUpdate, user=require_auth("modules:writ
         v = getattr(body, k)
         if v is not None:
             meta[k] = v
+    if body.share_with is not None:
+        meta["share_with"] = list(body.share_with or [])
     if body.env is not None:
         # 安全：值为掩码（******）的键视为未修改，保留原有明文，防止掩码覆盖真实密钥
         old_env = meta.get("env") or {}

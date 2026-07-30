@@ -82,7 +82,8 @@ function onToggle(it: any, enabled: boolean) {
             <NTag v-if="showStatus && it.connected" size="tiny" type="success" :bordered="false">已连接</NTag>
             <NTag v-if="showStatus && it.connected === false" size="tiny" type="warning" :bordered="false">未连接</NTag>
             <NTag v-if="it.tool_count !== undefined" size="tiny" :bordered="false" class="tool-tag">{{ it.tool_count }} 工具</NTag>
-            <NTag v-if="it.shared" size="tiny" type="info" :bordered="false">共享</NTag>
+            <NTag v-if="it.shared" size="tiny" type="info" :bordered="false">共享·全员</NTag>
+            <NTag v-else-if="it.share_with && it.share_with.length" size="tiny" type="warning" :bordered="false" :title="(it.share_with || []).join('、')">共享·按角色</NTag>
             <NTag v-else-if="it.owner" size="tiny" :bordered="false" class="owner-tag">{{ it.owner }}</NTag>
             <NTag v-else size="tiny" :bordered="false" class="owner-tag">公共</NTag>
           </div>

@@ -84,11 +84,16 @@ class ProviderStore:
             return ""
         return ""
 
-    def list(self, username: Optional[str] = None, is_admin: bool = False) -> list[dict]:
+    def list(self, username: Optional[str] = None, is_admin: bool = False,
+             user_role: Optional[str] = None) -> list[dict]:
         out = []
         for p in sorted(self.cfg.providers.values(), key=lambda x: x.priority):
-            # 多用户隔离：非 admin 仅见「本人 + 共享」Provider
-            if not is_admin and not (p.owner == (username or "") or p.shared):
+            # 多用户隔离：非 admin 仅见「本人 + 共享 + 角色命中」Provider
+            if not is_admin and not (
+                p.owner == (username or "")
+                or p.shared
+                or (p.share_with and user_role in p.share_with)
+            ):
                 continue
             out.append({
                 "provider": p.name, "label": p.label, "base_url": p.base_url,
@@ -98,6 +103,7 @@ class ProviderStore:
                 "builtin": p.name in DEFAULT_PROVIDERS,
                 "owner": p.owner or None,
                 "shared": p.shared,
+                "share_with": list(p.share_with or []),
             })
         return out
 
@@ -110,7 +116,8 @@ class ProviderStore:
         return key[:4] + "****" + key[-4:]
 
     def add(self, *, name, label, base_url, api_key="", models=None, local=False,
-            priority=50, context_length=None, owner="", shared=False) -> dict:
+            priority=50, context_length=None, owner="", shared=False,
+            share_with=None) -> dict:
         name = (name or "").strip()
         if not name:
             raise ValueError("Provider 名称不能为空")
@@ -119,18 +126,19 @@ class ProviderStore:
             api_key=api_key.strip(), models=models or [], local=local,
             enabled=True, priority=priority,
             owner=owner or "", shared=bool(shared),
+            share_with=list(share_with or []),
         )
         self.cfg.providers[name] = pc
         self._save()
         return {"ok": True, "provider": name}
 
     def update(self, name, *, api_key=None, enabled=None, priority=None,
-               base_url=None, models=None, shared=None,
+               base_url=None, models=None, shared=None, share_with=None,
                username: Optional[str] = None, is_admin: bool = False) -> dict:
         pc = self.cfg.providers.get(name)
         if not pc:
             raise ValueError("Provider 不存在")
-        # 多用户隔离：仅 owner 本人（或 admin）可改；共享项非 owner 不可改
+        # 多用户隔离：仅 owner 本人（或 admin）可改；共享/角色共享项非 owner 不可改
         if not is_admin and pc.owner and pc.owner != (username or ""):
             raise PermissionError("无权修改该 Provider（他人私有项）")
         if api_key is not None and api_key != "":
@@ -145,6 +153,8 @@ class ProviderStore:
             pc.models = models
         if shared is not None:
             pc.shared = bool(shared)
+        if share_with is not None:
+            pc.share_with = list(share_with or [])
         self._save()
         return {"ok": True, "provider": name}
 

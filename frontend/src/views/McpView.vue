@@ -6,6 +6,7 @@ import { api } from '@/api/client'
 import { actAs } from '@/api/actas'
 import { useAppStore } from '@/stores/app'
 import ModuleList from '@/components/modules/ModuleList.vue'
+import ShareScopeSelector from '@/components/modules/ShareScopeSelector.vue'
 
 const message = useMessage()
 const app = useAppStore()
@@ -21,6 +22,7 @@ const form = reactive<{
   version: string
   enabled: boolean
   shared: boolean
+  share_with: string[]
   command: string
   args_text: string
   env_text: string
@@ -30,6 +32,7 @@ const form = reactive<{
   version: '1.0.0',
   enabled: true,
   shared: false,
+  share_with: [],
   command: '',
   args_text: '',
   env_text: '{}',
@@ -65,7 +68,7 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', description: '', version: '1.0.0', enabled: true, shared: false, command: '', args_text: '', env_text: '{}' })
+  Object.assign(form, { name: '', description: '', version: '1.0.0', enabled: true, shared: false, share_with: [], command: '', args_text: '', env_text: '{}' })
   showCreate.value = true
 }
 
@@ -79,6 +82,7 @@ async function openEdit(it: any) {
       version: d.version || '1.0.0',
       enabled: d.enabled !== false,
       shared: !!d.shared,
+      share_with: d.share_with || [],
       command: d.command || '',
       args_text: (d.args || []).join('\n'),
       env_text: JSON.stringify(d.env || {}, null, 2),
@@ -110,6 +114,7 @@ async function submit() {
     version: form.version,
     enabled: form.enabled,
     shared: form.shared,
+    share_with: form.share_with,
     command: form.command.trim(),
     args: form.args_text.split('\n').map((s) => s.trim()).filter(Boolean),
     env,
@@ -256,9 +261,8 @@ watch(actAs, () => load())
         <NFormItem label="启用并连接">
           <NSwitch v-model:value="form.enabled" />
         </NFormItem>
-        <NFormItem label="共享给所有用户">
-          <NSwitch v-model:value="form.shared" />
-          <span class="share-hint">开启后其他用户可见并可使用（不可编辑）</span>
+        <NFormItem label="共享范围">
+          <ShareScopeSelector v-model:shared="form.shared" v-model:share-with="form.share_with" />
         </NFormItem>
         <NFormItem label="启动命令">
           <NInput v-model:value="form.command" placeholder="如 python / npx / node" />

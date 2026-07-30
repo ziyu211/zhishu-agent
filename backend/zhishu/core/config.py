@@ -138,6 +138,7 @@ class ProviderConfig:
     # ---- 多用户隔离 ----
     owner: str = ""       # 归属用户；空=历史系统级（全员可见，仅 admin 可管理）
     shared: bool = False  # 显式共享：对他人可见可用（共享后他人可用其密钥，但密钥对其脱敏）
+    share_with: list[str] = field(default_factory=list)  # 角色级共享：仅这些角色可见可用（shared=False 时生效）
 
 
 @dataclass
@@ -397,11 +398,12 @@ class ZhishuConfig:
             vals = [p for p in vals if p.enabled]
         return sorted(vals, key=lambda x: x.priority)
 
-    def for_user(self, username: Optional[str], is_admin: bool = False) -> "ZhishuConfig":
-        """返回仅含该用户可见 Provider（owner==username 或 shared）及该用户默认模型的配置副本。
+    def for_user(self, username: Optional[str], is_admin: bool = False,
+                  user_role: Optional[str] = None) -> "ZhishuConfig":
+        """返回仅含该用户可见 Provider（owner==username 或 shared 或 角色命中）及该用户默认模型的配置副本。
 
-        用于「按用户隔离模型」：每个用户只能用自己的/共享的 Provider 与默认模型。
-        admin（is_admin=True）返回自身（可见全部 Provider）；匿名/未登录仅见共享项。
+        用于「按用户隔离模型」：每个用户只能用自己的/共享的/角色共享的 Provider 与默认模型。
+        admin（is_admin=True）返回自身（可见全部 Provider）；匿名/未登录仅见共享项（无角色则无角色共享）。
         """
         if is_admin:
             return self
@@ -415,6 +417,7 @@ class ZhishuConfig:
         vis = {
             n: p for n, p in self.providers.items()
             if p.owner == username or p.shared
+            or (p.share_with and user_role in p.share_with)
         }
         new = copy.copy(self)
         new.providers = vis
