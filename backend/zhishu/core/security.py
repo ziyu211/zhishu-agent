@@ -107,6 +107,7 @@ ROLES: dict[str, list[str]] = {
         "models:read",
         "modules:read",
         "agents:read",
+        "cron:read",
     ],
 }
 

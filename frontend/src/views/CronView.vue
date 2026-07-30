@@ -7,9 +7,13 @@ import {
 } from 'naive-ui'
 import { storeToRefs } from 'pinia'
 import { useCronStore } from '@/stores/cron'
+import { useAppStore } from '@/stores/app'
 import type { CronJob } from '@/api/cron'
 
 const cron = useCronStore()
+const app = useAppStore()
+/** 只读访客（仅 cron:read）隐藏全部写操作，避免点击后 403 */
+const canWrite = computed(() => app.can('cron:write'))
 const { jobs, loading, history } = storeToRefs(cron)
 const message = useMessage()
 const dialog = useDialog()
@@ -144,11 +148,12 @@ onMounted(() => cron.load())
           <h2 class="page-title">定时任务</h2>
           <p class="page-sub">内网合规版调度器：周期性跑对话任务或沙箱命令（对标 Hermes cron）。</p>
         </div>
-        <NButton type="primary" @click="openCreate">+ 新建任务</NButton>
+        <NButton v-if="canWrite" type="primary" @click="openCreate">+ 新建任务</NButton>
+        <NTag v-else size="small" :bordered="false">只读模式</NTag>
       </div>
 
       <NSpace v-if="!loading && jobs.length === 0" vertical align="center" style="padding: 40px 0">
-        <NEmpty description="暂无定时任务，点击右上角新建" />
+        <NEmpty :description="canWrite ? '暂无定时任务，点击右上角新建' : '暂无可见的定时任务'" />
       </NSpace>
 
       <div v-else class="job-table">
@@ -164,12 +169,12 @@ onMounted(() => cron.load())
             </NTag>
           </span>
           <span class="muted">{{ it.next_run || '—' }}</span>
-          <span><NSwitch :value="it.enabled" @update:value="(v: boolean) => cron.toggle(it.id, v)" /></span>
+          <span><NSwitch :value="it.enabled" :disabled="!canWrite" @update:value="(v: boolean) => cron.toggle(it.id, v)" /></span>
           <span class="job-actions">
-            <NButton size="small" tertiary @click="handleRun(it)">执行</NButton>
+            <NButton v-if="canWrite" size="small" tertiary @click="handleRun(it)">执行</NButton>
             <NButton size="small" tertiary @click="openHistory(it)">历史</NButton>
-            <NButton size="small" tertiary @click="openEdit(it)">编辑</NButton>
-            <NButton size="small" tertiary type="error" @click="confirmDelete(it)">删除</NButton>
+            <NButton v-if="canWrite" size="small" tertiary @click="openEdit(it)">编辑</NButton>
+            <NButton v-if="canWrite" size="small" tertiary type="error" @click="confirmDelete(it)">删除</NButton>
           </span>
         </div>
       </div>
