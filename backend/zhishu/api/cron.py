@@ -72,6 +72,9 @@ async def create_job(req: CronCreate, user=require_auth("cron:write")):
         raise HTTPException(400, "schedule_type 必须为 interval/daily/cron")
     if req.action not in ("chat", "shell"):
         raise HTTPException(400, "action 必须为 chat/shell")
+    # 安全：shell 动作执行任意命令，仅限管理员/运维创建（防租户 RCE）
+    if req.action == "shell" and (user.get("r") or "") not in ("admin", "operator"):
+        raise HTTPException(403, "shell 动作执行任意命令，仅限管理员/运维创建")
     # 安全：非 admin 不得代他人创建任务，owner 强制为当前用户
     owner = req.owner if (_is_admin(user) and req.owner) else _username(user)
     jid = get_ctx().cron.create_job(
@@ -86,6 +89,9 @@ async def create_job(req: CronCreate, user=require_auth("cron:write")):
 async def update_job(jid: int, req: CronUpdate, user=require_auth("cron:write")):
     _get_owned_job(jid, user)
     kw = {k: v for k, v in req.model_dump().items() if v is not None}
+    # 安全：shell 动作执行任意命令，仅限管理员/运维（防租户 RCE）
+    if kw.get("action") == "shell" and (user.get("r") or "") not in ("admin", "operator"):
+        raise HTTPException(403, "shell 动作执行任意命令，仅限管理员/运维修改")
     # 安全：非 admin 不得转移任务归属
     if not _is_admin(user):
         kw.pop("owner", None)

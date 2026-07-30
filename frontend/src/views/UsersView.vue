@@ -6,9 +6,13 @@ import {
   NEmpty, NSpin,
 } from 'naive-ui'
 import { api } from '@/api/client'
+import { useAppStore } from '@/stores/app'
 
 const message = useMessage()
 const dialog = useDialog()
+const app = useAppStore()
+/** 只读访客（仅 users:read）隐藏全部写操作，避免点击后 403 */
+const canWrite = computed(() => app.can('users:write'))
 
 const users = ref<any[]>([])
 const roles = ref<any[]>([])
@@ -287,8 +291,9 @@ onMounted(load)
       <div>
         <div class="header-title">用户管理</div>
         <div class="header-sub">多用户账户与角色（RBAC）</div>
+        <NTag v-if="!canWrite" size="small" type="default" :bordered="false" style="margin-top:6px">只读模式</NTag>
       </div>
-      <NButton type="primary" size="small" :loading="loading" @click="openCreate">
+      <NButton v-if="canWrite" type="primary" size="small" :loading="loading" @click="openCreate">
         <template #icon><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></template>
         新建用户
       </NButton>
@@ -327,9 +332,9 @@ onMounted(load)
         </NSpace>
         <NSpace v-if="selectedIds.length > 0" align="center">
           <span class="selected-hint">已选 {{ selectedIds.length }} 位用户</span>
-          <NButton size="tiny" @click="bulkAction('active')">批量启用</NButton>
-          <NButton size="tiny" @click="bulkAction('disabled')">批量停用</NButton>
-          <NButton size="tiny" type="error" @click="bulkAction('delete')">批量删除</NButton>
+          <NButton v-if="canWrite" size="tiny" @click="bulkAction('active')">批量启用</NButton>
+          <NButton v-if="canWrite" size="tiny" @click="bulkAction('disabled')">批量停用</NButton>
+          <NButton v-if="canWrite" size="tiny" type="error" @click="bulkAction('delete')">批量删除</NButton>
         </NSpace>
       </div>
 
@@ -386,11 +391,11 @@ onMounted(load)
               <td class="mono muted">{{ formatDate(u.created_at) }}</td>
               <td class="mono muted">{{ formatDate(u.last_login) }}</td>
               <td class="actions">
-                <NButton size="tiny" quaternary @click="openEdit(u)">编辑</NButton>
-                <NButton v-if="u.status !== 'active'" size="tiny" quaternary @click="setStatus(u, 'active')">启用</NButton>
-                <NButton v-else size="tiny" quaternary @click="setStatus(u, 'disabled')">停用</NButton>
-                <NButton size="tiny" quaternary @click="openReset(u)">重置密码</NButton>
-                <NPopconfirm @positive-click="removeUser(u)">
+                <NButton v-if="canWrite" size="tiny" quaternary @click="openEdit(u)">编辑</NButton>
+                <NButton v-if="canWrite && u.status !== 'active'" size="tiny" quaternary @click="setStatus(u, 'active')">启用</NButton>
+                <NButton v-if="canWrite && u.status === 'active'" size="tiny" quaternary @click="setStatus(u, 'disabled')">停用</NButton>
+                <NButton v-if="canWrite" size="tiny" quaternary @click="openReset(u)">重置密码</NButton>
+                <NPopconfirm v-if="canWrite" @positive-click="removeUser(u)">
                   <template #trigger><NButton size="tiny" quaternary type="error">删除</NButton></template>
                   确认删除用户「{{ u.username }}」？
                 </NPopconfirm>

@@ -655,7 +655,7 @@ class Agent:
 
             data = base64.b64decode(res["b64"])
             if self.media:
-                return self.media.save_bytes(data, kind=kind, ext=default_ext)
+                return self.media.save_bytes(data, kind=kind, ext=default_ext, owner=self.ctx.user)
             return "data:image/png;base64," + res["b64"]
         url = res.get("url")
         if not url:
@@ -664,7 +664,7 @@ class Agent:
             return url
         data = await self.llm.download(url)
         ext = type(self.media).guess_ext(url, fallback=default_ext)
-        return self.media.save_bytes(data, kind=kind, ext=ext)
+        return self.media.save_bytes(data, kind=kind, ext=ext, owner=self.ctx.user)
 
     @staticmethod
     def _fmt_err(e: Exception) -> str:

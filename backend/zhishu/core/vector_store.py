@@ -270,8 +270,9 @@ class VectorStore:
         ).fetchone()
         if not row:
             return False
-        # owner=None 视为管理员，可删任意；否则仅能删自己的私有文档
-        if owner is not None and row[0] is not None and row[0] != owner:
+        # owner=None 视为管理员，可删任意；owner 为空的公共文档仅管理员可删；
+        # 否则仅能删自己的私有文档
+        if owner is not None and (row[0] or "") != owner:
             return False
         # 清理原始文件（重新解析用），失败不影响删除
         if row[1]:

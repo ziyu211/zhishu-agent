@@ -37,7 +37,8 @@ const form = reactive<{
 function markEditable(items: any[]) {
   const me = (app.user as any)?.username || ''
   const admin = app.isAdmin
-  for (const it of items) it._editable = admin || (!!it.owner && it.owner === me)
+  const canWrite = app.can('modules:write')
+  for (const it of items) it._editable = canWrite && (admin || (!!it.owner && it.owner === me))
   return items
 }
 
@@ -189,8 +190,9 @@ watch(actAs, () => load())
       <div>
         <div class="header-title">插件</div>
         <div class="header-sub">插件可声明若干「自定义工具」（shell 命令 / HTTP 接口）。启用后，这些工具会注册到 Agent，可在对话中直接调用。</div>
+        <NTag v-if="!app.can('modules:write')" size="small" type="default" :bordered="false" style="margin-top:6px">只读模式</NTag>
       </div>
-      <NButton type="primary" size="small" @click="openCreate">
+      <NButton v-if="app.can('modules:write')" type="primary" size="small" @click="openCreate">
         <template #icon>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 5v14M5 12h14" />

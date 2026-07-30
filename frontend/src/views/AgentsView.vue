@@ -11,10 +11,13 @@ import ShareScopeSelector from '@/components/modules/ShareScopeSelector.vue'
 
 const message = useMessage()
 const app = useAppStore()
+/** 只读访客（仅 agents:read）隐藏写操作，避免点击后 403 */
+const canWrite = computed(() => app.can('agents:write'))
 const loading = ref(false)
 const agents = ref<any[]>([])
 
 function canEditItem(it: any): boolean {
+  if (!app.can('agents:write')) return false
   const me = (app.user as any)?.username || ''
   return app.isAdmin || (!!it.owner && it.owner === me)
 }
@@ -218,7 +221,8 @@ watch(actAs, () => load())
           也可在聊天页顶栏直接选定某个子智能体对话。每个子智能体拥有独立人设、可选模型与工具范围。
         </div>
       </div>
-      <NButton type="primary" size="small" @click="openCreate">
+      <NTag v-if="!canWrite" size="small" type="default" :bordered="false">只读模式</NTag>
+      <NButton v-if="canWrite" type="primary" size="small" @click="openCreate">
         <template #icon>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 5v14M5 12h14" />

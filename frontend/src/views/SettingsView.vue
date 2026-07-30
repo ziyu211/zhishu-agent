@@ -115,7 +115,7 @@ onMounted(() => {
           <label>默认模型</label>
           <div class="inline-form">
             <NSelect v-model:value="selectedDefault" :options="modelOptions" placeholder="选择默认模型" size="small" style="min-width: 260px" />
-            <NButton size="small" @click="setDefault">应用</NButton>
+            <NButton size="small" :disabled="!app.can('models:write')" @click="setDefault">应用</NButton>
           </div>
         </div>
       </section>

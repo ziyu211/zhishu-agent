@@ -1,9 +1,13 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
-import { NButton, NInput, useMessage } from 'naive-ui'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { NButton, NInput, NTag, useMessage } from 'naive-ui'
 import { api } from '@/api/client'
+import { useAppStore } from '@/stores/app'
 
 const message = useMessage()
+const app = useAppStore()
+/** 只读访客（仅 modules:read）隐藏保存操作，避免点击后 403 */
+const canWrite = computed(() => app.can('modules:write'))
 const loading = ref(false)
 const saving = ref(false)
 
@@ -86,6 +90,7 @@ onMounted(load)
         <div class="header-sub">长期记忆文件（MEMORY.md / USER.md / SOUL.md），会注入 Agent 上下文，使其长期记住项目背景、用户画像与行为准则。</div>
       </div>
       <div class="head-actions">
+        <NTag v-if="!canWrite" size="small" type="default" :bordered="false">只读模式</NTag>
         <NInput v-model:value="searchQ" size="small" placeholder="搜索记忆内容..." clearable @keyup.enter="doSearch" style="width: 180px">
           <template #prefix>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
@@ -94,7 +99,7 @@ onMounted(load)
         <NButton size="small" :loading="searching" quaternary @click="doSearch">搜索</NButton>
         <NButton size="small" :loading="loading" quaternary @click="load">刷新</NButton>
         <NButton size="small" quaternary @click="exportMemo">导出</NButton>
-        <NButton size="small" type="primary" :loading="saving" @click="save">保存</NButton>
+        <NButton v-if="canWrite" size="small" type="primary" :loading="saving" @click="save">保存</NButton>
       </div>
     </header>
 
@@ -109,17 +114,17 @@ onMounted(load)
     <div class="memory-content">
       <section class="mem-block">
         <h3 class="mem-title">MEMORY.md <span class="mem-hint">全局长期记忆 / 项目背景</span></h3>
-        <NInput v-model:value="forms.memory" type="textarea" :autosize="{ minRows: 6, maxRows: 20 }" placeholder="记录长期记忆、偏好、关键事实..." />
+        <NInput v-model:value="forms.memory" type="textarea" :autosize="{ minRows: 6, maxRows: 20 }" :disabled="!canWrite" placeholder="记录长期记忆、偏好、关键事实..." />
       </section>
 
       <section class="mem-block">
         <h3 class="mem-title">USER.md <span class="mem-hint">用户画像 / 使用习惯</span></h3>
-        <NInput v-model:value="forms.user" type="textarea" :autosize="{ minRows: 5, maxRows: 18 }" placeholder="记录用户的信息与偏好..." />
+        <NInput v-model:value="forms.user" type="textarea" :autosize="{ minRows: 5, maxRows: 18 }" :disabled="!canWrite" placeholder="记录用户的信息与偏好..." />
       </section>
 
       <section class="mem-block">
         <h3 class="mem-title">SOUL.md <span class="mem-hint">行为准则 / 人格设定</span></h3>
-        <NInput v-model:value="forms.soul" type="textarea" :autosize="{ minRows: 5, maxRows: 18 }" placeholder="记录智能体的行为准则与人格..." />
+        <NInput v-model:value="forms.soul" type="textarea" :autosize="{ minRows: 5, maxRows: 18 }" :disabled="!canWrite" placeholder="记录智能体的行为准则与人格..." />
       </section>
     </div>
   </div>

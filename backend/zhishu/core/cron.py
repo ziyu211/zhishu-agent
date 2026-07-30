@@ -293,16 +293,19 @@ class CronScheduler:
         model = job.get("model") or ctx.cfg.cron.default_model or ctx.cfg.default_model
         # 多用户隔离：定时任务以任务归属者身份运行；admin 的任务保留 admin 视角
         _owner = job.get("owner")
+        _role = None
         _is_admin = False
         try:
             row = ctx.users.get_by_name(_owner) if _owner else None
-            _is_admin = bool(row and row["role"] == "admin")
+            if row:
+                _role = row.get("role")
+                _is_admin = _role == "admin"
         except Exception:
             _is_admin = False
         parts: list[str] = []
         async for ev in agent.run(
             job["payload"], session=f"cron:{job['id']}", model=model,
-            owner=_owner, is_admin=_is_admin,
+            owner=_owner, is_admin=_is_admin, user_role=_role,
         ):
             t = ev.get("type")
             if t == "token":

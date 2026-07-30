@@ -33,18 +33,22 @@ def _attachment_url(rel_path: str) -> str:
     return "/media/" + rel_path.replace("\\", "/").lstrip("/")
 
 
-def _save_upload(raw: bytes, filename: str) -> tuple[str, str]:
-    """保存到 media/attachments/<uid>/<filename>，返回 (相对 media 的路径, 绝对路径)。"""
+def _save_upload(raw: bytes, filename: str, owner: str | None = None) -> tuple[str, str]:
+    """保存到 media/attachments/<owner>/<uid>/<filename>，返回 (相对 media 的路径, 绝对路径)。
+
+    owner 段用于越权防护：解析/查看他人附件时按归属校验。
+    """
     ctx = get_ctx()
     base = os.path.join(ctx.cfg.server.data_dir, ctx.cfg.media.store_dir, "attachments")
+    owner_dir = owner or "_anon"
     uid_dir = uuid.uuid4().hex[:12]
-    target_dir = os.path.join(base, uid_dir)
+    target_dir = os.path.join(base, owner_dir, uid_dir)
     os.makedirs(target_dir, exist_ok=True)
     safe_name = os.path.basename(filename) or "file"
     abs_path = os.path.abspath(os.path.join(target_dir, safe_name))
     with open(abs_path, "wb") as f:
         f.write(raw)
-    rel = os.path.join("attachments", uid_dir, safe_name)
+    rel = os.path.join("attachments", owner_dir, uid_dir, safe_name)
     return rel, abs_path
 
 
@@ -78,8 +82,8 @@ async def chat_attach(
         raise HTTPException(status_code=400, detail="文件为空")
     filename = file.filename or "未命名文件"
     ext = os.path.splitext(filename)[1].lower()
-    rel, abs_path = _save_upload(raw, filename)
     owner = user.get("u")
+    rel, abs_path = _save_upload(raw, filename, owner=owner)
 
     base = {
         "attachment_id": os.path.basename(os.path.dirname(abs_path)),
@@ -159,6 +163,14 @@ async def chat_parse(
         raise HTTPException(status_code=403, detail="非法附件路径")
     if not abs_path or not os.path.isfile(abs_path):
         raise HTTPException(status_code=404, detail="附件不存在")
+    # 越权防护：附件解析会把内容入库到本人知识库，必须确认附件归属本人
+    rel = os.path.relpath(abs_path, media_root)
+    rel_parts = rel.split(os.sep)
+    if rel_parts and rel_parts[0] == "attachments" and len(rel_parts) >= 3:
+        owner_seg = rel_parts[1]
+        if owner_seg not in ("_anon",) and owner_seg != (user.get("u") or "") \
+                and (user.get("r") or "") != "admin":
+            raise HTTPException(status_code=403, detail="无权解析他人附件")
     owner = user.get("u")
     ext = os.path.splitext(abs_path)[1].lower()
     if ext in _IMAGE_EXTS:

@@ -1,15 +1,16 @@
 # 智枢智能体（Zhishu Agent）
 
-> 一个面向**内网离线、安全合规、自主可控**场景的本地智能体系统。
-> 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端，配置驱动多模型接入，内置知识库、记忆、工具、定时任务与技能自进化闭环。
+> 一个面向**内网离线、安全合规、自主可控**场景的多用户本地智能体系统。
+> 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端；配置驱动多模型接入，内置 RBAC 多租户、知识库、记忆、工具、插件/技能/MCP、定时任务与技能自进化闭环。
 
 ---
 
 ## 一、设计目标
 
 - **单进程部署**：一个 FastAPI 进程同时承担「Agent 引擎 + API 服务 + 静态前端托管」，无需独立的 Node BFF 或反向代理，镜像体积小、部署单元合一。
-- **配置驱动的多模型接入**：所有 LLM / Embedding 调用严格跟随 `deploy/zhishu.yaml` 配置，支持国产 OpenAI 兼容端点（通义千问、智谱 GLM、DeepSeek、Kimi、文心一言、MiniMax、讯飞星火）以及本地 Ollama / vLLM。
-- **安全合规**：内置数据脱敏、审计日志、RBAC 权限、国密（SM4/SM3）凭据保护、私网隔离开关（工具默认禁止出网，白名单放行）。
+- **配置驱动的多模型接入**：LLM / Embedding 调用跟随 `deploy/zhishu.yaml` 与运行时 Provider 管理（`data/providers.json`），支持国产 OpenAI 兼容端点（通义千问、智谱 GLM、DeepSeek、Kimi、文心一言、MiniMax、讯飞星火）以及本地 Ollama / vLLM。
+- **多用户与租户隔离**：内置四角色 RBAC（admin/operator/user/viewer），资源默认私有，支持「私有 / 全员共享 / 按角色共享」三级共享粒度，admin 可代管任意用户。
+- **安全合规**：数据脱敏、审计日志、国密（SM4/SM3）凭据保护、出网隔离、SSRF 防护、媒体文件鉴权网关、弱密钥启动硬闸门。
 - **可离线运行**：默认使用本地 SQLite 向量库与确定性哈希向量降级，无外部服务依赖即可启动。
 
 ---
@@ -20,76 +21,115 @@
 浏览器 ──(同源 fetch / SSE)──▶ Python(FastAPI 单进程)
                                   │
                                   ├── 智能体引擎（ReAct 循环 + 流式 SSE）
-                                  ├── REST / SSE API
+                                  ├── REST / SSE API（RBAC + 多租户隔离）
+                                  ├── /media 鉴权网关（按 owner 隔离）
                                   └── 编译后的 Vue 静态前端（static/）
 ```
 
-由 **FastAPI 单进程**统一托管三部分：① Agent 推理引擎 ② REST/SSE API ③ 编译后的 Vue 静态资源。前端通过同源调用后端，开发期与生产期共用同一套契约，彻底去掉 Node BFF。
+由 **FastAPI 单进程**统一托管：① Agent 推理引擎 ② REST/SSE API ③ 编译后的 Vue 静态资源。前端通过同源调用后端，开发期与生产期共用同一套契约，无 Node BFF。
 
 ---
 
-## 三、核心模块
+## 三、RBAC 权限模型与多租户
+
+### 3.1 角色权限矩阵（`core/security.py` ROLES）
+
+| 权限点 | admin | operator（运维/配置） | user（普通用户） | viewer（只读访客） |
+|--------|:-----:|:--------:|:----:|:------:|
+| chat（对话） | ✅ | ✅ | ✅ | ✅ |
+| knowledge:read / write | ✅ | ✅ / ✅ | ✅ / ✅ | ❌ |
+| models:read / write | ✅ | ✅ / ✅ | ✅ / ❌ | ✅ / ❌ |
+| modules:read / write（插件/技能/MCP/记忆） | ✅ | ✅ / ✅ | ✅ / ❌ | ✅ / ❌ |
+| agents:read / write | ✅ | ✅ / ✅ | ✅ / ❌ | ✅ / ❌ |
+| cron:read / write | ✅ | ✅ / ✅ | ✅ / ✅ | ✅ / ❌ |
+| audit:read（审计） | ✅ | ✅ | ❌ | ❌ |
+| users / settings / admin 端点 | ✅ | ❌ | ❌ | ❌ |
+
+- `admin` 拥有通配 `*`；写权限隐含读权限；前端以 `app.can('<perm>')` 统一门控按钮/表单，无权限时展示「只读」徽标。
+- **cron shell 动作**额外限制：仅 admin/operator 可创建/修改 `action=shell` 的定时任务（防任意命令执行）。
+
+### 3.2 多租户隔离与共享
+
+- 所有资源（Provider / 插件 / 技能 / MCP / Agents / 定时任务 / 知识文档 / 会话 / 媒体文件）带 `owner`，**默认私有**。
+- 共享粒度三态（前端 `ShareScopeSelector`）：**私有** → **按角色共享**（`share_with: ["operator","user","viewer"]`）→ **全员共享**（`shared: true`）。
+- `owner` 为空的资源视为「**公共**」：全员可见、**仅 admin 可改/删**。
+- admin 可通过 `X-Act-As` 请求头（前端「切换用户」）代管任意用户的资源。
+- 媒体文件按 `/media/<owner>/<file>` 存储，网关校验 Token 归属，禁止跨租户访问。
+
+---
+
+## 四、核心模块
 
 ### 1. LLM 接入层（配置驱动多 Provider + 回退链）
-- **抽象 `LLMProvider`**：基于 `httpx` 自研轻量客户端，零境外 SDK 依赖。
-- **多 Provider 支持**：国产 OpenAI 兼容端点（通义千问 / 智谱 GLM / DeepSeek / Kimi / 文心一言 / MiniMax / 讯飞星火）+ 本地推理（Ollama / vLLM 经 OpenAI 兼容协议接入）。
-- **故障回退链 + 多副本负载均衡**：配置的 Provider 按可用性与密钥状态自动筛选，主用不可用时回退至备用。
-- **离线兜底**：未配置任何云端 Key 时，可指向本地 Ollama 实现离线问答。
+- **抽象 `LLMProvider`**：基于 `httpx` 自研轻量客户端，零境外 SDK 依赖（`core/providers/`，`core/llm.py` 为兼容 shim）。
+- **多 Provider**：国产 OpenAI 兼容端点 + 本地推理（Ollama / vLLM）。
+- **运行时 Provider 管理**：前端「模型」页支持增删改 Provider、探测模型（`/models/fetch`，带 SSRF 防护）、设默认模型、按共享范围下发；持久化至 `data/providers.json`（API Key 以 SM4/XOR 混淆落盘，接口只回掩码）。
+- **故障回退链 + 负载均衡**：按可用性与密钥状态自动筛选，主用不可用时回退备用。
+- **离线兜底**：未配置云端 Key 时可指向本地 Ollama。
 
 ### 2. 知识库与 RAG
-- **向量库**：默认 `SQLite + numpy 余弦相似度`，零外部服务内网直用；可切换 `Milvus` / `PostgreSQL-pgvector` / `达梦(DM)`。
-- **Embedding**：支持网络 Provider 端点（`embedding.embed_model`）或本地模型；未配置时降级为确定性哈希向量，保证检索流程不中断。
-- **检索增强**：`rag.py` 提供知识库语义检索，结果注入对话上下文。
+- **向量库**：默认 `SQLite + numpy 余弦相似度`，零外部服务内网直用；`vector_store.py` 预留 Milvus / pgvector / 达梦(DM) 后端接口。
+- **Embedding**：网络 Provider 端点或本地模型，批量入库；未配置时降级确定性哈希向量，检索流程不中断。
+- **文档解析**：零依赖解析 PDF/Office 等（`parsers.py`），扫描件 PDF 支持页面图片预览；文档按 owner 隔离、可共享，删除共享文档仅 admin。
+- **知识图谱**（`kgraph.py`）：从入库文档抽取实体关系，前端图谱可视化。
 
 ### 3. 记忆系统
-- **会话记忆**：基于 SQLite FTS5 存储多轮对话，支持跨会话全文检索与回顾。
-- **长期记忆工具**（`memory`）：Agent 可主动 `recall / save / update_user / forget`，持久化到 `MEMORY.md / USER.md / SOUL.md`，下一轮自动注入系统提示，实现跨会话连续性。
-- **跨会话回忆工具**（`session_search`）：支持关键词检索、指定会话翻阅、最近会话浏览三种模式，零 LLM 成本。
+- **会话记忆**：SQLite FTS5 存储多轮对话，跨会话全文检索。
+- **长期记忆工具**（`memory`）：Agent 主动 `recall / save / update_user / forget`，持久化 `MEMORY.md / USER.md / SOUL.md`，下轮注入系统提示；设置页可开关（admin，持久化 `data/config.override.json`）。
+- **跨会话回忆**（`session_search`）：关键词检索 / 指定会话翻阅 / 最近会话浏览，零 LLM 成本。
 
 ### 4. 工具系统（Toolset）
-工具按能力分组（`toolsets`），按需启用。内置工具包括：
+工具按能力分组（`toolsets`），按需启用：
 
 | 工具分组 | 工具 | 说明 |
 |----------|------|------|
 | `terminal` | `terminal_run` | 沙箱内终端命令执行 |
-| `file` | `file_read` / `file_write` / `file_list` | 文件读写（含大文件分页读取与零依赖文档解析） |
+| `file` | `file_read` / `file_write` / `file_list` | 文件读写（大文件分页 + 零依赖文档解析） |
 | `knowledge` | `knowledge_search` / `knowledge_list` / `knowledge_read` | 知识库检索 |
-| `web` | `safe_web_fetch` / `web_search` | 受控外网访问（受 `outbound_allow` 门控）；`web_search` 支持多搜索引擎后端 |
+| `web` | `safe_web_fetch` / `web_search` | 受控外网访问（`outbound_allow` 门控）；多搜索引擎后端 |
 | `memory` | `memory` | 长期记忆读写 |
-| `todo` | `todo` | 任务清单（复杂任务拆解与进度跟踪） |
+| `todo` | `todo` | 任务清单 |
 | `sessions` | `session_search` | 跨会话回忆 |
-| `delegate` | `delegate_to_agent` | 委派子代理处理并行/专项任务 |
-| `skills` | `read_skill` | 技能渐进披露（按需读取 SKILL.md 全文） |
-| `code_exec` | `code_exec` | 沙箱内代码执行（自扩展能力） |
+| `delegate` | `delegate_to_agent` | 委派子代理 |
+| `skills` | `read_skill` | 技能渐进披露 |
+| `code_exec` | `code_exec` | 沙箱内代码执行 |
 
-- **沙箱**：工具仅能在 `SANDBOX_ROOT`（默认 `data/sandbox`）范围内操作，防越权。
-- **出网隔离**：`safe_web_fetch` 与 `web_search` 在执行前检查 `security.outbound_allow`，为 `False` 时拒绝出网。
+- **沙箱**：工具仅能在 `SANDBOX_ROOT`（默认 `data/sandbox`）内操作。
+- **出网隔离**：`safe_web_fetch` / `web_search` 受 `security.outbound_allow` 门控。
+- **多模态生成**：支持图片生成/视频生成路由（`image_routing.py`），产物经 `MediaStore` 按 owner 落盘、`/media` 网关鉴权访问。
 
-### 5. 安全合规模块
-- **数据脱敏**（`redact.py`）：对手机号 / 身份证 / 邮箱 / 银行卡 / 敏感字段值进行正则遮蔽，审计落库前自动脱敏。
-- **国密与凭据保护**（`credentials.py` / `security.py`）：API Key 落盘前用 SM4 混淆（库缺失时降级）；鉴权 Token 基于 HMAC，可选 SM3 签名。
-- **RBAC 权限**：角色与权限点（会话、知识库、模型、审计等）分级管控。
-- **审计日志**：记录关键操作，落库前经脱敏处理。
-- **私网隔离开关**：工具默认禁出网，仅白名单放行。
+### 5. 插件 / 技能 / MCP（运行时模块）
+- **插件（Plugins）**：上传/编写 Python 插件即注册为工具，增删改/启停即时生效（`modules.py _sync_plugins`），支持共享范围。
+- **技能（Skills）**：SKILL.md 技能包管理，导入/新建/编辑，Agent 按需渐进读取。
+- **MCP 服务器**：配置 stdio MCP Server（command/args/env），连接后其工具注册为 `mcp__<server>__<tool>`，前端支持连接测试与工具调用测试。
+- 三者均按 owner 隔离 + 三态共享，非 owner 且非 admin 只读。
 
-### 6. 上下文压缩
-`context_engine.py` 在超长对话下自动截断 / 摘要 / 轮转，控制上下文窗口，保证长会话可用性。
+### 6. 安全合规模块
+- **数据脱敏**（`redact.py`）：手机号/身份证/邮箱/银行卡等正则遮蔽，审计落库前自动脱敏；系统页提供「脱敏自测」卡片（`/admin/redact`）。
+- **国密与凭据保护**（`credentials.py` / `security.py`）：API Key 落盘 SM4 混淆（库缺失降级 XOR）；Token HMAC，可选 SM3；密码加盐哈希。
+- **启动硬闸门**：`enable_auth=true` 且 `security.secret` 为默认值时**拒绝启动**（可用 `ZHISHU_ALLOW_INSECURE_DEFAULTS=1` 临时放行）；弱管理员口令启动告警。
+- **SSRF 防护**：`/models/fetch` 默认拒绝内网/私有/环回地址（含云 metadata），需 `security.allow_private_fetch: true` 显式放开（本地 Ollama 探测场景）。
+- **审计日志**：关键操作记录，脱敏后落库，operator 以上可查。
+- **CORS**：`allow_credentials=False`，避免 `*` + credentials 危险组合。
 
-### 7. 定时任务（Cron）
-`cron.py` 提供内网合规版调度器，支持周期性触发对话或任务；配套 `api/cron.py` 路由与管理前端页面。
+### 7. 上下文压缩
+`context_engine.py` 超长对话自动截断/摘要/轮转，保证长会话可用。
 
-### 8. 技能自进化闭环
-- **技能蒸馏**（`modules/skills.maybe_learn`）：复杂任务完成后，异步由 LLM 将可复用工作流沉淀为技能文件（`SKILL.md`）。
-- **后台记忆反思**（`modules/skills.maybe_reflect`）：每轮结束后异步蒸馏用户事实追加进长期记忆（opt-in，默认关闭，异常安全）。
-- **会话内 nudge**：每完成配置次数的工具调用，向模型注入内部提醒「该沉淀为长期记忆/技能了」，引导主动学习。
+### 8. 定时任务（Cron）
+`cron.py` 内网合规调度器：`interval / daily / cron` 三种调度，`chat`（定时对话，按任务 owner 的身份与角色执行）与 `shell`（仅 admin/operator）两种动作；任务按 owner 隔离，viewer 只读。
 
-### 9. 多智能体协作
-- **子代理委派**（`delegate_to_agent`）：将并行或专项任务交给子代理处理，主代理聚合结果。
-- **MoA / 多模型协作**：支持多模型协作推理（见 `core/agent/moa.py`）。
+### 9. 技能自进化闭环
+- **技能蒸馏**（`modules/skills.maybe_learn`）：复杂任务完成后异步沉淀 SKILL.md。
+- **后台记忆反思**（`maybe_reflect`）：每轮结束异步蒸馏用户事实（opt-in 默认关闭）。
+- **会话内 nudge**：按配置频率提醒模型沉淀记忆/技能。
+
+### 10. 多智能体协作
+- **子代理委派**（`delegate_to_agent`）+ **自定义 Agents**（前端可建专属 Agent：提示词/模型/工具集，支持共享）。
+- **MoA 多模型协作**（`core/agent/moa.py`）。
 
 ---
 
-## 四、目录结构
+## 五、目录结构
 
 ```
 zhishu-agent/
@@ -97,178 +137,171 @@ zhishu-agent/
 ├── requirements.txt          # 依赖清单（国内 pip 源可用）
 ├── backend/
 │   ├── start_backend.py      # 启动入口（uvicorn 托管 create_app，默认 0.0.0.0:8080）
+│   ├── tests/                # 单测与端到端脚本（含 e2e_roles_check.py 四角色验证）
 │   └── zhishu/
-│       ├── main.py           # FastAPI 应用工厂 create_app（引擎 + API + 静态托管）
-│       ├── config.py         # YAML + 环境变量配置中心
+│       ├── main.py           # FastAPI 应用工厂（引擎 + API + /media 网关 + 静态托管 + 启动自检）
 │       ├── core/
-│       │   ├── llm.py        # 多 Provider 适配（httpx，配置驱动）
-│       │   ├── agent.py      # Agent 循环（ReAct + 流式 SSE）
-│       │   ├── providers/    # Provider 客户端与回退链
-│       │   ├── embedding.py  # Embedding（provider 网络 / 本地 / 哈希降级）
-│       │   ├── vector_store.py # 向量库（sqlite / milvus / pgvector / dm 可配）
-│       │   ├── rag.py        # 知识库检索增强
+│       │   ├── config.py     # YAML + 环境变量 + config.override.json 配置中心
+│       │   ├── providers/    # Provider 客户端与回退链（llm.py 为兼容 shim）
+│       │   ├── credentials.py# Provider 运行时存储（SM4/XOR 混淆，providers.json）
+│       │   ├── embedding.py  # Embedding（网络 / 本地 / 哈希降级，批量）
+│       │   ├── vector_store.py # 向量库（sqlite 实现 + 多后端接口）
+│       │   ├── rag.py        # 知识库检索增强 + 扫描件预览
+│       │   ├── kgraph.py     # 知识图谱抽取
 │       │   ├── memory/       # 会话记忆（SQLite FTS5）
-│       │   ├── modules/      # 技能蒸馏 / 记忆反思等自进化模块
-│       │   ├── security.py   # 鉴权 / RBAC / 审计
+│       │   ├── modules/      # 插件/技能/MCP 运行时 + 自进化模块
+│       │   ├── agent/        # Agent 循环（ReAct + SSE）+ moa.py
+│       │   ├── agents_runtime.py # 子代理运行时
+│       │   ├── security.py   # 鉴权 / RBAC(ROLES) / 用户库 / 审计
 │       │   ├── redact.py     # 数据脱敏
-│       │   ├── credentials.py# 凭据加密存储（SM4 混淆）
+│       │   ├── media.py      # 媒体存储（按 owner 目录隔离）
 │       │   ├── cron.py       # 定时任务调度
-│       │   ├── tools/        # 工具注册中心 + builtins/
-│       │   └── agents_runtime.py # 子代理运行时
-│       ├── api/              # chat / models / knowledge / auth / admin / cron / agents / users 路由
-│       └── static/          # 编译后的前端资源（由 frontend 构建产出，已被 .gitignore 忽略）
+│       │   ├── image_routing.py # 多模态生成路由
+│       │   └── tools/        # 工具注册中心 + builtins/
+│       ├── api/              # auth/chat/conversations/knowledge/models/modules/
+│       │                     # agents/cron/users/settings/admin 共 12 路由
+│       └── static/           # 编译后的前端资源（随仓库分发，构建后覆盖）
 ├── frontend/                 # Vue3 + Vite + Naive UI（同源调用后端）
 │   └── src/ ...
 └── deploy/
-    ├── zhishu.yaml.example   # 示例配置（复制为 zhishu.yaml 后填入密钥，真实配置不入库）
+    ├── zhishu.yaml.example   # 示例配置（复制为 zhishu.yaml 后填密钥，真实配置不入库）
     ├── Dockerfile            # 标准容器化构建（node:18-alpine + python:3.11-slim）
-    ├── Dockerfile.local      # 受限/离线网络专用（华为云 SWR 基础镜像 + 国内源，零代理）
+    ├── Dockerfile.local      # 受限/离线网络专用（华为云 SWR 基础镜像 + 国内源）
     └── docker-compose.yml    # 一键编排（后端 + 可选本地 Ollama）
 ```
 
+> 注：`backend/zhishu/static/` **随仓库分发**（便于离线部署直接运行）；`deploy/zhishu.yaml` 真实配置已被 .gitignore 忽略。
+
 ---
 
-## 五、核心数据流
+## 六、核心数据流
 
 ```
-用户提问 → API(/api/v1/chat, SSE)
+用户提问 → API(/api/v1/chat, SSE, RBAC + X-Act-As)
    → Agent 循环：
-       1. 组装上下文：检索会话记忆(memory) + 知识库(rag) + 长期记忆(MEMORY.md)
-       2. 调用 LLM（配置的 Provider / 本地模型，含回退链）
+       1. 组装上下文：会话记忆(memory) + 知识库(rag) + 长期记忆(MEMORY.md)
+       2. 调用 LLM（按用户可见 Provider 解析回退链）
        3. 解析 tool_calls → 工具注册中心执行（沙箱 / 审计 / 出网门控）
-       4. 结果回填，循环直至 final_answer
+       4. 结果回填，循环直至 final_answer；媒体产物按 owner 落盘
    → 流式返回 token / tool_call / done 事件
    → 异步触发：技能蒸馏(maybe_learn) 与（可选）记忆反思(maybe_reflect)
 ```
 
 ---
 
-## 六、快速开始
+## 七、快速开始
 
-### 6.1 部署前准备
+### 7.1 部署前准备
 
 ```bash
 # 1) 复制配置模板（deploy/zhishu.yaml 已被 .gitignore 忽略，请勿提交真实密钥）
 cp deploy/zhishu.yaml.example deploy/zhishu.yaml
-# 编辑 deploy/zhishu.yaml，填入你的 Provider api_key、管理员密码等
+# 编辑 deploy/zhishu.yaml：填入 Provider api_key、管理员密码，
+# 并将 security.secret 改为强随机值（默认值会触发启动硬闸门，进程拒绝启动）
 
 # 2) 安装后端依赖
 cd backend && pip install -r ../requirements.txt -i https://mirrors.aliyun.com/pypi/simple
 cd ..
 
-# 3) （可选）自行构建前端：产物输出到 backend/zhishu/static，由 FastAPI 同源托管
+# 3) （可选）重新构建前端：产物输出到 backend/zhishu/static
 cd frontend && npm install && npm run build && cd ..
 ```
 
-> 仓库**不收录** `backend/zhishu/static/`（前端构建产物）与 `deploy/zhishu.yaml`（真实配置）。
-> 若直接拉取源码运行，请先执行上面的「复制配置 + 构建前端」两步。
-
-### 6.2 启动
+### 7.2 启动
 
 ```bash
 cd backend && python start_backend.py
 # 浏览器打开 http://127.0.0.1:8080
 ```
 
-> **访问入口说明（重要）**：请直接打开 **FastAPI 后端地址（默认 http://127.0.0.1:8080）**，
-> 后端会**同源托管前端页面与 `/api/v1/*` 接口**，登录等功能开箱即用。
-> 不要通过 `npm run preview`（默认 4173）访问——那只是纯静态前端预览，**没有后端 API**，
-> 调用登录会返回 HTTP 500。前端使用相对路径 `/api/v1/...`，由后端同源托管即可，无需任何代理。
-> 默认账号 `admin` / `zhishu@2026`（生产请改 `deploy/zhishu.yaml` 中的 `admin_password`）。
+> **访问入口**：直接打开 **FastAPI 后端地址（默认 http://127.0.0.1:8080）**，后端同源托管前端页面与 `/api/v1/*` 接口。
+> 不要通过 `npm run preview`（4173）访问——那是纯静态预览，没有后端 API。
+> 默认账号 `admin` / `zhishu@2026`（生产必须修改 `deploy/zhishu.yaml` 的 `admin_password`）。
 
 ---
 
-## 七、关键配置项（deploy/zhishu.yaml）
+## 八、关键配置项（deploy/zhishu.yaml）
 
 | 配置段 | 关键字段 | 说明 |
 |--------|----------|------|
-| `llm.providers` | `name` / `type` / `base_url` / `api_key` / `models` | 多 Provider 接入，支持回退链 |
-| `default_model` | — | 全局默认模型（严格跟随配置，无硬编码预设） |
-| `embedding` | `backend` / `embed_model` / `fallback_hash` | provider 网络端点；未配置自动降级哈希向量 |
-| `security` | `outbound_allow` / `secret` / `enable_sm` | 出网开关、国密密钥、SM 开关 |
-| `web_search` | `backend` | 搜索引擎后端（bing_cn / duckduckgo / tavily / bing） |
-| `agent` | `nudge_interval` / `reflection_enabled` / `skills_auto_learn` | 会话内提醒频率、后台记忆反思、技能自学习开关 |
+| `providers`（顶层） | `<name>: {base_url, api_key, models, priority, ...}` | 多 Provider 接入；运行时增改经 `/api/v1/providers` 持久化到 `data/providers.json` |
+| `default_model` | — | 全局默认模型（`provider/model`；留空则按可用 Provider 自动解析） |
+| `embedding` | `backend` / `embed_model` / `fallback_hash` | 网络端点或本地；未配置降级哈希向量 |
+| `security` | `secret` / `admin_password` / `enable_auth` / `outbound_allow` / `enable_sm` / `allow_private_fetch` | 签名密钥（**必改**）、出网开关、国密开关、SSRF 放行开关 |
+| `web_search` | `backend` | bing_cn / duckduckgo / tavily / bing |
+| `agent` | `nudge_interval` / `reflection_enabled` / `skills_auto_learn` | 自进化相关开关 |
 | `cron` | — | 定时任务调度配置 |
-| `memory` | — | 长期记忆存储路径与策略 |
+| `memory` | `vector_enabled` 等 | 长期记忆（语义检索需配置 Embedding，无则优雅降级） |
 
-完整字段见 `deploy/zhishu.yaml.example`。
+完整字段见 `deploy/zhishu.yaml.example`；运行时覆盖项落盘 `data/config.override.json`（设置页）。
+
+> ⚠️ **密钥耦合提示**：`data/providers.json` 中的 API Key 用 `security.secret` 派生密钥加密。**轮换 secret 会使已存 Key 失效**（对话报「所有 Provider 均不可用」）——轮换后需在前端「模型」页重新填入各 Provider 的 Key。
 
 ---
 
-## 八、Docker 容器化部署
+## 九、Docker 容器化部署
 
-镜像为「单进程」设计：一个容器同时跑 Agent 引擎 + REST/SSE API + 编译后的前端，对外只暴露 `8080`。
+镜像为「单进程」设计：一个容器同时跑 Agent 引擎 + API + 前端，对外仅暴露 `8080`。
 
-### 8.1 准备配置
+### 9.1 准备配置
 
 ```bash
 cp deploy/zhishu.yaml.example deploy/zhishu.yaml
-# 编辑 deploy/zhishu.yaml，填入 Provider api_key、管理员密码等
-# 该文件已被 .gitignore 忽略，不会进入任何提交
+# 填入 api_key、管理员密码，并把 security.secret 改为强随机值
 ```
 
-### 8.2 构建镜像
-
-提供两份 Dockerfile：
-
-- `deploy/Dockerfile`：标准构建，基础镜像 `node:18-alpine` + `python:3.11-slim`，需要能访问 `docker.io`（或配置镜像加速）。
-- `deploy/Dockerfile.local`：**受限 / 离线网络专用**，基础镜像走华为云 SWR（`ddn-k8s` 代理，直连可达，无需 `docker.io` / 代理），npm 走 npmmirror、pip 走腾讯云镜像。构建命令见文件头注释。
+### 9.2 构建镜像
 
 ```bash
 # 标准（需 docker.io 可达）
-docker build -t zhishu-agent:1.0.0 -f deploy/Dockerfile .
+docker build -t zsagent:1.0.0 -f deploy/Dockerfile .
 
 # 受限网络 / 国内零代理（推荐内网、本机）
-docker build -t zhishu-agent:1.0.0 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.0 -f deploy/Dockerfile.local .
 ```
 
-> 构建会把 `deploy/zhishu.yaml` 打进镜像。若不想把密钥烧进镜像层，可先用占位配置（不填真实 Key）构建，运行时用只读卷挂载真实配置覆盖（见 8.4）。
-
-### 8.3 运行（docker run）
+### 9.3 运行
 
 ```bash
 docker run -d --name zsagent \
   -p 8080:8080 \
   -v zsagent_data:/app/backend/data \
   --restart unless-stopped \
-  zhishu-agent:1.0.0
+  zsagent:1.0.0
 ```
 
-- `-v zsagent_data:/app/backend/data`：持久化向量库（`zhishu_vector.db`）、会话记忆与 `providers.json`，容器重建不丢数据。
-- 浏览器打开 http://localhost:8080 ，默认账号 `admin` / `zhishu@2026`（生产请改 `deploy/zhishu.yaml` 的 `admin_password`）。
+- `zsagent_data` 卷持久化：向量库、会话记忆、`providers.json`、用户库、媒体文件。
+- 打开 http://localhost:8080 ，默认 `admin` / `zhishu@2026`（生产必改）。
 
-### 8.4 配置不烧进镜像（推荐生产）
-
-先用占位配置构建（不填真实 Key），运行时只读挂载真实配置覆盖：
+### 9.4 配置不烧进镜像（推荐生产）
 
 ```bash
-cp deploy/zhishu.yaml.example deploy/zhishu.yaml   # 占位，勿填真实 Key
-docker build -t zhishu-agent:1.0.0 -f deploy/Dockerfile.local .
 docker run -d --name zsagent -p 8080:8080 \
   -v "$(pwd)/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro" \
   -v zsagent_data:/app/backend/data \
-  --restart unless-stopped zhishu-agent:1.0.0
+  --restart unless-stopped zsagent:1.0.0
 ```
 
-### 8.5 一键编排（docker compose）
+> 重建容器（`docker rm` + `run`）会丢弃可写层：请确保挂载的 `zhishu.yaml` 中 `security.secret` 与旧值一致（否则触发硬闸门或 Provider Key 失效），或启动时传 `-e ZHISHU_SECRET=<同值>`。
+
+### 9.5 一键编排
 
 ```bash
-# 先准备好 deploy/zhishu.yaml
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-compose 已声明 `zhishu-data` 数据卷与 `8080` 端口映射；可选启用内置的 Ollama 服务（取消注释 `ollama:` 段）做内网离线推理。
-
-### 8.6 健康检查与排错
+### 9.6 健康检查、验证与排错
 
 ```bash
-curl http://localhost:8080/health     # 期望 {"status":"ok",...}
-docker logs -f zsagent                 # 查看启动 / 对话日志
+curl http://localhost:8080/health        # 期望 {"status":"ok",...}
+docker logs -f zsagent                    # 启动 / 对话日志
+python backend/tests/e2e_roles_check.py   # 四角色 RBAC / 安全闭环端到端验证
 ```
 
-- 若对话报「所有 LLM Provider 均不可用 / 429」：说明配置的 Provider 配额耗尽或不可达，需更换或补充 `providers.json` 中的可用 Key（在 `deploy/zhishu.yaml` 的 providers 段或运行时数据卷内调整）。
-- 容器重启后配置与记忆均在 `zsagent_data` 卷中保留。
+- 对话报「所有 LLM Provider 均不可用 / 401 / 429」：Key 失效、配额耗尽或 secret 轮换导致解密失败——在前端「模型」页重填 Key。
+- 进程启动即退出（exit 2）：`security.secret` 仍为默认值，改为强随机值后重启。
+- 普通用户报「Provider 未配置或未启用」：将 Provider 设为公共（owner 置空）或按角色共享。
 
 ---
 
-> 本系统为「**完整可运行骨架 + 核心模块真实实现**」，可直接二次开发接入具体模型与数据库。
+> 本系统为「**完整可运行的多用户智能体平台**」：RBAC 多租户、模块共享、运行时 Provider 管理、安全防护均已实现闭环，可直接二次开发接入具体模型与数据库。

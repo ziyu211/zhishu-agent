@@ -11,6 +11,8 @@ import KnowledgeGraph from '@/components/knowledge/KnowledgeGraph.vue'
 const message = useMessage()
 const appStore = useAppStore()
 const isAdmin = computed(() => appStore.isAdmin)
+/** 只读访客（仅 knowledge:read）隐藏写操作，避免点击后 403 */
+const canWrite = computed(() => appStore.can('knowledge:write'))
 const tab = ref<'kb' | 'graph'>('kb')
 
 const stats = ref<any>({ documents: 0, vectors: 0, backend: '—', embedding_dim: 0 })
@@ -167,6 +169,7 @@ onMounted(() => { loadStats(); loadDocs() })
       <div>
         <div class="header-title">知识库</div>
         <div class="header-sub">本地向量检索 · 对话时自动增强（RAG）</div>
+        <NTag v-if="!canWrite" size="small" type="default" :bordered="false" style="margin-top:6px">只读模式</NTag>
       </div>
       <div class="stat-pills">
         <span class="pill">{{ stats.documents }} 文档</span>
@@ -186,11 +189,11 @@ onMounted(() => { loadStats(); loadDocs() })
             <NInput v-model:value="ingestText" type="textarea" :autosize="{ minRows: 4, maxRows: 10 }" placeholder="粘贴要入库的文本…" />
             <div class="row-between">
               <NInput v-model:value="docTitle" placeholder="文档标题（可选）" size="small" style="width: 240px" />
-              <NButton type="primary" size="small" @click="ingest">入库</NButton>
+              <NButton v-if="canWrite" type="primary" size="small" @click="ingest">入库</NButton>
             </div>
           </section>
 
-          <section class="card-block">
+          <section class="card-block" v-if="canWrite">
             <h3 class="block-title">上传文件</h3>
             <div
               class="dropzone"
@@ -256,8 +259,8 @@ onMounted(() => { loadStats(); loadDocs() })
                 </span>
                 <span class="c-act">
                   <NButton size="tiny" tertiary @click="openPreview(d)">预览</NButton>
-                  <NButton v-if="d.raw_path" size="tiny" tertiary type="warning" :loading="reparseId === d.doc_id" @click="reparseDoc(d)">重解析</NButton>
-                  <NButton size="tiny" tertiary type="error" @click="delDoc(d)">删除</NButton>
+                  <NButton v-if="d.raw_path && canWrite" size="tiny" tertiary type="warning" :loading="reparseId === d.doc_id" @click="reparseDoc(d)">重解析</NButton>
+                  <NButton v-if="canWrite" size="tiny" tertiary type="error" @click="delDoc(d)">删除</NButton>
                 </span>
               </div>
             </div>

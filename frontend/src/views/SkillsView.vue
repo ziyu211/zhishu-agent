@@ -27,11 +27,12 @@ const form = reactive<{ name: string; description: string; version: string; cont
   share_with: [],
 })
 
-/** 本条目当前用户是否可编辑：admin 恒可；owner 为自己可；历史无主条目仅 admin 可 */
+/** 本条目当前用户是否可编辑：需 modules:write；admin 恒可；owner 为自己可；历史无主条目仅 admin 可 */
 function markEditable(items: any[]) {
   const me = (app.user as any)?.username || ''
   const admin = app.isAdmin
-  for (const it of items) it._editable = admin || (!!it.owner && it.owner === me)
+  const canWrite = app.can('modules:write')
+  for (const it of items) it._editable = canWrite && (admin || (!!it.owner && it.owner === me))
   return items
 }
 
@@ -197,6 +198,7 @@ watch(actAs, () => load())
       <div>
         <div class="header-title">技能</div>
         <div class="header-sub">技能是一段注入 Agent 系统提示的指令（Markdown）。启用后，Agent 在每次对话都会参考这些指令。</div>
+        <NTag v-if="!app.can('modules:write')" size="small" type="default" :bordered="false" style="margin-top:6px">只读模式</NTag>
       </div>
       <div class="header-actions">
         <NButton size="small" @click="doExportAll">
@@ -207,7 +209,7 @@ watch(actAs, () => load())
           </template>
           导出全部
         </NButton>
-        <NButton size="small" @click="openImport">
+        <NButton v-if="app.can('modules:write')" size="small" @click="openImport">
           <template #icon>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
@@ -215,7 +217,7 @@ watch(actAs, () => load())
           </template>
           导入
         </NButton>
-        <NButton type="primary" size="small" @click="openCreate">
+        <NButton v-if="app.can('modules:write')" type="primary" size="small" @click="openCreate">
           <template #icon>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M12 5v14M5 12h14" />

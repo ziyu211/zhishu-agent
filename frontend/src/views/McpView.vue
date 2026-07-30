@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
-import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NSelect } from 'naive-ui'
+import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NSelect, NTag } from 'naive-ui'
 import { api } from '@/api/client'
 import { actAs } from '@/api/actas'
 import { useAppStore } from '@/stores/app'
@@ -41,7 +41,8 @@ const form = reactive<{
 function markEditable(items: any[]) {
   const me = (app.user as any)?.username || ''
   const admin = app.isAdmin
-  for (const it of items) it._editable = admin || (!!it.owner && it.owner === me)
+  const canWrite = app.can('modules:write')
+  for (const it of items) it._editable = canWrite && (admin || (!!it.owner && it.owner === me))
   return items
 }
 
@@ -217,7 +218,7 @@ watch(actAs, () => load())
         <div class="header-title">MCP 服务器</div>
         <div class="header-sub">MCP（Model Context Protocol）服务器可对外提供工具。配置并连接后，其工具会注册为 mcp__&lt;server&gt;__&lt;tool&gt;，供 Agent 在对话中调用。</div>
       </div>
-      <NButton type="primary" size="small" @click="openCreate">
+      <NButton v-if="app.can('modules:write')" type="primary" size="small" @click="openCreate">
         <template #icon>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 5v14M5 12h14" />
@@ -225,6 +226,7 @@ watch(actAs, () => load())
         </template>
         新建服务器
       </NButton>
+      <NTag v-else size="small" :bordered="false" type="warning">只读</NTag>
     </header>
 
     <div class="module-content">

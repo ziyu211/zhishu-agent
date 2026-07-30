@@ -135,9 +135,16 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
                 if not token:
                     raw_cookie = request.cookies.get("zs_media_token")
                     token = unquote(raw_cookie) if raw_cookie else None
-                if not token or not ctx.auth.verify(token):
+                user = ctx.auth.verify(token) if token else None
+                if not user:
                     return JSONResponse({"detail": "未登录或登录已过期，无法访问受保护资源"},
                                         status_code=401)
+                # 越权防护：生成类媒体按 /media/<owner>/... 隔离，非本人/非管理员拒绝；
+                # 历史平铺路径（/media/<file>）与附件目录维持仅鉴权（文件名不可猜测）。
+                parts = [s for s in p.split("/") if s]
+                if len(parts) >= 3 and parts[0] == "media" and parts[1] != "attachments":
+                    if parts[1] != (user.get("u") or "") and (user.get("r") or "") != "admin":
+                        return JSONResponse({"detail": "无权访问该资源"}, status_code=403)
         return await call_next(request)
 
     media_dir = os.path.join(cfg.server.data_dir, cfg.media.store_dir)

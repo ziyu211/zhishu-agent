@@ -5,6 +5,7 @@ import { NButton, NTag, NSwitch, useMessage } from 'naive-ui'
 const props = defineProps<{
   provider: any
   isDefault: boolean
+  canEdit?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'toggle', enabled: boolean): void
@@ -14,6 +15,7 @@ const emit = defineEmits<{
 }>()
 const message = useMessage()
 
+const editable = computed(() => props.canEdit !== false)
 const enabled = computed(() => props.provider.enabled !== false)
 const masked = computed(() => props.provider.api_key_masked || (props.provider.has_key ? '••••' : '未配置'))
 </script>
@@ -25,7 +27,7 @@ const masked = computed(() => props.provider.api_key_masked || (props.provider.h
         <span class="pc-name">{{ provider.label || provider.provider }}</span>
         <span v-if="isDefault" class="pc-default">默认</span>
       </div>
-      <NSwitch :value="enabled" size="small" @update:value="(v: boolean) => emit('toggle', v)" />
+      <NSwitch :value="enabled" size="small" :disabled="!editable" @update:value="(v: boolean) => emit('toggle', v)" />
     </div>
 
     <div class="pc-type">
@@ -49,7 +51,7 @@ const masked = computed(() => props.provider.api_key_masked || (props.provider.h
       <span v-if="!provider.models || !provider.models.length" class="model-chip empty">无模型</span>
     </div>
 
-    <div class="pc-actions">
+    <div class="pc-actions" v-if="editable">
       <NButton v-if="!isDefault" size="tiny" quaternary @click="emit('set-default')">设为默认</NButton>
       <NButton size="tiny" quaternary @click="emit('edit')">编辑</NButton>
       <NButton size="tiny" quaternary type="error" @click="emit('delete')">删除</NButton>

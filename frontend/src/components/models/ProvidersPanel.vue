@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
-import { NButton, useMessage, useDialog } from 'naive-ui'
+import { NButton, NTag, useMessage, useDialog } from 'naive-ui'
 import { api } from '@/api/client'
 import { actAs } from '@/api/actas'
+import { useAppStore } from '@/stores/app'
 import ProviderCard from './ProviderCard.vue'
 import ProviderFormModal from './ProviderFormModal.vue'
 
 const message = useMessage()
 const dialog = useDialog()
+const app = useAppStore()
+const canWrite = computed(() => app.can('models:write'))
 
 const providers = ref<any[]>([])
 const presets = ref<any[]>([])
@@ -68,6 +71,7 @@ async function handleSave(payload: any) {
 }
 
 async function toggleEnabled(p: any, enabled: boolean) {
+  if (!canWrite.value) { message.warning('当前角色为只读，无权修改'); return }
   try {
     await api.updateProvider(p.provider, { enabled })
     p.enabled = enabled
@@ -78,6 +82,7 @@ async function toggleEnabled(p: any, enabled: boolean) {
 }
 
 function setDefault(p: any) {
+  if (!canWrite.value) { message.warning('当前角色为只读，无权修改'); return }
   if (!p.models || !p.models.length) {
     message.warning('该 Provider 暂无模型')
     return
@@ -89,6 +94,7 @@ function setDefault(p: any) {
 }
 
 function removeProvider(p: any) {
+  if (!canWrite.value) { message.warning('当前角色为只读，无权修改'); return }
   dialog.warning({
     title: '删除 Provider',
     content: `确认删除「${p.label || p.provider}」？`,
@@ -117,10 +123,11 @@ watch(actAs, () => load())
         <div class="panel-count">{{ providers.length }} 个 Provider</div>
         <div class="panel-sub">已启用按优先级回退：{{ providers.filter((p) => p.enabled !== false).length }} 个</div>
       </div>
-      <NButton type="primary" size="small" :loading="loading" @click="openAdd">
+      <NButton v-if="canWrite" type="primary" size="small" :loading="loading" @click="openAdd">
         <template #icon><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></template>
         添加 Provider
       </NButton>
+      <NTag v-else size="small" :bordered="false" type="warning">只读</NTag>
     </div>
 
     <div v-if="defaultModel" class="default-line">
@@ -133,12 +140,13 @@ watch(actAs, () => load())
         :key="p.provider"
         :provider="p"
         :is-default="isDefault(p)"
+        :can-edit="canWrite"
         @toggle="(v: boolean) => toggleEnabled(p, v)"
         @edit="openEdit(p)"
         @delete="removeProvider(p)"
         @set-default="setDefault(p)"
       />
-      <button class="add-card" @click="openAdd">
+      <button v-if="canWrite" class="add-card" @click="openAdd">
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         <span>添加 Provider</span>
       </button>

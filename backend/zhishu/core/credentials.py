@@ -140,8 +140,8 @@ class ProviderStore:
         if not pc:
             raise ValueError("Provider 不存在")
         # 多用户隔离：仅 owner 本人（或 admin）可改；共享/角色共享项非 owner 不可改
-        if not is_admin and pc.owner and pc.owner != (username or ""):
-            raise PermissionError("无权修改该 Provider（他人私有项）")
+        if not is_admin and (pc.owner or "") != (username or ""):
+            raise PermissionError("无权修改该 Provider（仅本人或管理员可管理；公共 Provider 仅管理员可改）")
         if api_key is not None and api_key != "":
             pc.api_key = api_key.strip()
         if enabled is not None:
@@ -164,8 +164,8 @@ class ProviderStore:
         pc = self.cfg.providers.get(name)
         if not pc:
             raise ValueError("Provider 不存在")
-        if not is_admin and pc.owner and pc.owner != (username or ""):
-            raise PermissionError("无权删除该 Provider（他人私有项）")
+        if not is_admin and (pc.owner or "") != (username or ""):
+            raise PermissionError("无权删除该 Provider（仅本人或管理员可管理；公共 Provider 仅管理员可删）")
         del self.cfg.providers[name]
         self._save()
         return {"ok": True}

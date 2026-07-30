@@ -240,6 +240,7 @@ class SecurityConfig:
     enable_audit: bool = True
     enable_redact: bool = True             # 数据脱敏（PII 正则遮蔽，落库/输出前生效）
     outbound_allow: bool = False           # 工具是否允许出网（默认否）
+    allow_private_fetch: bool = False      # /models/fetch 是否允许拉取内网/私有地址的模型列表（默认否，防 SSRF）
     # 自扩展代码执行（对标 Hermes 自创工具能力）：在内网可信部署下允许智能体
     # 生成 Python 并（一次性或注册为可复用工具）执行，以处理标准工具不支持的文件/任务。
     # 护栏：子进程沙箱 cwd、超时、内存上限、禁网络、输出截断。生产可按需关闭。

@@ -24,9 +24,19 @@ class MediaStore:
         ext = ext.lstrip(".") or "bin"
         return f"{kind}_{ts}_{rand}.{ext}"
 
-    def save_bytes(self, data: bytes, kind: str = "img", ext: str = "png") -> str:
-        """保存字节，返回可同源访问的 URL（/media/<name>）。"""
+    def save_bytes(self, data: bytes, kind: str = "img", ext: str = "png",
+                   owner: Optional[str] = None) -> str:
+        """保存字节，返回可同源访问的 URL。
+
+        owner 非空时按 /media/<owner>/<name> 隔离存储，配合 /media 鉴权网关实现
+        多租户生成产物越权防护；owner 为空则维持历史平铺路径（兼容旧数据）。
+        """
         name = self._new_name(kind, ext)
+        if owner:
+            owner_dir = os.path.join(self.root, owner)
+            os.makedirs(owner_dir, exist_ok=True)
+            path = os.path.join(owner_dir, name)
+            return f"{self.url_prefix}/{owner}/{name}"
         path = os.path.join(self.root, name)
         with open(path, "wb") as f:
             f.write(data)
