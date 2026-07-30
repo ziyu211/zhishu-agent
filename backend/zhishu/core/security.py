@@ -81,7 +81,10 @@ class Crypto:
 # 权限命名规则：<模块>:<read|write>，写权限隐含读权限（见 AuthService.can）。
 #   admin    系统管理员：全部权限（含用户/系统管理）
 #   operator 运维/配置：可管理模型/知识库/技能插件MCP记忆/智能体/定时任务、查看审计，但不可管理用户与系统
-#   user     普通用户：对话 + 知识库读写 + 查看模型/技能插件MCP记忆/智能体 + 定时任务（仅本人任务，owner 隔离）
+#   user     普通用户：对话 + 知识库读写 + 管理自有（owner 隔离）的技能/插件/MCP/记忆/智能体
+#                       + 查看模型与全部可读模块 + 定时任务（仅本人任务，owner 隔离）。
+#                       注意：普通用户对自己创建的模块拥有写权限（与前端 markEditable/canEditItem 的
+#                       owner 判定一致），但不可管理他人模块，也不可管理用户/系统/Provider。
 #   viewer   只读访客：仅对话与模型查看
 ROLES: dict[str, list[str]] = {
     "admin": [
@@ -103,8 +106,9 @@ ROLES: dict[str, list[str]] = {
         "chat",
         "knowledge:read", "knowledge:write",
         "models:read",
-        "modules:read",
-        "agents:read",
+        # 普通用户管理自有模块（owner 隔离，后端 can_edit_meta/can_view_meta 强制校验）
+        "modules:read", "modules:write",
+        "agents:read", "agents:write",
         "cron:read", "cron:write",
     ],
     "viewer": [
