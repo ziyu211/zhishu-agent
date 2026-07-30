@@ -65,6 +65,8 @@ async function loadModels() {
     const r = await api.listModels()
     const groups: Record<string, any[]> = { text: [], image: [], video: [] }
     for (const p of r.providers || []) {
+      // 过滤无 API Key 且非本地的云端 Provider，避免普通用户选到后无响应
+      if (!p.local && !p.has_key) continue
       for (const m of p.models || []) {
         const kind = classifyModel(m)
         groups[kind].push({

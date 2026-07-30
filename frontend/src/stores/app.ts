@@ -7,7 +7,7 @@ const MODEL_KEY = 'zhishu.selectedModel'
 export const useAppStore = defineStore('app', {
   state: () => ({
     user: getUser(),
-    models: [] as { provider: string; label: string; models: string[]; local: boolean; base_url: string }[],
+    models: [] as { provider: string; label: string; models: string[]; local: boolean; base_url: string; has_key?: boolean }[],
     defaultModel: '' as string,
     selectedModel: (typeof localStorage !== 'undefined' ? localStorage.getItem(MODEL_KEY) : '') || '',
     connected: false,
@@ -24,6 +24,9 @@ export const useAppStore = defineStore('app', {
     modelOptions: (s) => {
       const opt: { value: string; label: string; provider: string }[] = []
       for (const p of s.models) {
+        // 隐藏无 API Key 且非本地的云端 Provider：这类 Provider 在 LLM 调用链里会被跳过，
+        // 列出来只会让用户选到后「无响应」或报错。
+        if (!p.local && !p.has_key) continue
         for (const m of p.models) {
           opt.push({ value: `${p.provider}/${m}`, label: `${m}`, provider: p.provider })
         }

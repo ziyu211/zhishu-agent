@@ -33,6 +33,7 @@ export interface ModelGroup {
   models: string[]
   local?: boolean
   base_url?: string
+  has_key?: boolean
 }
 export interface ModelsResp {
   providers: ModelGroup[]

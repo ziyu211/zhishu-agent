@@ -76,6 +76,7 @@ async def list_models(user=require_auth("models:read")):
             "models": pc.models,
             "local": pc.local,
             "base_url": pc.base_url,
+            "has_key": bool(pc.api_key),
         })
     return {"default_model": cfg.default_model, "providers": providers}
 
