@@ -60,13 +60,17 @@ export async function request<T = any>(
     headers?: Record<string, string>
     formData?: FormData
     signal?: AbortSignal
+    /** 为 true 时不自动附加 X-Act-As 头。用于「当前登录用户自身」的接口，
+     *  如 /auth/me、用户管理 /users，避免 admin 代管普通用户时这些接口也被
+     *  当成目标用户调用（普通用户无 users:read 权限会导致切换用户下拉清空）。 */
+    skipActAs?: boolean
   } = {},
 ): Promise<T> {
   const headers: Record<string, string> = { ...(opts.headers || {}) }
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
   // 管理员代管：携带 X-Act-As，使后端以目标用户身份执行（查看/配置其私有模块）
-  const actAsUser = getActAs()
+  const actAsUser = opts.skipActAs ? '' : getActAs()
   if (actAsUser) headers['X-Act-As'] = actAsUser
   let body: any = undefined
   if (opts.formData) {
