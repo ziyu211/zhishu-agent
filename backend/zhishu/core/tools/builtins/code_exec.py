@@ -62,6 +62,18 @@ def _code_exec_allowed(ctx: Optional[ToolContext]) -> bool:
     return bool(getattr(sec, "allow_code_exec", True))
 
 
+def _block_network(ctx: Optional[ToolContext]) -> bool:
+    """网络封锁与出网闸门联动：security.outbound_allow=true 时放行代码执行出网。
+
+    此前 block_network 被硬编码为 True，导致即便管理员放开了 outbound_allow，
+    code_exec 内跑 akshare/requests 等仍报「已禁用网络访问（内网隔离）」。
+    """
+    sec = getattr(ctx, "security", None)
+    if sec is None:
+        return True
+    return not bool(getattr(sec, "outbound_allow", False))
+
+
 def _resolve_path(path: str) -> Optional[str]:
     """复用 file 工具的路径解析（越权校验 + 绝对化）。"""
     from .file import _resolve_read_path
@@ -200,7 +212,7 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
     cwd = os.path.abspath(os.environ.get("ZHISHU_SANDBOX", "data/sandbox"))
     return await _run_python(
         code, args.get("timeout", default_to), extra_env, cwd,
-        mem_limit_mb=mem, block_network=True,
+        mem_limit_mb=mem, block_network=_block_network(ctx),
     )
 
 
@@ -238,5 +250,5 @@ async def create_tool(args: dict, ctx: ToolContext) -> str:
     sec = getattr(ctx, "security", None)
     mem = getattr(sec, "code_exec_mem_limit_mb", 0) or 0
     to = getattr(sec, "code_exec_timeout", 30) or 30
-    _register_dynamic(tname, desc, code, params, getattr(ctx, "session", "default"), mem, to, True)
+    _register_dynamic(tname, desc, code, params, getattr(ctx, "session", "default"), mem, to, _block_network(ctx))
     return f"[create_tool] 已注册工具 '{tname}'，后续步骤可直接调用；参数将通过 TOOL_ARGS_JSON 传入。"
