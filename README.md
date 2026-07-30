@@ -297,12 +297,61 @@ docker compose -f deploy/docker-compose.yml up -d
 ```bash
 curl http://localhost:8080/health        # 期望 {"status":"ok",...}
 docker logs -f zsagent                    # 启动 / 对话日志
-python backend/tests/e2e_roles_check.py   # 四角色 RBAC / 安全闭环端到端验证（自包含：缺失测试账号由 admin 自动创建并在结束后清理，18/18 PASS）
+python backend/tests/e2e_roles_check.py   # 四角色 RBAC / 安全闭环端到端验证
+
+# 同一套脚本可直接验证任意远程实例（BASE 与 admin 口令用环境变量覆盖）
+ZHISHU_BASE=http://127.0.0.1:8090 ZHISHU_ADMIN_P='<远程admin密码>' python3 backend/tests/e2e_roles_check.py
 ```
+
+脚本是**自包含**的：缺失的 `rs_op / rs_user / rs_viewer` 测试账号由 admin 自动创建，跑完按用户 **ID** 删除并以 `cleanup:created-users` 断言校验，不会在生产实例上留下测试账号。
+断言条数随环境浮动（公共 Provider 为 0 时会跳过 4 条公共 Provider 保护断言），以 `0 FAIL` 为通过标准。
 
 - 对话报「所有 LLM Provider 均不可用 / 401 / 429」：Key 失效、配额耗尽或 secret 轮换导致解密失败——在前端「模型」页重填 Key。
 - 进程启动即退出（exit 2）：`security.secret` 仍为默认值，改为强随机值后重启。
 - 普通用户报「Provider 未配置或未启用」：将 Provider 设为公共（owner 置空）或按角色共享。
+
+### 9.7 远程服务器部署（实录流程）
+
+将整套代码部署到一台远程 Docker 主机，全流程如下（宿主机侧执行）：
+
+```bash
+# 1. 打包干净源码（含预构建的 backend/zhishu/static，远程无需 Node 环境）
+git archive --format=tar.gz -o zhishu-src.tar.gz HEAD
+
+# 2. 上传并解压
+ssh -p <port> root@<host> "mkdir -p /opt/zhishu-agent"
+scp -P <port> zhishu-src.tar.gz root@<host>:/opt/zhishu-agent/
+ssh -p <port> root@<host> "cd /opt/zhishu-agent && tar xzf zhishu-src.tar.gz && rm -f zhishu-src.tar.gz"
+
+# 3. 远程构建镜像（耗时较长，建议 nohup 后台跑并 tail 日志）
+ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.0 -f deploy/Dockerfile.local . > build.log 2>&1 &"
+
+# 4. 生成生产配置：必须替换默认 secret 与 admin 口令，否则进程启动即 exit 2
+#    secret 用 64 位强随机；配置以只读挂载进容器，不烧进镜像
+cp deploy/zhishu.yaml.example deploy/zhishu.yaml && chmod 600 deploy/zhishu.yaml
+#    编辑 security.secret 与 auth.admin_password
+
+# 5. 启动（数据落 named volume，随宿主重启自恢复）
+docker volume create zsagent_data
+docker run -d --name zsagent --restart always \
+  -p 8090:8080 \
+  -v zsagent_data:/app/backend/data \
+  -v /opt/zhishu-agent/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro \
+  zsagent:1.0.0
+
+# 6. 回填 Provider Key（Key 与 secret 强耦合，不能直接拷贝旧密文，必须走 API 明文回填）
+curl -X POST http://127.0.0.1:8090/api/v1/providers -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"<provider>","base_url":"...","api_key":"...","models":["..."],"shared":true}'
+curl -X POST http://127.0.0.1:8090/api/v1/models/default -H "Authorization: Bearer $TOK" \
+  -H 'Content-Type: application/json' -d '{"model":"<provider>/<model>"}'
+```
+
+**部署踩坑提示**
+
+- **Provider Key 不可随卷迁移**：`data/providers.json` 中的 Key 以 `security.secret` 派生密钥混淆落盘。新实例 secret 不同，直接搬运密文会解密失败。正确做法是用明文经 `POST/PUT /api/v1/providers` 回填，由目标实例用自己的 secret 重新加密。
+- **端口不通先分清是谁在拦**：宿主 `firewall-cmd --list-ports` 已放行、`ss -lntp` 也在监听，但公网仍超时，基本可判定是**云厂商安全组**未放行，需到云控制台开端口。
+- **未知 `/api/v1/*` 路径会被 SPA 兜底返回 200 + `index.html`**，排障时别把 HTML 响应误判成接口连通。
 
 ---
 

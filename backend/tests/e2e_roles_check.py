@@ -3,13 +3,18 @@
 运行：python e2e_roles_check.py  （需容器 zsagent 运行于 localhost:8080）
 """
 import json
+import os
+import urllib.error
 import urllib.request
 
-BASE = "http://localhost:8080/api/v1"
-ADMIN_U, ADMIN_P = "admin", "zhishu@2026"
+# 目标环境可用环境变量覆盖，便于对远程部署实例做同一套验证：
+#   ZHISHU_BASE=http://1.2.3.4:8090 ZHISHU_ADMIN_P='xxx' python e2e_roles_check.py
+BASE = os.getenv("ZHISHU_BASE", "http://localhost:8080").rstrip("/") + "/api/v1"
+ADMIN_U = os.getenv("ZHISHU_ADMIN_U", "admin")
+ADMIN_P = os.getenv("ZHISHU_ADMIN_P", "zhishu@2026")
 # 四角色测试账号：若容器中不存在则由 admin 自动创建（密码固定），保证本脚本可重复运行。
 FIXTURES = {
-    "admin": ("admin", "zhishu@2026"),
+    "admin": (ADMIN_U, ADMIN_P),
     "operator": ("rs_op", "Operator@2026"),
     "user": ("rs_user", "User@2026"),
     "viewer": ("rs_viewer", "Viewer@2026"),
@@ -120,8 +125,21 @@ for path in ("/providers", "/cron", "/mcp", "/agents"):
     check(f"viewer-read:{path}=200", st == 200, st)
 
 # 清理本次脚本创建的测试账号（预置账号不删除）
-for uname in _created_users:
-    req("DELETE", f"/users/{uname}", admin_token)
+# 注意：后端删除端点为 DELETE /users/{uid}，路径参数是数字 ID 而非用户名，
+# 必须先查 username -> id 映射，否则删除会静默失败、测试账号残留在生产实例上。
+if _created_users:
+    _st, _ul = req("GET", "/users", admin_token)
+    _id_of = {u.get("username"): u.get("id") for u in (_ul.get("users") or [])}
+    _left = []
+    for uname in _created_users:
+        uid = _id_of.get(uname)
+        if uid is None:
+            continue
+        _dst, _ = req("DELETE", f"/users/{uid}", admin_token)
+        if _dst != 200:
+            _left.append(f"{uname}(id={uid},http={_dst})")
+    check("cleanup:created-users", not _left, "removed=%d %s" % (
+        len(_created_users) - len(_left), ("left=" + ",".join(_left)) if _left else ""))
 
 print("\n==== RESULT: %d PASS / %d FAIL ====" % (len(PASS), len(FAIL)))
 if FAIL:
