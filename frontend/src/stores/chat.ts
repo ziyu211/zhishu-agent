@@ -87,6 +87,8 @@ export const useChatStore = defineStore('chat', {
     loading: false,
     // 当前对话指定的子智能体（多 Agent 协作）：'' = 主管自动编排
     selectedAgent: '' as string,
+    // 管理员在对话页是否查看全部用户会话（默认只看自己的）
+    showAllSessions: false,
   }),
   getters: {
     active: (s) => s.sessions.find((x) => x.id === s.activeId) || null,
@@ -97,12 +99,12 @@ export const useChatStore = defineStore('chat', {
       }),
   },
   actions: {
-    /** 从后端加载当前用户的对话（管理员加载全部）。 */
+    /** 从后端加载当前用户的对话（管理员可通过 showAllSessions 看全部）。 */
     async loadSessions() {
       this.loading = true
       try {
         const app = useAppStore()
-        const scope = app.isAdmin ? 'all' : 'mine'
+        const scope = app.isAdmin && this.showAllSessions ? 'all' : 'mine'
         const r = await api.listConversations(scope)
         this.sessions = (r.conversations || []).map((c: any) => ({
           id: c.id,

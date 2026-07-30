@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import { NButton, NInput, NModal, NSelect, useMessage } from 'naive-ui'
+import { NButton, NInput, NModal, NSelect, NSwitch, useMessage } from 'naive-ui'
 import { useChatStore } from '@/stores/chat'
 import { useAppStore } from '@/stores/app'
 import { api } from '@/api/client'
@@ -133,6 +133,15 @@ onMounted(() => {
       <div class="session-list-header">
         <span class="session-list-title">对话</span>
         <div class="session-list-actions">
+          <NSwitch
+            v-if="app.isAdmin"
+            :value="chat.showAllSessions"
+            size="small"
+            @update:value="(v: boolean) => { chat.showAllSessions = v; chat.loadSessions() }"
+          >
+            <template #checked>全部</template>
+            <template #unchecked>我的</template>
+          </NSwitch>
           <NButton quaternary size="tiny" @click="showSessions = false" circle>
             <template #icon><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></template>
           </NButton>
