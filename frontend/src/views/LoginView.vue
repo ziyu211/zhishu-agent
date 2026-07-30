@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { api, setToken } from '@/api/client'
 import { useAppStore } from '@/stores/app'
+import { clearActAs } from '@/api/actas'
 
 const router = useRouter()
 const route = useRoute()
@@ -27,6 +28,7 @@ async function handleLogin() {
   errorMsg.value = ''
   try {
     const res = await api.login(username.value.trim(), password.value)
+    clearActAs() // 防止旧会话的代管状态带到新账号
     setToken(res.token)
     app.setUser({
       user: res.user,

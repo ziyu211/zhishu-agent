@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { api, getUser, saveUser, clearToken, getToken } from '@/api/client'
+import { clearActAs } from '@/api/actas'
 
 const MODEL_KEY = 'zhishu.selectedModel'
 
@@ -55,6 +56,7 @@ export const useAppStore = defineStore('app', {
     },
     logout() {
       clearToken()
+      clearActAs()
       this.user = null
       this.models = []
     },
