@@ -107,17 +107,42 @@ if pubs:
     st, _ = req("PUT", f"/providers/{pubs[0]['provider']}", V, {"priority": 50})
     check("provider:viewer-put=403", st == 403, st)
 
+# ── 2b. 普通用户（user）有 models:write：可配置自己的专属 Provider ──
+st, d = req("POST", "/providers", U, {
+    "name": "e2e_u_prov", "base_url": "https://api.example.com/v1",
+    "api_key": "sk-e2e-user", "models": ["my-model-a"]})
+check("provider:user-post=200", st == 200, (st, d.get("detail", "")))
+st, _ = req("PUT", "/providers/e2e_u_prov", U, {"priority": 99})
+check("provider:user-put-own=200", st == 200, st)
+st, d = req("POST", "/models/default", U, {"model": "e2e_u_prov/my-model-a"})
+check("provider:user-set-default=200", st == 200, st)
+# 但不能改/删公共 Provider（owner 隔离）
+if pubs:
+    st, _ = req("PUT", f"/providers/{pubs[0]['provider']}", U, {"priority": 50})
+    check("provider:user-put-public=403", st == 403, st)
+    st, _ = req("DELETE", f"/providers/{pubs[0]['provider']}", U)
+    check("provider:user-del-public=403", st == 403, st)
+# 不能通过同名 add 覆盖他人/公共 Provider（防越权覆盖）
+if pubs:
+    st, d = req("POST", "/providers", U, {
+        "name": pubs[0]["provider"], "base_url": "https://evil.example.com/v1",
+        "api_key": "x", "models": ["z"]})
+    check("provider:user-takeover-blocked=400", st == 400, (st, d.get("detail", "")))
+# 清理本人 Provider
+req("DELETE", "/providers/e2e_u_prov", U)
+
 # ── 3. /models/fetch SSRF 防护（私网地址默认拒绝） ──
 st, d = req("POST", "/models/fetch", A, {"base_url": "http://127.0.0.1:8080/v1", "api_key": ""})
 check("models-fetch:private=403", st == 403, (st, d.get("detail", "")))
 st, d = req("POST", "/models/fetch", A, {"base_url": "http://169.254.169.254/v1", "api_key": ""})
 check("models-fetch:metadata=403", st == 403, st)
 
-# ── 4. MCP / 模块写门控 ──
+# ── 4. 模块写门控（普通用户已有 modules:write，可建自己的模块） ──
 st, _ = req("POST", "/mcp", V, {"name": "e2e_v_mcp", "command": "echo"})
 check("mcp:viewer-post=403", st == 403, st)
 st, _ = req("POST", "/mcp", U, {"name": "e2e_u_mcp", "command": "echo"})
-check("mcp:user-post=403", st == 403, st)
+check("mcp:user-post=200", st == 200, st)
+req("DELETE", "/mcp/e2e_u_mcp", U)  # 清理本人创建的模块
 
 # ── 5. 只读角色读取正常 ──
 for path in ("/providers", "/cron", "/mcp", "/agents"):

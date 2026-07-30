@@ -122,6 +122,11 @@ class ProviderStore:
         name = (name or "").strip()
         if not name:
             raise ValueError("Provider 名称不能为空")
+        # 防越权覆盖：名称已存在且不属于当前创建者（他人或公共 Provider）时拒绝，
+        # 避免普通用户拿到 models:write 后通过同名 add 覆盖管理员/他人的 Provider。
+        existing = self.cfg.providers.get(name)
+        if existing is not None and (existing.owner or "") != (owner or ""):
+            raise ValueError("Provider 名称已存在，且属于其他用户或公共配置，无法覆盖（请使用其他名称）")
         pc = ProviderConfig(
             name=name, label=label or name, base_url=base_url.strip(),
             api_key=api_key.strip(), models=models or [], local=local,
