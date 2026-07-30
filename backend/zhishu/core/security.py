@@ -81,7 +81,7 @@ class Crypto:
 # 权限命名规则：<模块>:<read|write>，写权限隐含读权限（见 AuthService.can）。
 #   admin    系统管理员：全部权限（含用户/系统管理）
 #   operator 运维/配置：可管理模型/知识库/技能插件MCP记忆/智能体/定时任务、查看审计，但不可管理用户与系统
-#   user     普通用户：对话 + 知识库读写 + 查看模型/技能插件MCP记忆/智能体
+#   user     普通用户：对话 + 知识库读写 + 查看模型/技能插件MCP记忆/智能体 + 定时任务（仅本人任务，owner 隔离）
 #   viewer   只读访客：仅对话与模型查看
 ROLES: dict[str, list[str]] = {
     "admin": ["*"],
@@ -100,6 +100,7 @@ ROLES: dict[str, list[str]] = {
         "models:read",
         "modules:read",
         "agents:read",
+        "cron:read", "cron:write",
     ],
     "viewer": [
         "chat",

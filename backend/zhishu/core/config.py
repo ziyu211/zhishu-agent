@@ -400,9 +400,9 @@ class ZhishuConfig:
 
     def for_user(self, username: Optional[str], is_admin: bool = False,
                   user_role: Optional[str] = None) -> "ZhishuConfig":
-        """返回仅含该用户可见 Provider（owner==username 或 shared 或 角色命中）及该用户默认模型的配置副本。
+        """返回仅含该用户可见 Provider（owner 为空=公共、owner==username、shared、或 角色命中）及该用户默认模型的配置副本。
 
-        用于「按用户隔离模型」：每个用户只能用自己的/共享的/角色共享的 Provider 与默认模型。
+        用于「按用户隔离模型」：每个用户只能用自己的/共享的/角色共享的/公共 Provider 与默认模型。
         admin（is_admin=True）返回自身（可见全部 Provider）；匿名/未登录仅见共享项（无角色则无角色共享）。
         """
         if is_admin:
@@ -416,7 +416,8 @@ class ZhishuConfig:
             return new
         vis = {
             n: p for n, p in self.providers.items()
-            if p.owner == username or p.shared
+            if (not p.owner)                       # 历史系统级/公共 Provider（owner 为空）：全员可见，仅 admin 可改
+            or p.owner == username or p.shared
             or (p.share_with and user_role in p.share_with)
         }
         new = copy.copy(self)

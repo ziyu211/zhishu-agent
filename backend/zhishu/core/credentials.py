@@ -90,7 +90,8 @@ class ProviderStore:
         for p in sorted(self.cfg.providers.values(), key=lambda x: x.priority):
             # 多用户隔离：非 admin 仅见「本人 + 共享 + 角色命中」Provider
             if not is_admin and not (
-                p.owner == (username or "")
+                (not p.owner)                      # 公共 Provider（owner 为空）：全员可见
+                or p.owner == (username or "")
                 or p.shared
                 or (p.share_with and user_role in p.share_with)
             ):
