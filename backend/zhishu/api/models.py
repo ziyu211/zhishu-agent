@@ -50,7 +50,7 @@ class UpdateProviderReq(BaseModel):
     base_url: str | None = None
     models: list[str] | None = None
     shared: bool | None = None
-    share_with: Optional[list[str]] = None
+    share_with: list[str] | None = None
 
 
 class DefaultModelReq(BaseModel):

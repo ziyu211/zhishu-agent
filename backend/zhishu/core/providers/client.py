@@ -104,25 +104,41 @@ class LLMClient:
 
     def _build_chain(self, prefer: Optional[str]):
         ordered = self.cfg.ordered_providers()
-        chain = []
+        # 候选链：先放显式指定的 prefer / default_model，再放其余有序 Provider。
+        # 关键修复：prefer / default_model 也走与「有序列表」相同的「无 Key 且非本地则跳过」逻辑，
+        # 否则缺 Key 的默认模型会被强制注入链首，发出无 Authorization 头的请求，
+        # 被网关以 401 拒绝，从而把「缺 Key」这一根因掩盖成「所有 Provider 均不可用」。
+        candidates: list[tuple] = []
         if prefer:
             pc, mdl = self.cfg.resolve_model(prefer)
-            chain.append((pc, mdl))
+            candidates.append((pc, mdl))
             ordered = [p for p in ordered if p.name != pc.name]
         if model_override := (self.cfg.default_model if not prefer else None):
             pc, mdl = self.cfg.resolve_model(model_override)
-            if (pc, mdl) not in chain:
-                chain.append((pc, mdl))
+            if (pc, mdl) not in candidates:
+                candidates.append((pc, mdl))
         for pc in ordered:
+            candidates.append((pc, pc.models[0] if pc.models else "local-model"))
+
+        chain = []
+        missing_keys: list[tuple] = []  # (provider name, base_url) 缺 Key 的云端 Provider
+        for pc, mdl in candidates:
             # 跳过「无 API Key 且非本地」的 Provider：云端密钥缺失必败，
             # 逐个发起网络探测既无效又拖慢失败反馈（被代理拦截时尤为明显）。
             # 本地端点（Ollama / vLLM）即使无 Key 也应尝试（连不上会快速拒绝）。
-            # 注：显式指定的 prefer / default_model 不受此跳过影响，仍照样探测。
             if not pc.api_key and not self._is_local(pc.base_url):
+                if pc.name not in [n for n, _ in missing_keys]:
+                    missing_keys.append((pc.name, pc.base_url))
                 continue
-            mdl = pc.models[0] if pc.models else "local-model"
             chain.append((pc, mdl))
         if not chain:
+            if missing_keys:
+                names = "、".join(f"{n}（{u}）" for n, u in missing_keys)
+                raise RuntimeError(
+                    f"所有已配置的 LLM Provider 均缺少 API Key 或不可达：{names}。"
+                    "请在「模型管理」中为这些 Provider 填写有效的 API Key"
+                    "（本地推理端点 Ollama/vLLM 可留空 Key 但需开启并可达）。"
+                )
             # 完全跟随配置：没有任何已配置可用的模型时给出明确指引，而非静默尝试预设端点。
             raise RuntimeError(
                 "未配置任何可用的 LLM 模型。请在「模型管理」中添加 Provider"
