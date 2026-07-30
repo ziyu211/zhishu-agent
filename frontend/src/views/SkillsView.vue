@@ -29,7 +29,7 @@ const form = reactive<{ name: string; description: string; version: string; cont
 
 /** 本条目当前用户是否可编辑：需 modules:write；admin 恒可；owner 为自己可；历史无主条目仅 admin 可 */
 function markEditable(items: any[]) {
-  const me = (app.user as any)?.username || ''
+  const me = (app.user as any)?.user || ''
   const admin = app.isAdmin
   const canWrite = app.can('modules:write')
   for (const it of items) it._editable = canWrite && (admin || (!!it.owner && it.owner === me))

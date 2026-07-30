@@ -2,6 +2,8 @@
 
 > 一个面向**内网离线、安全合规、自主可控**场景的多用户本地智能体系统。
 > 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端；配置驱动多模型接入，内置 RBAC 多租户、知识库、记忆、工具、插件/技能/MCP、定时任务与技能自进化闭环。
+>
+> 最近更新：2026-07-30 — 全模块功能闭环复核与文档更新（详见第十节「模块功能闭环清单」）。
 
 ---
 
@@ -295,12 +297,42 @@ docker compose -f deploy/docker-compose.yml up -d
 ```bash
 curl http://localhost:8080/health        # 期望 {"status":"ok",...}
 docker logs -f zsagent                    # 启动 / 对话日志
-python backend/tests/e2e_roles_check.py   # 四角色 RBAC / 安全闭环端到端验证
+python backend/tests/e2e_roles_check.py   # 四角色 RBAC / 安全闭环端到端验证（自包含：缺失测试账号由 admin 自动创建并在结束后清理，18/18 PASS）
 ```
 
 - 对话报「所有 LLM Provider 均不可用 / 401 / 429」：Key 失效、配额耗尽或 secret 轮换导致解密失败——在前端「模型」页重填 Key。
 - 进程启动即退出（exit 2）：`security.secret` 仍为默认值，改为强随机值后重启。
 - 普通用户报「Provider 未配置或未启用」：将 Provider 设为公共（owner 置空）或按角色共享。
+
+---
+
+## 十、模块功能闭环清单（本次全量审计）
+
+下列每个模块均已完成「后端 CRUD + RBAC 鉴权 + owner 隔离 / 三态共享 + 前端视图与写门控 + 持久化」的完整闭环，并经 `backend/tests/e2e_roles_check.py` 四角色端到端验证（**18/18 PASS**）。
+
+| 模块 | 后端端点（`api/`） | 权限点 | 隔离 / 共享 | 前端视图 | 持久化 |
+|------|--------------------|--------|-------------|----------|--------|
+| 认证 / 用户 | `/auth/*`、`/users/*` | `users:read/write`（仅 admin） | 用户库按账户隔离 | LoginView / UsersView | `zhishu_users.db`（SQLite） |
+| 对话 / 会话 | `/chat`、`/conversations` | `chat` | 会话按 `owner`；admin 可切「全部 / 我的」 | ChatView + chat store | `zhishu_conversations.db` |
+| 知识库 / RAG | `/knowledge` | `knowledge:read/write` | 文档按 `owner`，`owner` 空=公共可见 | KnowledgeView | 向量库 SQLite |
+| 模型 / Provider | `/models`、`/providers` | `models:read/write` | `owner` 空=公共（仅 admin 改/删）；无 Key 云端 Provider 前端自动过滤 | ModelsView（ProvidersPanel / ProviderCard） | `data/providers.json`（Key SM4/XOR 混淆） |
+| 插件 | `/modules/plugins` | `modules:read/write` | 默认私有；私有 / 角色 / 公共三态；非 owner 且非 admin 只读 | PluginsView | `data/plugins/<name>` |
+| 技能 | `/modules/skills` | `modules:read/write` | 同上 | SkillsView | `data/skills/<name>` |
+| MCP | `/mcp` | `modules:read/write` | 同上（含连接测试 / 工具调用测试） | McpView | `data/mcp/<name>` |
+| 智能体 | `/agents` | `agents:read/write` | 同上；普通用户仅可编辑**本人所拥有**的智能体 | AgentsView | `data/agents` |
+| 定时任务 | `/cron` | `cron:read/write` | 任务按 `owner`；`shell` 动作仅 admin/operator | CronView + cron store | `data/cron` |
+| 设置 | `/settings` | `admin` | 长期记忆开关等运行时覆盖 | SettingsView | `data/config.override.json` |
+| 系统 / 审计 / 脱敏 | `/admin/*` | `system:read` / `audit:read` | 审计脱敏后落库 | SystemView | 审计库 |
+| 记忆 | `/modules/memory` | `modules:read/write` | 长期记忆按用户 | MemoryView | `MEMORY.md` / `USER.md` / `SOUL.md` |
+
+**本轮重点修复（2026-07-30）**：
+- 修正技能 / 插件 / MCP / 智能体视图按 `owner` 判定「可编辑」的字段取值（使用 `app.user.user` 而非未定义的 `app.user.username`），**普通用户现已能正常编辑 / 删除自己创建的模块**。
+- 管理员「切换用户」(X-Act-As) 后，侧边栏模型选择器随身份同步刷新，避免与普通用户视角下聊天页模型列表不一致。
+- 补齐 `Provider` 类型契约（`has_key` / `api_key_masked` / `priority` / `builtin`），移除与运行时契约冲突的过期 `CronJob` 重复类型。
+- 后端 RBAC 矩阵对 admin 专属端点（`users` / `system` / `admin` / `settings`）补充显式声明，提升权限可读性（`*` 仍兜底，功能不受影响）。
+- 端到端验证脚本改为**自包含**：缺失的四角色测试账号由 admin 自动创建并在结束后清理，可对任意新容器重复运行。
+
+**已知设计决策**：知识库文档共享目前采用「`owner` 空=公共」单一维度（与其他模块「公共」概念一致），未实现「按角色共享」三级粒度；如需可按 `share_with` 模式扩展 `vector_store` 文档表。
 
 ---
 

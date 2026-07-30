@@ -54,6 +54,13 @@ export const useAppStore = defineStore('app', {
   },
   actions: {
     setUser(u: any) {
+      // 归一化登录身份字段：后端 /auth/login、/auth/me 返回的用户名落在 `user`，
+      // 而用户列表接口返回 `username`。这里双向补齐，避免视图里取错字段导致
+      // 「按 owner 判定可编辑」失效（详见 Skills/Plugins/Mcp/Agents 视图的 markEditable）。
+      if (u) {
+        if (!u.username && u.user) u.username = u.user
+        if (!u.user && u.username) u.user = u.username
+      }
       this.user = u
       if (u) saveUser(u)
     },

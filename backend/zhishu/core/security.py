@@ -84,7 +84,12 @@ class Crypto:
 #   user     普通用户：对话 + 知识库读写 + 查看模型/技能插件MCP记忆/智能体 + 定时任务（仅本人任务，owner 隔离）
 #   viewer   只读访客：仅对话与模型查看
 ROLES: dict[str, list[str]] = {
-    "admin": ["*"],
+    "admin": [
+        "*",
+        # 以下为 admin 专属端点的显式声明（"*" 已隐含，列出仅为可读性）：
+        "users:read", "users:write",
+        "system:read", "admin", "settings:read", "settings:write",
+    ],
     "operator": [
         "chat",
         "knowledge:read", "knowledge:write",

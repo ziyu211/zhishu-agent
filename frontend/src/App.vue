@@ -16,7 +16,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { darkTheme, NConfigProvider, NMessageProvider, NDialogProvider, NNotificationProvider } from 'naive-ui'
 import { getThemeOverrides } from '@/styles/theme'
@@ -41,4 +41,13 @@ onMounted(async () => {
     await app.loadModels()
   }
 })
+
+// 管理员「切换用户」(X-Act-As) 后，侧边栏模型选择器需按被代管身份重新拉取可见 Provider，
+// 否则会与聊天页（onMounted 已重载）出现不一致的模型列表，可能选到被代管用户无权使用的模型。
+watch(
+  () => actAs.value,
+  () => {
+    if (hasToken()) app.loadModels()
+  },
+)
 </script>

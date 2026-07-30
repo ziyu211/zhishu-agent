@@ -39,7 +39,7 @@ const form = reactive<{
 })
 
 function markEditable(items: any[]) {
-  const me = (app.user as any)?.username || ''
+  const me = (app.user as any)?.user || ''
   const admin = app.isAdmin
   const canWrite = app.can('modules:write')
   for (const it of items) it._editable = canWrite && (admin || (!!it.owner && it.owner === me))

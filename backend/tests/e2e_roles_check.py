@@ -6,12 +6,16 @@ import json
 import urllib.request
 
 BASE = "http://localhost:8080/api/v1"
-ACCOUNTS = {
+ADMIN_U, ADMIN_P = "admin", "zhishu@2026"
+# 四角色测试账号：若容器中不存在则由 admin 自动创建（密码固定），保证本脚本可重复运行。
+FIXTURES = {
     "admin": ("admin", "zhishu@2026"),
     "operator": ("rs_op", "Operator@2026"),
     "user": ("rs_user", "User@2026"),
     "viewer": ("rs_viewer", "Viewer@2026"),
 }
+ROLE_OF = {"admin": "admin", "operator": "operator", "user": "user", "viewer": "viewer"}
+_created_users: set = set()
 
 PASS, FAIL = [], []
 
@@ -38,11 +42,28 @@ def check(name, cond, detail=""):
     print(("PASS " if cond else "FAIL ") + name + ("  | " + str(detail)[:120] if detail else ""))
 
 
+# admin 登录（用于按需创建缺失的测试账号）
+st, _ad = req("POST", "/auth/login", body={"username": ADMIN_U, "password": ADMIN_P})
+admin_token = _ad.get("token", "")
+check("login:admin", st == 200 and admin_token, f"perms={_ad.get('perms')}")
+
+
+def ensure_account(uname, role, pw):
+    st, d = req("POST", "/auth/login", body={"username": uname, "password": pw})
+    if st == 200:
+        return d.get("token", "")
+    # 账号不存在：admin 创建后再次登录
+    req("POST", "/users", admin_token,
+        {"username": uname, "password": pw, "role": role, "display_name": "e2e-" + role})
+    _created_users.add(uname)
+    st, d = req("POST", "/auth/login", body={"username": uname, "password": pw})
+    return d.get("token", "")
+
+
 tokens = {}
-for role, (u, p) in ACCOUNTS.items():
-    st, d = req("POST", "/auth/login", body={"username": u, "password": p})
-    tokens[role] = d.get("token", "")
-    check(f"login:{role}", st == 200 and tokens[role], f"perms={d.get('perms')}")
+for role, (u, p) in FIXTURES.items():
+    tokens[role] = ensure_account(u, ROLE_OF[role], p)
+    check(f"login:{role}", bool(tokens[role]), f"via={u}")
 
 A, O, U, V = tokens["admin"], tokens["operator"], tokens["user"], tokens["viewer"]
 
@@ -97,6 +118,10 @@ check("mcp:user-post=403", st == 403, st)
 for path in ("/providers", "/cron", "/mcp", "/agents"):
     st, _ = req("GET", path, V)
     check(f"viewer-read:{path}=200", st == 200, st)
+
+# 清理本次脚本创建的测试账号（预置账号不删除）
+for uname in _created_users:
+    req("DELETE", f"/users/{uname}", admin_token)
 
 print("\n==== RESULT: %d PASS / %d FAIL ====" % (len(PASS), len(FAIL)))
 if FAIL:

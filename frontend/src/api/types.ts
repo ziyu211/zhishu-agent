@@ -47,10 +47,14 @@ export interface Provider {
   name: string
   type: string
   api_key?: string
+  api_key_masked?: string
   base_url?: string
   models?: string[]
   enabled?: boolean
   local?: boolean
+  has_key?: boolean
+  priority?: number
+  builtin?: boolean
   owner?: string
   shared?: boolean
   share_with?: string[]
@@ -293,29 +297,8 @@ export interface MemoryExport extends MemoryData {
 }
 
 // ─── 定时任务 ───────────────────────────────────────────
-export interface CronJob {
-  id: number
-  name: string
-  schedule_type: 'interval' | 'daily' | 'cron'
-  cron?: string
-  interval_seconds?: number
-  daily_time?: string
-  action: 'chat' | 'shell'
-  prompt?: string
-  command?: string
-  enabled: boolean
-  last_run?: string
-  next_run?: string
-  last_status?: string
-}
-export interface CronHistoryItem {
-  id: number
-  job_id: number
-  started_at: string
-  finished_at?: string
-  status: string
-  output?: string
-}
+// 注：CronJob / CronRun 的权威类型定义见 @/api/cron.ts（与运行时后端载荷一致），
+// 此处不再重复声明，避免与后端契约出现不一致。
 
 // ─── 流式对话事件（SSE） ───────────────────────────────
 export interface ChatEvent {

@@ -18,7 +18,7 @@ const agents = ref<any[]>([])
 
 function canEditItem(it: any): boolean {
   if (!app.can('agents:write')) return false
-  const me = (app.user as any)?.username || ''
+  const me = (app.user as any)?.user || ''
   return app.isAdmin || (!!it.owner && it.owner === me)
 }
 
