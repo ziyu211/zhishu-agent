@@ -28,6 +28,7 @@ const modelsSel = ref<string[]>([]) // 模型列表（多选，可手输）
 const local = ref(false)
 const priority = ref(50)
 const enabled = ref(true)
+const shared = ref(false)
 
 // 探测模型得到的候选（与 hermes-web-ui 对齐：下拉可搜索、可手输）
 const modelOptions = computed(() => props.presets
@@ -102,6 +103,7 @@ watch(
       local.value = !!p.local
       priority.value = p.priority ?? 50
       enabled.value = p.enabled !== false
+      shared.value = !!p.shared
     } else {
       presetKey.value = props.presets[0]?.provider || '__custom__'
       name.value = ''
@@ -113,6 +115,7 @@ watch(
       local.value = false
       priority.value = 50
       enabled.value = true
+      shared.value = false
       applyPreset()
     }
   },
@@ -133,6 +136,7 @@ function handleSave() {
     models,
     local: local.value,
     priority: priority.value,
+    shared: shared.value,
   }
   if (props.mode === 'edit') {
     payload.enabled = enabled.value
@@ -213,6 +217,11 @@ function handleSave() {
           </div>
         </NFormItem>
       </div>
+      <NFormItem label="共享给所有用户">
+        <div class="switch-cell">
+          <NSwitch v-model:value="shared" /><span>其他用户可使用该 Provider（密钥对其脱敏，不可编辑）</span>
+        </div>
+      </NFormItem>
       <div class="form-foot" v-if="mode === 'edit'">
         <NSwitch v-model:value="enabled" /><span>启用</span>
       </div>

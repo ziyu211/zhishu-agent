@@ -5,6 +5,7 @@
  * 所有按域拆分的 api 模块都从这里导入 `request`。
  */
 import { createDiscreteApi } from 'naive-ui'
+import { getActAs } from './actas'
 
 // ─── 存储键 ───────────────────────────────────────────────
 export const TOKEN_KEY = 'zhishu_token'
@@ -64,6 +65,9 @@ export async function request<T = any>(
   const headers: Record<string, string> = { ...(opts.headers || {}) }
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
+  // 管理员代管：携带 X-Act-As，使后端以目标用户身份执行（查看/配置其私有模块）
+  const actAsUser = getActAs()
+  if (actAsUser) headers['X-Act-As'] = actAsUser
   let body: any = undefined
   if (opts.formData) {
     body = opts.formData
@@ -103,6 +107,8 @@ export async function downloadFile(path: string, filename: string): Promise<void
   const headers: Record<string, string> = {}
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
+  const actAsUser = getActAs()
+  if (actAsUser) headers['X-Act-As'] = actAsUser
   const resp = await fetch(resolveUrl(path), { method: 'GET', headers })
   if (!resp.ok) {
     let msg = `下载失败(${resp.status})`

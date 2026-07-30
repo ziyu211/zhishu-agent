@@ -82,6 +82,9 @@ function onToggle(it: any, enabled: boolean) {
             <NTag v-if="showStatus && it.connected" size="tiny" type="success" :bordered="false">已连接</NTag>
             <NTag v-if="showStatus && it.connected === false" size="tiny" type="warning" :bordered="false">未连接</NTag>
             <NTag v-if="it.tool_count !== undefined" size="tiny" :bordered="false" class="tool-tag">{{ it.tool_count }} 工具</NTag>
+            <NTag v-if="it.shared" size="tiny" type="info" :bordered="false">共享</NTag>
+            <NTag v-else-if="it.owner" size="tiny" :bordered="false" class="owner-tag">{{ it.owner }}</NTag>
+            <NTag v-else size="tiny" :bordered="false" class="owner-tag">公共</NTag>
           </div>
           <div class="card-desc">{{ it.description || '暂无描述' }}</div>
           <div v-if="it.command" class="card-meta">
@@ -93,15 +96,15 @@ function onToggle(it: any, enabled: boolean) {
         <div class="card-right">
           <div class="card-actions" v-if="editable || exportable">
             <NButton v-if="exportable" size="tiny" quaternary type="default" @click="emit('export', it)">导出</NButton>
-            <NButton v-if="editable" size="tiny" quaternary type="primary" @click="emit('edit', it)">编辑</NButton>
-            <NPopconfirm v-if="editable" @positive-click="emit('delete', it)">
+            <NButton v-if="editable && it._editable !== false" size="tiny" quaternary type="primary" @click="emit('edit', it)">编辑</NButton>
+            <NPopconfirm v-if="editable && it._editable !== false" @positive-click="emit('delete', it)">
               <template #trigger>
                 <NButton size="tiny" quaternary type="error">删除</NButton>
               </template>
               确认删除「{{ it.name }}」？此操作不可恢复。
             </NPopconfirm>
           </div>
-          <NSwitch :value="it.enabled" @update:value="(v: boolean) => onToggle(it, v)" />
+          <NSwitch :value="it.enabled" :disabled="it._editable === false" @update:value="(v: boolean) => onToggle(it, v)" />
         </div>
       </div>
     </div>

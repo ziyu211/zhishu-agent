@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { NButton, NModal, NInput, NForm, NFormItem, useMessage } from 'naive-ui'
+import { NButton, NModal, NInput, NForm, NFormItem, NSelect, useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { api } from '@/api/client'
+import { request } from '@/api/http'
+import { actAs, setActAs, clearActAs } from '@/api/actas'
 
 const app = useAppStore()
 const { t } = useI18n()
@@ -18,6 +20,29 @@ const initial = computed(() => (display.value[0] || '?').toUpperCase())
 function doLogout() {
   app.logout()
   router.replace('/login')
+}
+
+// ─── 管理员「切换用户（代管）」 ───────────────────────
+const userOptions = ref<{ label: string; value: string }[]>([])
+const isAdmin = computed(() => app.isAdmin)
+async function loadUsers() {
+  if (!isAdmin.value) return
+  try {
+    const res = await request<{ users: any[] }>('/users')
+    userOptions.value = (res.users || [])
+      .filter((u) => u.username !== user.value?.user)
+      .map((u) => ({ label: `${u.display_name || u.username}（${u.role}）`, value: u.username }))
+  } catch {}
+}
+onMounted(loadUsers)
+
+function onActAsChange(v: string | null) {
+  if (!v) {
+    clearActAs()
+  } else {
+    setActAs(v)
+    message.info(`已切换为以「${v}」身份查看 / 配置`)
+  }
 }
 
 // ─── 自助修改密码 ──────────────────────────────────────
@@ -55,6 +80,23 @@ async function submitPwd() {
         <div class="role">{{ user?.role_label || user?.role }}</div>
       </div>
     </div>
+
+    <!-- 管理员：切换用户（代管） -->
+    <div v-if="isAdmin" class="act-as">
+      <div class="act-as-label">
+        代管用户
+        <span v-if="actAs" class="act-as-tag">当前：{{ actAs }}</span>
+      </div>
+      <NSelect
+        :value="actAs || null"
+        :options="userOptions"
+        placeholder="以自己的身份操作"
+        clearable
+        size="small"
+        @update:value="onActAsChange"
+      />
+    </div>
+
     <NButton block size="small" quaternary class="menu-item" @click="showPwd = true">
       修改密码
     </NButton>
@@ -88,6 +130,27 @@ async function submitPwd() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.act-as {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px;
+  border-top: 1px solid rgba(var(--border-color-rgb), 0.6);
+  border-bottom: 1px solid rgba(var(--border-color-rgb), 0.6);
+
+  .act-as-label {
+    font-size: 11px;
+    color: $text-muted;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .act-as-tag {
+    color: $accent-primary;
+    font-weight: 600;
+  }
 }
 
 .user-info {

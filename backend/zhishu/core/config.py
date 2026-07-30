@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import copy
 import os
 from dataclasses import dataclass, field, asdict
 from typing import Optional
@@ -134,6 +135,9 @@ class ProviderConfig:
     enabled: bool = True
     priority: int = 100  # 越小越优先（回退链顺序）
     mode: str = ""        # 扩展模式：空=普通 LLM；"moa"=多智能体 facade（并行聚合）
+    # ---- 多用户隔离 ----
+    owner: str = ""       # 归属用户；空=历史系统级（全员可见，仅 admin 可管理）
+    shared: bool = False  # 显式共享：对他人可见可用（共享后他人可用其密钥，但密钥对其脱敏）
 
 
 @dataclass
@@ -292,6 +296,7 @@ class ZhishuConfig:
     web_search: WebSearchConfig = field(default_factory=WebSearchConfig)
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     default_model: str = ""  # 留空 = 未配置；运行时按已配置可用的 Provider 自动解析（不再内置预设模型）
+    defaults: dict[str, str] = field(default_factory=dict)  # 每用户默认模型：{username: "provider/model"}
     system_prompt: str = (
         "你是智枢智能体，一个部署在用户内网的国产自主可控 AI 助手。"
         "你应当严谨、可靠，优先使用用户提供的知识库与工具完成任务。"
@@ -391,6 +396,30 @@ class ZhishuConfig:
         if not include_disabled:
             vals = [p for p in vals if p.enabled]
         return sorted(vals, key=lambda x: x.priority)
+
+    def for_user(self, username: Optional[str], is_admin: bool = False) -> "ZhishuConfig":
+        """返回仅含该用户可见 Provider（owner==username 或 shared）及该用户默认模型的配置副本。
+
+        用于「按用户隔离模型」：每个用户只能用自己的/共享的 Provider 与默认模型。
+        admin（is_admin=True）返回自身（可见全部 Provider）；匿名/未登录仅见共享项。
+        """
+        if is_admin:
+            return self
+        if not username:
+            # 匿名：仅共享 Provider，且不泄露任何私有密钥对应的默认模型
+            vis = {n: p for n, p in self.providers.items() if p.shared}
+            new = copy.copy(self)
+            new.providers = vis
+            new.default_model = ""
+            return new
+        vis = {
+            n: p for n, p in self.providers.items()
+            if p.owner == username or p.shared
+        }
+        new = copy.copy(self)
+        new.providers = vis
+        new.default_model = self.defaults.get(username, self.default_model)
+        return new
 
     @staticmethod
     def presets() -> list[dict]:

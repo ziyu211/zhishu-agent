@@ -67,7 +67,7 @@ def _enabled_skills(cfg: Optional[ZhishuConfig] = None,
         meta = read_meta("skills", name)
         if meta.get("enabled") is False:
             continue
-        if not can_view(meta.get("owner") or None, username, is_admin):
+        if not can_view(meta.get("owner") or None, username, is_admin, bool(meta.get("shared"))):
             continue
         out.append({
             "name": name,

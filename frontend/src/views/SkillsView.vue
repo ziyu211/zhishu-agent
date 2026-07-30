@@ -1,25 +1,37 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NUpload, NDrawer, NDrawerContent, NAlert } from 'naive-ui'
 import { api } from '@/api/client'
 import { importSkills, exportSkills, exportSkill } from '@/api/skills'
+import { actAs } from '@/api/actas'
+import { useAppStore } from '@/stores/app'
 import ModuleList from '@/components/modules/ModuleList.vue'
 
 const message = useMessage()
+const app = useAppStore()
 const loading = ref(false)
 const skills = ref<any[]>([])
 
 const showModal = ref(false)
 const submitting = ref(false)
 const editing = ref<string | null>(null)
-const form = reactive<{ name: string; description: string; version: string; content: string; enabled: boolean }>({
+const form = reactive<{ name: string; description: string; version: string; content: string; enabled: boolean; shared: boolean }>({
   name: '',
   description: '',
   version: '1.0.0',
   content: '',
   enabled: true,
+  shared: false,
 })
+
+/** 本条目当前用户是否可编辑：admin 恒可；owner 为自己可；历史无主条目仅 admin 可 */
+function markEditable(items: any[]) {
+  const me = (app.user as any)?.username || ''
+  const admin = app.isAdmin
+  for (const it of items) it._editable = admin || (!!it.owner && it.owner === me)
+  return items
+}
 
 // 导入相关
 const showImport = ref(false)
@@ -31,7 +43,7 @@ async function load() {
   loading.value = true
   try {
     const d = await api.listSkills()
-    skills.value = d.skills || []
+    skills.value = markEditable(d.skills || [])
   } catch (e: any) {
     message.error(e?.message || '加载技能失败')
   } finally {
@@ -41,7 +53,7 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', description: '', version: '1.0.0', content: '', enabled: true })
+  Object.assign(form, { name: '', description: '', version: '1.0.0', content: '', enabled: true, shared: false })
   showModal.value = true
 }
 
@@ -55,6 +67,7 @@ async function openEdit(it: any) {
       version: d.version || '1.0.0',
       content: d.content || '',
       enabled: d.enabled !== false,
+      shared: !!d.shared,
     })
     showModal.value = true
   } catch (e: any) {
@@ -75,6 +88,7 @@ async function submit() {
         version: form.version,
         content: form.content,
         enabled: form.enabled,
+        shared: form.shared,
       })
       message.success('已更新')
     } else {
@@ -84,6 +98,7 @@ async function submit() {
         version: form.version,
         content: form.content,
         enabled: form.enabled,
+        shared: form.shared,
       })
       message.success('已创建')
     }
@@ -168,6 +183,7 @@ async function doExportOne(it: any) {
 }
 
 onMounted(load)
+watch(actAs, () => load())
 </script>
 
 <template>
@@ -235,6 +251,10 @@ onMounted(load)
         </NFormItem>
         <NFormItem label="启用">
           <NSwitch v-model:value="form.enabled" />
+        </NFormItem>
+        <NFormItem label="共享给所有用户">
+          <NSwitch v-model:value="form.shared" />
+          <span class="share-hint">开启后其他用户可见并可使用（不可编辑）</span>
         </NFormItem>
         <NFormItem label="指令内容（注入 Agent）">
           <NInput
@@ -314,4 +334,5 @@ onMounted(load)
 .ri { font-size: 13px; }
 .ri-list { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: $text-secondary; }
 .ri-err { color: #d03050; }
+.share-hint { font-size: 12px; color: $text-muted; margin-left: 10px; }
 </style>

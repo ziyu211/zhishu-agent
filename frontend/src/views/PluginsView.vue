@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NSelect } from 'naive-ui'
 import { api } from '@/api/client'
+import { actAs } from '@/api/actas'
+import { useAppStore } from '@/stores/app'
 import ModuleList from '@/components/modules/ModuleList.vue'
 
 const message = useMessage()
+const app = useAppStore()
 const loading = ref(false)
 const plugins = ref<any[]>([])
 
@@ -17,14 +20,23 @@ const form = reactive<{
   description: string
   version: string
   enabled: boolean
+  shared: boolean
   tools: any[]
 }>({
   name: '',
   description: '',
   version: '0.1',
   enabled: true,
+  shared: false,
   tools: [],
 })
+
+function markEditable(items: any[]) {
+  const me = (app.user as any)?.username || ''
+  const admin = app.isAdmin
+  for (const it of items) it._editable = admin || (!!it.owner && it.owner === me)
+  return items
+}
 
 function blankTool() {
   return { name: '', description: '', type: 'shell', command: '', url: '', method: 'POST', args_text: '' }
@@ -34,7 +46,7 @@ async function load() {
   loading.value = true
   try {
     const d = await api.listPlugins()
-    plugins.value = d.plugins || []
+    plugins.value = markEditable(d.plugins || [])
   } catch (e: any) {
     message.error(e?.message || '加载插件失败')
   } finally {
@@ -44,7 +56,7 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', description: '', version: '0.1', enabled: true, tools: [blankTool()] })
+  Object.assign(form, { name: '', description: '', version: '0.1', enabled: true, shared: false, tools: [blankTool()] })
   showModal.value = true
 }
 
@@ -57,6 +69,7 @@ async function openEdit(it: any) {
       description: d.description || '',
       version: d.version || '0.1',
       enabled: d.enabled !== false,
+      shared: !!d.shared,
       tools: (d.tools && d.tools.length ? d.tools : [blankTool()]).map((t: any) => ({
         name: t.name || '',
         description: t.description || '',
@@ -113,6 +126,7 @@ async function submit() {
         description: form.description,
         version: form.version,
         enabled: form.enabled,
+        shared: form.shared,
         tools,
       })
       message.success('已更新')
@@ -122,6 +136,7 @@ async function submit() {
         description: form.description,
         version: form.version,
         enabled: form.enabled,
+        shared: form.shared,
         tools,
       })
       message.success('已创建')
@@ -159,6 +174,7 @@ async function onToggle(p: { name: string; enabled: boolean }) {
 }
 
 onMounted(load)
+watch(actAs, () => load())
 </script>
 
 <template>
@@ -206,6 +222,10 @@ onMounted(load)
         </NFormItem>
         <NFormItem label="启用">
           <NSwitch v-model:value="form.enabled" />
+        </NFormItem>
+        <NFormItem label="共享给所有用户">
+          <NSwitch v-model:value="form.shared" />
+          <span class="share-hint">开启后其他用户可见并可使用（不可编辑）</span>
         </NFormItem>
 
         <div class="tools-head">
@@ -268,4 +288,5 @@ onMounted(load)
 .tool-row-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: $text-secondary; margin-bottom: 8px; }
 .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .fg { margin-bottom: 8px; }
+.share-hint { font-size: 12px; color: $text-muted; margin-left: 10px; }
 </style>

@@ -16,6 +16,14 @@ from ..context import get_ctx
 router = APIRouter(prefix="/api/v1", tags=["models"])
 
 
+def _is_admin(user: dict) -> bool:
+    return (user.get("r") or "") == "admin"
+
+
+def _username(user: dict) -> str:
+    return (user.get("u") or "").strip()
+
+
 class AddProviderReq(BaseModel):
     provider_key: str | None = None   # 预设 key（如 qwen），自定义则为 None
     name: str | None = None
@@ -27,6 +35,7 @@ class AddProviderReq(BaseModel):
     local: bool = False
     priority: int = 50
     context_length: int | None = None
+    shared: bool = False              # 显式共享：对他人可见可用（共享后他人可用其密钥，密钥对其脱敏）
 
 
 class UpdateProviderReq(BaseModel):
@@ -35,6 +44,7 @@ class UpdateProviderReq(BaseModel):
     priority: int | None = None
     base_url: str | None = None
     models: list[str] | None = None
+    shared: bool | None = None
 
 
 class DefaultModelReq(BaseModel):
@@ -48,10 +58,12 @@ class FetchModelsReq(BaseModel):
 
 @router.get("/models")
 async def list_models(user=require_auth("models:read")):
-    """对话页/选择器用：仅启用的 Provider 及默认模型。"""
+    """对话页/选择器用：仅当前用户可见（本人 + 共享）的 Provider 及生效默认模型。"""
     ctx = get_ctx()
+    uname, admin = _username(user), _is_admin(user)
+    cfg = ctx.cfg.for_user(uname, admin)
     providers = []
-    for pc in ctx.cfg.ordered_providers():
+    for pc in cfg.ordered_providers():
         providers.append({
             "provider": pc.name,
             "label": pc.label,
@@ -59,7 +71,7 @@ async def list_models(user=require_auth("models:read")):
             "local": pc.local,
             "base_url": pc.base_url,
         })
-    return {"default_model": ctx.cfg.default_model, "providers": providers}
+    return {"default_model": cfg.default_model, "providers": providers}
 
 
 @router.get("/models/presets")
@@ -70,9 +82,13 @@ async def presets(user=require_auth("models:read")):
 
 @router.get("/providers")
 async def list_providers(user=require_auth("models:read")):
-    """管理页用：全部 Provider（含禁用），api_key 脱敏。"""
+    """管理页用：当前用户可见的 Provider（含禁用），api_key 脱敏，附 owner/shared。"""
     ctx = get_ctx()
-    return {"default_model": ctx.cfg.default_model, "providers": ctx.providers.list()}
+    uname, admin = _username(user), _is_admin(user)
+    return {
+        "default_model": ctx.providers.effective_default(None if admin else uname),
+        "providers": ctx.providers.list(uname, admin),
+    }
 
 
 @router.post("/providers")
@@ -100,14 +116,16 @@ async def add_provider(req: AddProviderReq, user=require_auth("models:write")):
     if req.model and req.model not in models:
         models = [req.model] + models
     try:
+        # 默认私有：归属创建者（含 admin 自身）；shared=True 才对他人可见可用。
         r = ctx.providers.add(
             name=name, label=label or name, base_url=req.base_url,
             api_key=req.api_key, models=models, local=local,
             priority=req.priority, context_length=req.context_length,
+            owner=_username(user), shared=req.shared,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    ctx.audit.log(user.get("u", ""), "add_provider", f"添加 Provider {name}")
+    ctx.audit.log(user.get("real_u", user.get("u", "")), "add_provider", f"添加 Provider {name}")
     return r
 
 
@@ -118,10 +136,13 @@ async def update_provider(name: str, req: UpdateProviderReq, user=require_auth("
         r = ctx.providers.update(
             name, api_key=req.api_key, enabled=req.enabled,
             priority=req.priority, base_url=req.base_url, models=req.models,
+            shared=req.shared, username=_username(user), is_admin=_is_admin(user),
         )
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    ctx.audit.log(user.get("u", ""), "update_provider", f"更新 Provider {name}")
+    ctx.audit.log(user.get("real_u", user.get("u", "")), "update_provider", f"更新 Provider {name}")
     return r
 
 
@@ -129,21 +150,26 @@ async def update_provider(name: str, req: UpdateProviderReq, user=require_auth("
 async def delete_provider(name: str, user=require_auth("models:write")):
     ctx = get_ctx()
     try:
-        r = ctx.providers.remove(name)
+        r = ctx.providers.remove(name, username=_username(user), is_admin=_is_admin(user))
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    ctx.audit.log(user.get("u", ""), "delete_provider", f"删除 Provider {name}")
+    ctx.audit.log(user.get("real_u", user.get("u", "")), "delete_provider", f"删除 Provider {name}")
     return r
 
 
 @router.post("/models/default")
 async def set_default(req: DefaultModelReq, user=require_auth("models:write")):
     ctx = get_ctx()
+    # 真实 admin（非代管）设置全局默认（作为未单独配置的用户的兜底）；
+    # 代管/普通用户设置本人默认模型。
+    uname = None if _is_admin(user) else _username(user)
     try:
-        r = ctx.providers.set_default(req.model)
+        r = ctx.providers.set_default(req.model, username=uname)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    ctx.audit.log(user.get("u", ""), "set_default_model", f"默认模型 -> {req.model}")
+    ctx.audit.log(user.get("real_u", user.get("u", "")), "set_default_model", f"默认模型 -> {req.model}")
     return r
 
 

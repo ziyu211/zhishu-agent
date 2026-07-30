@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { NButton, useMessage, useDialog } from 'naive-ui'
 import { api } from '@/api/client'
+import { actAs } from '@/api/actas'
 import ProviderCard from './ProviderCard.vue'
 import ProviderFormModal from './ProviderFormModal.vue'
 
@@ -106,6 +107,7 @@ function removeProvider(p: any) {
 }
 
 onMounted(load)
+watch(actAs, () => load())
 </script>
 
 <template>

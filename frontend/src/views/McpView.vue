@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NSelect } from 'naive-ui'
 import { api } from '@/api/client'
+import { actAs } from '@/api/actas'
+import { useAppStore } from '@/stores/app'
 import ModuleList from '@/components/modules/ModuleList.vue'
 
 const message = useMessage()
+const app = useAppStore()
 const loading = ref(false)
 const servers = ref<any[]>([])
 
@@ -17,6 +20,7 @@ const form = reactive<{
   description: string
   version: string
   enabled: boolean
+  shared: boolean
   command: string
   args_text: string
   env_text: string
@@ -25,10 +29,18 @@ const form = reactive<{
   description: '',
   version: '1.0.0',
   enabled: true,
+  shared: false,
   command: '',
   args_text: '',
   env_text: '{}',
 })
+
+function markEditable(items: any[]) {
+  const me = (app.user as any)?.username || ''
+  const admin = app.isAdmin
+  for (const it of items) it._editable = admin || (!!it.owner && it.owner === me)
+  return items
+}
 
 // 详情 / 测试
 const showDetail = ref(false)
@@ -43,7 +55,7 @@ async function load() {
   loading.value = true
   try {
     const d = await api.listMcp()
-    servers.value = d.servers || []
+    servers.value = markEditable(d.servers || [])
   } catch (e: any) {
     message.error(e?.message || '加载 MCP 失败')
   } finally {
@@ -53,7 +65,7 @@ async function load() {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', description: '', version: '1.0.0', enabled: true, command: '', args_text: '', env_text: '{}' })
+  Object.assign(form, { name: '', description: '', version: '1.0.0', enabled: true, shared: false, command: '', args_text: '', env_text: '{}' })
   showCreate.value = true
 }
 
@@ -66,6 +78,7 @@ async function openEdit(it: any) {
       description: d.description || '',
       version: d.version || '1.0.0',
       enabled: d.enabled !== false,
+      shared: !!d.shared,
       command: d.command || '',
       args_text: (d.args || []).join('\n'),
       env_text: JSON.stringify(d.env || {}, null, 2),
@@ -96,6 +109,7 @@ async function submit() {
     description: form.description,
     version: form.version,
     enabled: form.enabled,
+    shared: form.shared,
     command: form.command.trim(),
     args: form.args_text.split('\n').map((s) => s.trim()).filter(Boolean),
     env,
@@ -188,6 +202,7 @@ async function runTest() {
 }
 
 onMounted(load)
+watch(actAs, () => load())
 </script>
 
 <template>
@@ -240,6 +255,10 @@ onMounted(load)
         </NFormItem>
         <NFormItem label="启用并连接">
           <NSwitch v-model:value="form.enabled" />
+        </NFormItem>
+        <NFormItem label="共享给所有用户">
+          <NSwitch v-model:value="form.shared" />
+          <span class="share-hint">开启后其他用户可见并可使用（不可编辑）</span>
         </NFormItem>
         <NFormItem label="启动命令">
           <NInput v-model:value="form.command" placeholder="如 python / npx / node" />
@@ -298,6 +317,7 @@ onMounted(load)
 .status-line .bad { color: #d03050; }
 .muted { color: $text-muted; font-size: 12px; }
 .err { color: #d03050; font-size: 12px; }
+.share-hint { font-size: 12px; color: $text-muted; margin-left: 10px; }
 .test-box { margin-top: 14px; border-top: 1px solid $border-color; padding-top: 12px; }
 .test-box h4 { margin: 0 0 8px; font-size: 13px; }
 .result { background: $code-bg; padding: 10px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; max-height: 240px; overflow: auto; }

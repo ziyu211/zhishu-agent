@@ -29,7 +29,7 @@ from ..core.modules import (
     register_plugin_tools,
     DISABLED_KEY,
 )
-from ..core.modules.runtime import can_view, can_edit, filter_tool_specs
+from ..core.modules.runtime import can_view, can_edit, can_view_meta, can_edit_meta, filter_tool_specs
 from ..core.modules.skills_io import import_archive, export_skills
 
 
@@ -55,16 +55,16 @@ def _guard_view(sub: str, name: str, user: dict, label: str) -> dict:
     if not os.path.isdir(module_dir(sub, name)):
         raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
     meta = read_meta(sub, name)
-    if not can_view(meta.get("owner") or None, _username(user), _is_admin(user)):
+    if not can_view_meta(meta, _username(user), _is_admin(user)):
         raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
     return meta
 
 
 def _guard_edit(sub: str, name: str, user: dict, label: str) -> dict:
-    """存在 + 可写性校验；不可见→404，可见不可写（共享模块的非 admin）→403。"""
+    """存在 + 可写性校验；不可见→404，可见不可写（共享模块的非 owner）→403。"""
     meta = _guard_view(sub, name, user, label)
-    if not can_edit(meta.get("owner") or None, _username(user), _is_admin(user)):
-        raise HTTPException(status_code=403, detail=f"无权管理该{label}（系统级共享，仅管理员可修改）")
+    if not can_edit_meta(meta, _username(user), _is_admin(user)):
+        raise HTTPException(status_code=403, detail=f"无权管理该{label}（共享项仅创建者可修改）")
     return meta
 
 
@@ -99,7 +99,7 @@ def _list_modules(sub: str, user: Optional[dict] = None) -> list:
             continue
         # 多用户隔离：仅返回「共享 + 本人」；admin 全量（含 owner 归属信息）
         owner_val = info.get("owner") or None
-        if not can_view(owner_val, uname, admin):
+        if not can_view_meta(info, uname, admin):
             continue
         item: dict[str, Any] = {
             "name": name,
@@ -107,6 +107,7 @@ def _list_modules(sub: str, user: Optional[dict] = None) -> list:
             "version": info.get("version", ""),
             "enabled": name not in disabled,
             "owner": owner_val,
+            "shared": bool(info.get("shared")),
         }
         if sub == "plugins":
             item["tool_count"] = len(info.get("tools") or [])
@@ -154,6 +155,7 @@ class SkillBody(BaseModel):
     version: str = "1.0.0"
     content: str = ""
     enabled: bool = True
+    shared: bool = False          # 显式共享：对他人可见可用
 
 
 class SkillUpdate(BaseModel):
@@ -161,6 +163,7 @@ class SkillUpdate(BaseModel):
     version: Optional[str] = None
     content: Optional[str] = None
     enabled: Optional[bool] = None
+    shared: Optional[bool] = None
 
 
 @router.get("/skills")
@@ -180,8 +183,8 @@ async def import_skills(file: UploadFile = File(...), user=require_auth("modules
     fn = (file.filename or "").lower()
     fmt = "tgz" if (fn.endswith(".tgz") or fn.endswith(".tar.gz")) else "zip"
     try:
-        # 多用户隔离：非 admin 导入的技能归属本人（私有）；admin 导入为系统级共享
-        owner = None if _is_admin(user) else _username(user)
+        # 默认私有：导入产物归属导入者（含 admin 自身）；archived 内已带 owner/shared 的保留其原值。
+        owner = _username(user)
         res = import_archive(data, fmt, get_ctx().cfg.server.data_dir, owner=owner)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"导入失败：{e}")
@@ -221,6 +224,7 @@ async def get_skill(name: str, user=require_auth("modules:read")):
     info = _guard_view("skills", name, user, "技能")
     info["name"] = name
     info["owner"] = info.get("owner") or None
+    info["shared"] = bool(info.get("shared"))
     info["enabled"] = name not in set(load_state().get("skills_disabled", []))
     return info
 
@@ -232,16 +236,16 @@ async def create_skill(body: SkillBody, user=require_auth("modules:write")):
         raise HTTPException(status_code=400, detail="技能名称非法")
     if os.path.isdir(module_dir("skills", name)):
         raise HTTPException(status_code=409, detail=f"技能已存在：{name}")
+    # 默认私有：归属创建者（含 admin 自身）；shared=True 才对他人可见可用。
     meta = {
         "name": name,
         "description": body.description,
         "version": body.version,
         "content": body.content,
         "enabled": body.enabled,
+        "owner": _username(user),
+        "shared": bool(body.shared),
     }
-    # 多用户隔离：非 admin 创建的技能归属本人（私有）；admin 创建为系统级共享
-    if not _is_admin(user):
-        meta["owner"] = _username(user)
     write_meta("skills", name, meta)
     return {"ok": True, "name": name}
 
@@ -249,7 +253,7 @@ async def create_skill(body: SkillBody, user=require_auth("modules:write")):
 @router.put("/skills/{name}")
 async def update_skill(name: str, body: SkillUpdate, user=require_auth("modules:write")):
     meta = _guard_edit("skills", name, user, "技能")
-    for k in ("description", "version", "content", "enabled"):
+    for k in ("description", "version", "content", "enabled", "shared"):
         v = getattr(body, k)
         if v is not None:
             meta[k] = v
@@ -293,6 +297,7 @@ class PluginBody(BaseModel):
     version: str = "0.1"
     enabled: bool = True
     tools: list = []
+    shared: bool = False          # 显式共享：对他人可见可用
 
 
 class PluginUpdate(BaseModel):
@@ -300,6 +305,7 @@ class PluginUpdate(BaseModel):
     version: Optional[str] = None
     enabled: Optional[bool] = None
     tools: Optional[list] = None
+    shared: Optional[bool] = None
 
 
 @router.get("/plugins")
@@ -339,6 +345,7 @@ async def get_plugin(name: str, user=require_auth("modules:read")):
     info = _guard_view("plugins", name, user, "插件")
     info["name"] = name
     info["owner"] = info.get("owner") or None
+    info["shared"] = bool(info.get("shared"))
     # 安全：http 工具 headers 脱敏后再回传
     info["tools"] = _mask_plugin_tools(info.get("tools"))
     info["enabled"] = name not in set(load_state().get("plugins_disabled", []))
@@ -358,10 +365,9 @@ async def create_plugin(body: PluginBody, user=require_auth("modules:write")):
         "version": body.version,
         "enabled": body.enabled,
         "tools": body.tools,
+        "owner": _username(user),
+        "shared": bool(body.shared),
     }
-    # 多用户隔离：非 admin 创建的插件归属本人（私有）；admin 创建为系统级共享
-    if not _is_admin(user):
-        meta["owner"] = _username(user)
     write_meta("plugins", name, meta)
     _sync_plugins()
     return {"ok": True, "name": name}
@@ -370,7 +376,7 @@ async def create_plugin(body: PluginBody, user=require_auth("modules:write")):
 @router.put("/plugins/{name}")
 async def update_plugin(name: str, body: PluginUpdate, user=require_auth("modules:write")):
     meta = _guard_edit("plugins", name, user, "插件")
-    for k in ("description", "version", "enabled"):
+    for k in ("description", "version", "enabled", "shared"):
         v = getattr(body, k)
         if v is not None:
             meta[k] = v
@@ -441,6 +447,7 @@ class McpBody(BaseModel):
     command: str
     args: list = []
     env: dict = {}
+    shared: bool = False          # 显式共享：对他人可见可用
 
 
 class McpUpdate(BaseModel):
@@ -450,6 +457,7 @@ class McpUpdate(BaseModel):
     command: Optional[str] = None
     args: Optional[list] = None
     env: Optional[dict] = None
+    shared: Optional[bool] = None
 
 
 class McpCallBody(BaseModel):
@@ -493,6 +501,7 @@ async def get_mcp(name: str, user=require_auth("modules:read")):
     info = _guard_view("mcp", name, user, " MCP 服务器")
     info["name"] = name
     info["owner"] = info.get("owner") or None
+    info["shared"] = bool(info.get("shared"))
     # 安全：env 密钥脱敏后再回传
     info["env"] = _mask_env(info.get("env", {}))
     info["enabled"] = name not in set(load_state().get("mcp_disabled", []))
@@ -518,10 +527,9 @@ async def create_mcp(body: McpBody, user=require_auth("modules:write")):
         "command": body.command,
         "args": body.args,
         "env": body.env,
+        "owner": _username(user),
+        "shared": bool(body.shared),
     }
-    # 多用户隔离：非 admin 创建的 MCP 归属本人（私有）；admin 创建为系统级共享
-    if not _is_admin(user):
-        meta["owner"] = _username(user)
     write_meta("mcp", name, meta)
     return {"ok": True, "name": name}
 
@@ -529,7 +537,7 @@ async def create_mcp(body: McpBody, user=require_auth("modules:write")):
 @router.put("/mcp/{name}")
 async def update_mcp(name: str, body: McpUpdate, user=require_auth("modules:write")):
     meta = _guard_edit("mcp", name, user, " MCP 服务器")
-    for k in ("description", "version", "enabled", "command", "args"):
+    for k in ("description", "version", "enabled", "command", "args", "shared"):
         v = getattr(body, k)
         if v is not None:
             meta[k] = v

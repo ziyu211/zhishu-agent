@@ -110,7 +110,8 @@ async def change_password(req: ChangePwdReq, authorization: str | None = Header(
 
 
 def require_auth(perm: str = "chat"):
-    def dependency(authorization: str | None = Header(None)):
+    def dependency(authorization: str | None = Header(None),
+                   x_act_as: str | None = Header(None, alias="X-Act-As")):
         ctx = get_ctx()
         if not ctx.cfg.security.enable_auth:
             return {"u": "anonymous", "r": "admin"}
@@ -118,6 +119,20 @@ def require_auth(perm: str = "chat"):
         data = ctx.auth.verify(token)
         if not data:
             raise HTTPException(status_code=401, detail="未登录或登录已过期")
+        # 管理员「切换用户」：仅在当前用户为 admin 时生效；目标用户须存在。
+        # 切换后 data 完全以目标用户身份运行（u=目标、r=目标角色），
+        # 使所有隔离/归属/权限逻辑自动按目标用户生效；real_u 仅用于审计留痕。
+        if x_act_as and data.get("r") == "admin":
+            row = ctx.users.get_by_name(x_act_as) if ctx.users else None
+            if row is not None:
+                tgt = dict(row)  # sqlite3.Row 无 .get()，须先转 dict
+                data = {
+                    **data,
+                    "u": tgt.get("username") or x_act_as,
+                    "r": tgt.get("role") or "user",
+                    "real_u": data.get("u", "admin"),
+                    "impersonating": True,
+                }
         if not ctx.auth.can(data.get("r", ""), perm):
             raise HTTPException(status_code=403, detail="无权限执行该操作")
         return data

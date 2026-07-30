@@ -101,9 +101,12 @@ def delete_module(sub: str, name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 归属与可见性（多用户隔离）
-#   * meta 无 owner（None/空）= 系统级共享：全员可见可用，仅 admin 可管理
+# 归属与可见性（多用户隔离，默认私有 + 显式共享）
+#   * meta 无 owner（None/空）= 历史系统级共享：全员可见可用，仅 admin 可管理
+#                                （兼容改造前的存量数据，不破坏既有使用）
 #   * meta 有 owner          = 私有：仅 owner 与 admin 可见/可管理
+#   * meta.shared = True     = 显式共享：全员可见可用（配置/创建时打标）
+#   新创建项一律归属创建者（私有），需显式 shared=True 才对他人可见可用。
 # ---------------------------------------------------------------------------
 def module_owner(sub: str, name: str) -> Optional[str]:
     """返回模块归属用户名；None 表示系统级共享。"""
@@ -111,21 +114,41 @@ def module_owner(sub: str, name: str) -> Optional[str]:
     return str(owner) if owner else None
 
 
-def can_view(owner_val: Optional[str], username: Optional[str], is_admin: bool) -> bool:
-    """可见性：共享（owner=None）全员可见；私有仅本人 + admin。"""
-    if is_admin or owner_val is None:
+def module_shared(sub: str, name: str) -> bool:
+    """返回模块是否显式共享。"""
+    return bool((read_meta(sub, name) or {}).get("shared"))
+
+
+def can_view(owner_val: Optional[str], username: Optional[str], is_admin: bool,
+             shared: bool = False) -> bool:
+    """可见性：admin 全可见；显式共享全员可见；历史无 owner（系统级共享）全员可见；
+    否则仅 owner 本人。"""
+    if is_admin or shared:
+        return True
+    if owner_val is None:
         return True
     return bool(username) and owner_val == username
 
 
-def can_edit(owner_val: Optional[str], username: Optional[str], is_admin: bool) -> bool:
-    """可写性：admin 全可写；共享模块仅 admin；私有模块仅 owner 本人。
-    fail-closed：无法确定身份（username 为空）时一律拒绝。"""
+def can_edit(owner_val: Optional[str], username: Optional[str], is_admin: bool,
+             shared: bool = False) -> bool:
+    """可写性：admin 全可写；显式共享项仅 owner 本人可改；历史无 owner（系统级共享）仅 admin；
+    私有项仅 owner 本人。fail-closed：身份为空一律拒绝。"""
     if is_admin:
         return True
     if owner_val is None:
         return False
-    return bool(username) and owner_val == username
+    if owner_val == username:
+        return True
+    return False
+
+
+def can_view_meta(meta: dict, username: Optional[str], is_admin: bool) -> bool:
+    return can_view(meta.get("owner") or None, username, is_admin, bool(meta.get("shared")))
+
+
+def can_edit_meta(meta: dict, username: Optional[str], is_admin: bool) -> bool:
+    return can_edit(meta.get("owner") or None, username, is_admin, bool(meta.get("shared")))
 
 
 def _tool_module(tool_name: str) -> Optional[tuple[str, str]]:
@@ -148,12 +171,12 @@ def tool_visible_to(tool_name: str, username: Optional[str], is_admin: bool = Fa
     if is_admin:
         return True
     sub, mod = hit
-    owner_val = module_owner(sub, mod)
-    return owner_val is None or (bool(username) and owner_val == username)
+    meta = read_meta(sub, mod) or {}
+    return can_view(meta.get("owner") or None, username, False, bool(meta.get("shared")))
 
 
 def filter_tool_specs(specs: list, username: Optional[str], is_admin: bool = False) -> list:
-    """按用户过滤工具声明列表（plugin__/mcp__ 按归属，builtin 保留）。"""
+    """按用户过滤工具声明列表（plugin__/mcp__ 按归属 + 共享，builtin 保留）。"""
     return [s for s in specs if tool_visible_to(s["function"]["name"], username, is_admin)]
 
 

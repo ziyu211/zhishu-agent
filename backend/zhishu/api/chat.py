@@ -222,7 +222,7 @@ async def chat(req: ChatReq, user=require_auth("chat")):
         from ..core.modules.runtime import can_view
         meta = get_agent_meta(req.agent)
         # 多用户隔离：他人私有子智能体视同不存在（防枚举探测）
-        if not meta or not can_view(agent_owner(req.agent), username, is_admin):
+        if not meta or not can_view(meta.get("owner") or None, username, is_admin, bool(meta.get("shared"))):
             raise HTTPException(status_code=404, detail=f"未找到子智能体：{req.agent}")
         if not meta.get("enabled"):
             raise HTTPException(status_code=403, detail=f"子智能体已停用：{req.agent}")
@@ -245,7 +245,7 @@ async def chat(req: ChatReq, user=require_auth("chat")):
                 {"type": "error",
                  "message": f"对话处理出错：{e}。请稍后重试，或检查模型/附件配置。"},
                 ensure_ascii=False)}
-        ctx.audit.log(username, "chat", req.message[:200], f"agent={target or 'supervisor'}")
+        ctx.audit.log(user.get("real_u", username), "chat", req.message[:200], f"agent={target or 'supervisor'}")
 
     return EventSourceResponse(
         event_gen(),

@@ -81,6 +81,12 @@ class Agent:
         # 绝不继承上一个请求的身份。
         self.ctx = self.ctx.for_run(owner, session, is_admin=is_admin)
         set_current_user(self.ctx.user, is_admin=is_admin)
+        # 按用户隔离模型：把 cfg/llm 收窄为「当前 owner 可见」的配置副本
+        # （仅本人 + 共享 Provider 及其默认模型）。admin 视为可见全部，返回原 cfg。
+        # 注意：Agent 实例为每轮请求独立创建，此处改写 self.cfg/self.llm 不会产生并发串号。
+        if owner:
+            self.cfg = self.cfg.for_user(owner, is_admin)
+            self.llm = LLMClient(self.cfg, self.llm.api_mode)
         # ---- 0. 按模型类型分流：图像 / 视频 走生成分支，文本走 ReAct 循环 ----
         try:
             pc, mdl = self.cfg.resolve_model(model)
@@ -494,7 +500,7 @@ class Agent:
                    "result": f"[委派失败] 未找到子智能体：{name}"}
             return
         # 多用户隔离：他人私有子智能体对当前用户不可见 → 视同不存在（防枚举探测）。
-        if not can_view(agent_owner(name), owner, is_admin):
+        if not can_view(meta.get("owner") or None, owner, is_admin, bool(meta.get("shared"))):
             yield {"type": "delegate_end", "agent": name,
                    "result": f"[委派失败] 未找到子智能体：{name}"}
             return

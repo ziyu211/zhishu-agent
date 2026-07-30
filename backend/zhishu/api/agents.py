@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -15,7 +16,7 @@ from ..core.agents_runtime import (
     list_agents, read_agent_meta, write_agent_meta, delete_agent,
     sanitize_name, is_enabled, set_enabled, agent_owner,
 )
-from ..core.modules.runtime import can_view, can_edit
+from ..core.modules.runtime import can_view, can_edit, can_view_meta, can_edit_meta
 
 router = APIRouter(prefix="/api/v1/agents", tags=["agents"])
 
@@ -39,16 +40,16 @@ def _guard_view(name: str, user: dict, label: str = "子智能体") -> dict:
     if not os.path.isdir(os.path.join(_agents_base(), name)):
         raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
     meta = read_agent_meta(name)
-    if not can_view(agent_owner(name), _username(user), _is_admin(user)):
+    if not can_view_meta(meta, _username(user), _is_admin(user)):
         raise HTTPException(status_code=404, detail=f"未找到{label}：{name}")
     return meta
 
 
 def _guard_edit(name: str, user: dict, label: str = "子智能体") -> dict:
-    """存在 + 可写性校验；不可见→404，可见不可写（共享模块的非 admin）→403。"""
+    """存在 + 可写性校验；不可见→404，可见不可写（共享项的非 owner）→403。"""
     meta = _guard_view(name, user, label)
-    if not can_edit(agent_owner(name), _username(user), _is_admin(user)):
-        raise HTTPException(status_code=403, detail=f"无权管理该{label}（系统级共享，仅管理员可修改）")
+    if not can_edit_meta(meta, _username(user), _is_admin(user)):
+        raise HTTPException(status_code=403, detail=f"无权管理该{label}（共享项仅创建者可修改）")
     return meta
 
 
@@ -64,6 +65,7 @@ class AgentBody(BaseModel):
     model: str | None = None
     tools: object = "all"          # "all" | "none" | list[str]
     max_steps: int | None = None
+    shared: bool = False           # 显式共享：对他人可见可用
 
 
 class AgentUpdate(BaseModel):
@@ -74,6 +76,7 @@ class AgentUpdate(BaseModel):
     model: str | None = None
     tools: object = None
     max_steps: int | None = None
+    shared: Optional[bool] = None
 
 
 class _ToggleBody(BaseModel):
@@ -103,6 +106,8 @@ async def get_agent(name: str, user=require_auth("agents:read")):
     _guard_view(name, user)
     info = read_agent_meta(name)
     info["name"] = name
+    info["owner"] = info.get("owner") or None
+    info["shared"] = bool(info.get("shared"))
     info["enabled"] = is_enabled(name)
     return info
 
@@ -123,9 +128,9 @@ async def create_agent(body: AgentBody, user=require_auth("agents:write")):
         "model": body.model,
         "tools": body.tools,
         "max_steps": body.max_steps,
+        "owner": _username(user),
+        "shared": bool(body.shared),
     }
-    if not _is_admin(user):
-        meta["owner"] = _username(user)
     write_agent_meta(name, meta)
     if not body.enabled:
         set_enabled(name, False)
@@ -136,7 +141,7 @@ async def create_agent(body: AgentBody, user=require_auth("agents:write")):
 async def update_agent(name: str, body: AgentUpdate, user=require_auth("agents:write")):
     _guard_edit(name, user)
     meta = read_agent_meta(name)
-    for k in ("description", "version", "system_prompt", "model", "tools", "max_steps"):
+    for k in ("description", "version", "system_prompt", "model", "tools", "max_steps", "shared"):
         v = getattr(body, k)
         if v is not None:
             meta[k] = v

@@ -150,11 +150,12 @@ def list_agents(username: "str | None" = None, is_admin: bool = False) -> list[d
         if not meta:
             continue
         owner_val = meta.get("owner") or None
-        if not can_view(owner_val, username, is_admin):
+        if not can_view(owner_val, username, is_admin, bool(meta.get("shared"))):
             continue
         meta = dict(meta)
         meta["name"] = name
         meta["owner"] = owner_val
+        meta["shared"] = bool(meta.get("shared"))
         meta["enabled"] = name not in disabled
         try:
             meta["tool_count"] = len(resolve_tools(

@@ -39,7 +39,7 @@ async def delegate_to_agent(args: dict, ctx) -> str:
     if not meta:
         return f"[委派失败] 未找到子智能体：{name}"
     # 多用户隔离：他人私有子智能体视同不存在（防枚举探测）
-    if not can_view(agent_owner(name), ctx.user, is_admin):
+    if not can_view(meta.get("owner") or None, ctx.user, is_admin, bool(meta.get("shared"))):
         return f"[委派失败] 未找到子智能体：{name}"
     if not is_enabled(name):
         return f"[委派失败] 子智能体已停用：{name}"

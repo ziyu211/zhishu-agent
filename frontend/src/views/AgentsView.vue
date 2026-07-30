@@ -1,14 +1,22 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import {
-  NModal, NForm, NFormItem, NInput, NSwitch, NButton, NRadioGroup, NRadioButton, NSelect,
+  NModal, NForm, NFormItem, NInput, NSwitch, NButton, NRadioGroup, NRadioButton, NSelect, NTag,
 } from 'naive-ui'
 import { api } from '@/api/client'
+import { actAs } from '@/api/actas'
+import { useAppStore } from '@/stores/app'
 
 const message = useMessage()
+const app = useAppStore()
 const loading = ref(false)
 const agents = ref<any[]>([])
+
+function canEditItem(it: any): boolean {
+  const me = (app.user as any)?.username || ''
+  return app.isAdmin || (!!it.owner && it.owner === me)
+}
 
 const showModal = ref(false)
 const submitting = ref(false)
@@ -28,6 +36,7 @@ const form = reactive<{
   toolsMode: 'all' | 'none' | 'custom'
   tools: string[]
   max_steps: string | null
+  shared: boolean
 }>({
   name: '',
   description: '',
@@ -38,6 +47,7 @@ const form = reactive<{
   toolsMode: 'all',
   tools: [],
   max_steps: null,
+  shared: false,
 })
 
 async function load() {
@@ -78,6 +88,7 @@ function openCreate() {
     toolsMode: 'all',
     tools: [],
     max_steps: null,
+    shared: false,
   })
   showModal.value = true
 }
@@ -101,6 +112,7 @@ async function openEdit(it: any) {
       toolsMode: mode,
       tools: custom,
       max_steps: d.max_steps ?? null,
+      shared: !!d.shared,
     })
     showModal.value = true
   } catch (e: any) {
@@ -124,6 +136,7 @@ function buildPayload() {
     model: form.model || null,
     tools,
     max_steps: ms,
+    shared: form.shared,
   }
 }
 
@@ -186,6 +199,7 @@ onMounted(() => {
   load()
   loadMeta()
 })
+watch(actAs, () => load())
 </script>
 
 <template>
@@ -218,6 +232,9 @@ onMounted(() => {
               <span v-if="a.version" class="ver-tag">{{ a.version }}</span>
               <span class="tool-tag">{{ a.tool_count ?? 0 }} 工具</span>
               <span v-if="a.model" class="model-tag">{{ a.model }}</span>
+              <NTag v-if="a.shared" size="tiny" type="info" :bordered="false">共享</NTag>
+              <NTag v-else-if="a.owner" size="tiny" :bordered="false">{{ a.owner }}</NTag>
+              <NTag v-else size="tiny" :bordered="false">公共</NTag>
             </div>
             <div class="card-desc">{{ a.description || '暂无描述' }}</div>
             <div class="card-meta-line">
@@ -227,11 +244,11 @@ onMounted(() => {
             </div>
           </div>
           <div class="card-right">
-            <div class="card-actions">
+            <div class="card-actions" v-if="canEditItem(a)">
               <NButton size="tiny" quaternary type="primary" @click="openEdit(a)">编辑</NButton>
               <NButton size="tiny" quaternary type="error" @click="remove(a)">删除</NButton>
             </div>
-            <NSwitch :value="a.enabled !== false" @update:value="(v: boolean) => onToggle({ name: a.name, enabled: v })" />
+            <NSwitch :value="a.enabled !== false" :disabled="!canEditItem(a)" @update:value="(v: boolean) => onToggle({ name: a.name, enabled: v })" />
           </div>
         </div>
       </div>
@@ -250,6 +267,10 @@ onMounted(() => {
         </NFormItem>
         <NFormItem label="启用">
           <NSwitch v-model:value="form.enabled" />
+        </NFormItem>
+        <NFormItem label="共享给所有用户">
+          <NSwitch v-model:value="form.shared" />
+          <span class="share-hint">开启后其他用户可见并可使用（不可编辑）</span>
         </NFormItem>
         <NFormItem label="人设 / 系统提示词">
           <NInput
@@ -352,4 +373,5 @@ onMounted(() => {
 
 .tools-block { display: flex; flex-direction: column; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 10px; }
+.share-hint { font-size: 12px; color: $text-muted; margin-left: 10px; }
 </style>

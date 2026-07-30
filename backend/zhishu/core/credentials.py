@@ -51,6 +51,8 @@ class ProviderStore:
             self.cfg.providers = providers
         if data.get("default_model"):
             self.cfg.default_model = data["default_model"]
+        if isinstance(data.get("defaults"), dict):
+            self.cfg.defaults = dict(data["defaults"])
 
     def _save(self):
         arr = []
@@ -60,8 +62,11 @@ class ProviderStore:
                 d["api_key"] = self.crypto.encrypt_sm4(self.cfg.security.secret, d["api_key"])
             arr.append(d)
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump({"providers": arr, "default_model": self.cfg.default_model},
-                      f, ensure_ascii=False, indent=2)
+            json.dump({
+                "providers": arr,
+                "default_model": self.cfg.default_model,
+                "defaults": self.cfg.defaults,
+            }, f, ensure_ascii=False, indent=2)
 
     def _decrypt(self, blob: str) -> str:
         try:
@@ -79,15 +84,20 @@ class ProviderStore:
             return ""
         return ""
 
-    def list(self) -> list[dict]:
+    def list(self, username: Optional[str] = None, is_admin: bool = False) -> list[dict]:
         out = []
         for p in sorted(self.cfg.providers.values(), key=lambda x: x.priority):
+            # 多用户隔离：非 admin 仅见「本人 + 共享」Provider
+            if not is_admin and not (p.owner == (username or "") or p.shared):
+                continue
             out.append({
                 "provider": p.name, "label": p.label, "base_url": p.base_url,
                 "models": p.models, "local": p.local, "enabled": p.enabled,
                 "priority": p.priority, "has_key": bool(p.api_key),
                 "api_key_masked": self._mask(p.api_key),
                 "builtin": p.name in DEFAULT_PROVIDERS,
+                "owner": p.owner or None,
+                "shared": p.shared,
             })
         return out
 
@@ -100,7 +110,7 @@ class ProviderStore:
         return key[:4] + "****" + key[-4:]
 
     def add(self, *, name, label, base_url, api_key="", models=None, local=False,
-            priority=50, context_length=None) -> dict:
+            priority=50, context_length=None, owner="", shared=False) -> dict:
         name = (name or "").strip()
         if not name:
             raise ValueError("Provider 名称不能为空")
@@ -108,16 +118,21 @@ class ProviderStore:
             name=name, label=label or name, base_url=base_url.strip(),
             api_key=api_key.strip(), models=models or [], local=local,
             enabled=True, priority=priority,
+            owner=owner or "", shared=bool(shared),
         )
         self.cfg.providers[name] = pc
         self._save()
         return {"ok": True, "provider": name}
 
     def update(self, name, *, api_key=None, enabled=None, priority=None,
-               base_url=None, models=None) -> dict:
+               base_url=None, models=None, shared=None,
+               username: Optional[str] = None, is_admin: bool = False) -> dict:
         pc = self.cfg.providers.get(name)
         if not pc:
             raise ValueError("Provider 不存在")
+        # 多用户隔离：仅 owner 本人（或 admin）可改；共享项非 owner 不可改
+        if not is_admin and pc.owner and pc.owner != (username or ""):
+            raise PermissionError("无权修改该 Provider（他人私有项）")
         if api_key is not None and api_key != "":
             pc.api_key = api_key.strip()
         if enabled is not None:
@@ -128,20 +143,35 @@ class ProviderStore:
             pc.base_url = base_url.strip()
         if models is not None:
             pc.models = models
+        if shared is not None:
+            pc.shared = bool(shared)
         self._save()
         return {"ok": True, "provider": name}
 
-    def remove(self, name) -> dict:
-        if name not in self.cfg.providers:
+    def remove(self, name, *, username: Optional[str] = None,
+               is_admin: bool = False) -> dict:
+        pc = self.cfg.providers.get(name)
+        if not pc:
             raise ValueError("Provider 不存在")
+        if not is_admin and pc.owner and pc.owner != (username or ""):
+            raise PermissionError("无权删除该 Provider（他人私有项）")
         del self.cfg.providers[name]
         self._save()
         return {"ok": True}
 
-    def set_default(self, model: str) -> dict:
+    def set_default(self, model: str, username: Optional[str] = None) -> dict:
         if not model:
             raise ValueError("默认模型不能为空")
-        self.cfg.default_model = model
+        if username:
+            self.cfg.defaults[username] = model
+        else:
+            self.cfg.default_model = model
         self._save()
         return {"ok": True, "default_model": model}
+
+    def effective_default(self, username: Optional[str] = None) -> str:
+        """返回该用户生效的默认模型（优先用户级，回退全局）。"""
+        if username and username in self.cfg.defaults:
+            return self.cfg.defaults[username]
+        return self.cfg.default_model
 
