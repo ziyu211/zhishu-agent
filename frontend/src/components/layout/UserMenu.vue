@@ -5,7 +5,6 @@ import { NButton, NModal, NInput, NForm, NFormItem, NSelect, useMessage } from '
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { api } from '@/api/client'
-import { request } from '@/api/http'
 import { actAs, setActAs, clearActAs } from '@/api/actas'
 
 const app = useAppStore()
@@ -22,27 +21,44 @@ function doLogout() {
   router.replace('/login')
 }
 
-// ─── 管理员「切换用户（代管）」 ───────────────────────
-const userOptions = ref<{ label: string; value: string }[]>([])
+// ─── 管理员「切换用户」 ───────────────────────────────
 const isAdmin = computed(() => app.isAdmin)
+const currentUsername = computed(() => user.value?.user || '')
+const currentLabel = computed(() => {
+  const u = user.value
+  return `${u?.display_name || u?.user || '?'}（${u?.role_label || u?.role || '?'}）`
+})
+
+const userOptions = ref<{ label: string; value: string }[]>([])
 async function loadUsers() {
   if (!isAdmin.value) return
   try {
-    const res = await request<{ users: any[] }>('/users')
-    userOptions.value = (res.users || [])
-      .filter((u) => u.username !== user.value?.user)
-      .map((u) => ({ label: `${u.display_name || u.username}（${u.role}）`, value: u.username }))
-  } catch {}
+    const res = await api.listUsers()
+    const all = (res.users || [])
+      .map((u: any) => ({ label: `${u.display_name || u.username}（${u.role}）`, value: u.username }))
+    // 默认显示当前 admin 自己（value 为空表示「以自己身份操作」，不发 X-Act-As）
+    const self = all.find((o) => o.value === currentUsername.value)
+    const others = all.filter((o) => o.value !== currentUsername.value)
+    userOptions.value = [
+      { label: self?.label || currentLabel.value, value: '' },
+      ...others,
+    ]
+  } catch (e: any) {
+    console.error('[UserMenu] loadUsers failed:', e)
+  }
 }
 onMounted(loadUsers)
 
 function onActAsChange(v: string | null) {
   if (!v) {
     clearActAs()
+    message.info('已切换回管理员身份')
   } else {
     setActAs(v)
     message.info(`已切换为以「${v}」身份查看 / 配置`)
   }
+  // 立即回到首页，让新身份下的数据重新加载
+  router.replace('/chat')
 }
 
 // ─── 自助修改密码 ──────────────────────────────────────
@@ -81,17 +97,16 @@ async function submitPwd() {
       </div>
     </div>
 
-    <!-- 管理员：切换用户（代管） -->
+    <!-- 管理员：切换用户 -->
     <div v-if="isAdmin" class="act-as">
       <div class="act-as-label">
-        代管用户
+        切换用户
         <span v-if="actAs" class="act-as-tag">当前：{{ actAs }}</span>
       </div>
       <NSelect
-        :value="actAs || null"
+        :value="actAs || ''"
         :options="userOptions"
-        placeholder="以自己的身份操作"
-        clearable
+        placeholder="选择要切换到的用户"
         size="small"
         @update:value="onActAsChange"
       />
