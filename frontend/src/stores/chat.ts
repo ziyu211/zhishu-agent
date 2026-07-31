@@ -598,6 +598,7 @@ export const useChatStore = defineStore('chat', {
             }
           },
           ctrl.signal,
+          resetIdle, // 任意网络字节（含 SSE 心跳）到达即重置空闲计时器，防止长任务误判断流
         )
       } catch (e: any) {
         const msg = e?.message || '对话失败'

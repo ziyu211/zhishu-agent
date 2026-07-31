@@ -83,6 +83,9 @@ export async function streamChat(
   },
   onEvent: (ev: ChatEvent) => void,
   signal?: AbortSignal,
+  /** 任意网络字节到达即触发（含 SSE 心跳 `: ping` 注释行）——用于重置前端空闲计时器，
+   *  避免后端「长思考 / 长工具循环」期间无业务 data 事件导致空闲超时误判断流。 */
+  onActivity?: () => void,
 ): Promise<void> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = getToken()
@@ -108,6 +111,10 @@ export async function streamChat(
   while (true) {
     const { value, done } = await reader.read()
     if (done) break
+    // 收到任意字节（含心跳注释行）都视为连接活跃 —— 即便不是可解析的 data: 业务事件，
+    // 也能让上层空闲计时器保持复位，防止「后端正在生成但最终回答尚未首 token」时
+    // 前端误判断流而中止（表现为「对话不出结果，需重发」）。
+    onActivity?.()
     buf += decoder.decode(value, { stream: true })
     const lines = buf.split('\n')
     buf = lines.pop() || ''

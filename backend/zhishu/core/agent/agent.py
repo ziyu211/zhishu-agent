@@ -336,13 +336,12 @@ class Agent:
                     return
                 yield {"type": "done", "note": "模型未返回内容"}
                 return
-            collected = []
-            async for piece in self.llm.stream(messages, model=model, tools=None):
-                if piece.startswith("\u0000TOOLCALL"):
-                    continue
-                yield {"type": "token", "text": piece}
-                collected.append(piece)
-            answer = "".join(collected) or final
+            # 直接流式输出最终回答：self.llm.chat()（非流式）已在 step 起始处拿到完整
+            # content（final），无需再调一次 self.llm.stream() 重新生成。这样既省一次推理往返，
+            # 也避免「最终回答生成期间长时间无 SSE 业务事件」导致前端空闲计时器误判断流
+            # （曾表现为长工具循环后「对话不出结果，需重发才出」）。
+            answer = final
+            yield {"type": "token", "text": answer}
             if self.memory:
                 self.memory.append(session, "assistant", answer)
             if self.memory_manager is not None:
