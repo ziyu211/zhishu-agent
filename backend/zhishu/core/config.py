@@ -220,6 +220,12 @@ class AgentConfig:
     # 调用，从本轮对话中蒸馏出值得长期记住的用户事实/偏好，追加进 MEMORY.md / USER.md。
     # 默认关闭（避免意外 token 消耗与记忆污染），由运维按需开启。
     reflection_enabled: bool = False
+    # 单次生成的最大输出 token 数（LLMClient.chat/stream 的 max_tokens 上限）。
+    # 此前默认 2048，导致「全面分析/长文总结」等复杂任务的最终回答被静默截断
+    # （表现为「回复内容不完整」）。上调到 8192 以容纳较长的结构化分析/报告；
+    # 现代模型（如远程 sensenova-6.7-flash-lite）实测可稳定接受 16384 而不报错。
+    # 若个别 Provider/模型对输出长度有更低硬上限，可在此下调。
+    max_tokens: int = 8192
 
 
 @dataclass

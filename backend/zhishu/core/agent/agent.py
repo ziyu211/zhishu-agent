@@ -205,7 +205,8 @@ class Agent:
             yield {"type": "status", "text": "正在以多智能体(MoA)模式协同作答…"}
             answer = ""
             async for piece in MoAClient(self.cfg).stream(
-                messages, model=model, tools=specs if specs else None
+                messages, model=model, tools=specs if specs else None,
+                max_tokens=self.cfg.agent.max_tokens,
             ):
                 answer += piece
                 yield {"type": "token", "text": piece}
@@ -222,13 +223,19 @@ class Agent:
         tool_total = 0
         for step in range(max_steps):
             try:
-                resp = await self.llm.chat(messages, model=model, tools=specs if specs else None)
+                resp = await self.llm.chat(
+                    messages, model=model, tools=specs if specs else None,
+                    max_tokens=self.cfg.agent.max_tokens,
+                )
                 # 防御：上游网关/代理可能返回「200 + 错误 JSON」而非抛异常，
                 # 归一化后缺少 choices；此处显式校验，避免下方 resp["choices"] 触发 KeyError
                 # 冲出 SSE 生成器（浏览器侧表现为「network error」）。
                 if not isinstance(resp, dict) or "choices" not in resp:
                     raise RuntimeError(f"模型返回非预期响应：{str(resp)[:200]}")
                 choice = resp["choices"][0]["message"]
+                # 记录 finish_reason：若为 "length" 表示本次生成被 max_tokens 截断，
+                # 最终回答阶段需续写补全（见下方 final 分支），避免「回复内容不完整」。
+                finish_reason = resp["choices"][0].get("finish_reason", "stop")
             except Exception as e:
                 # Provider 全部不可用 / 网络不可达 / 鉴权失败 / 响应畸形等：转为清晰错误事件，
                 # 避免异常冲出 SSE 生成器导致响应流中断（浏览器侧表现为「network error」）。
@@ -336,6 +343,26 @@ class Agent:
                     return
                 yield {"type": "done", "note": "模型未返回内容"}
                 return
+            # 续写补全：若上一轮因达到 max_tokens 而被截断（finish_reason=="length"），
+            # 追加「继续写」指令让模型接着上文输出剩余部分，最多续 3 次，彻底避免
+            # 「回复内容不完整」。即使 agent.max_tokens 已调大，此兜底仍能兜住个别超长报告。
+            _cont_budget = 3
+            while finish_reason == "length" and _cont_budget > 0:
+                _cont_budget -= 1
+                messages.append({"role": "assistant", "content": final})
+                messages.append({
+                    "role": "user",
+                    "content": "（请严格接着上文继续输出尚未写完的部分，不要重复已写内容，不要重新开头。）",
+                })
+                _cont_resp = await self.llm.chat(
+                    messages, model=model, tools=None,
+                    max_tokens=self.cfg.agent.max_tokens,
+                )
+                if not isinstance(_cont_resp, dict) or "choices" not in _cont_resp:
+                    break
+                _cont_choice = _cont_resp["choices"][0]["message"]
+                final += _cont_choice.get("content", "")
+                finish_reason = _cont_resp["choices"][0].get("finish_reason", "stop")
             # 直接流式输出最终回答：self.llm.chat()（非流式）已在 step 起始处拿到完整
             # content（final），无需再调一次 self.llm.stream() 重新生成。这样既省一次推理往返，
             # 也避免「最终回答生成期间长时间无 SSE 业务事件」导致前端空闲计时器误判断流
