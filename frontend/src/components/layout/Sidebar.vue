@@ -20,7 +20,7 @@ const selectedKey = computed(() => route.name as string)
 
 // 菜单可见性由角色权限驱动（与后端 RBAC 同源）：未配置 perm 的项对所有登录用户可见
 const PERM: Record<string, string> = {
-  chat: 'chat',
+  // chat 为产品主入口，对所有登录用户可见（路由 /chat 本身无权限守卫，与 settings 同策略）
   knowledge: 'knowledge:read',
   models: 'models:read',
   skills: 'modules:read',

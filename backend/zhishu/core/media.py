@@ -36,6 +36,8 @@ class MediaStore:
             owner_dir = os.path.join(self.root, owner)
             os.makedirs(owner_dir, exist_ok=True)
             path = os.path.join(owner_dir, name)
+            with open(path, "wb") as f:
+                f.write(data)
             return f"{self.url_prefix}/{owner}/{name}"
         path = os.path.join(self.root, name)
         with open(path, "wb") as f:

@@ -180,6 +180,38 @@ async function onToggle(p: { name: string; enabled: boolean }) {
   }
 }
 
+// —— 安装内置解析插件（接驳后端 /api/v1/plugins/install，闭环「按需安装」能力）——
+const showInstall = ref(false)
+const installName = ref('parser-pdf')
+const installSubmitting = ref(false)
+const BUILTIN_PLUGINS = [
+  { label: 'parser-pdf（PDF 文本解析，服务端托管）', value: 'parser-pdf' },
+  { label: 'parser-docx（Word 文档解析）', value: 'parser-docx' },
+  { label: 'parser-xlsx（Excel 表格解析）', value: 'parser-xlsx' },
+]
+function openInstall() {
+  installName.value = 'parser-pdf'
+  showInstall.value = true
+}
+async function installBuiltin() {
+  if (!installName.value) {
+    message.warning('请选择要安装的插件')
+    return
+  }
+  installSubmitting.value = true
+  try {
+    await api.installPlugin(installName.value)
+    message.success(`已安装 ${installName.value}`)
+    showInstall.value = false
+    await load()
+    await api.refreshPlugins().catch(() => {})
+  } catch (e: any) {
+    message.error(e?.message || '安装失败')
+  } finally {
+    installSubmitting.value = false
+  }
+}
+
 onMounted(load)
 watch(actAs, () => load())
 </script>
@@ -192,14 +224,17 @@ watch(actAs, () => load())
         <div class="header-sub">插件可声明若干「自定义工具」（shell 命令 / HTTP 接口）。启用后，这些工具会注册到 Agent，可在对话中直接调用。</div>
         <NTag v-if="!app.can('modules:write')" size="small" type="default" :bordered="false" style="margin-top:6px">只读模式</NTag>
       </div>
-      <NButton v-if="app.can('modules:write')" type="primary" size="small" @click="openCreate">
-        <template #icon>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-        </template>
-        新建插件
-      </NButton>
+      <div v-if="app.can('modules:write')" style="display:flex; gap:8px;">
+        <NButton type="primary" size="small" @click="openCreate">
+          <template #icon>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </template>
+          新建插件
+        </NButton>
+        <NButton size="small" @click="openInstall">安装内置插件</NButton>
+      </div>
     </header>
 
     <div class="module-content">
@@ -281,6 +316,21 @@ watch(actAs, () => load())
         </div>
       </template>
     </NModal>
+
+    <NModal v-model:show="showInstall" title="安装内置解析插件" preset="card" style="width: 520px; max-width: 94vw;">
+      <NForm>
+        <NFormItem label="内置插件">
+          <NSelect v-model:value="installName" :options="BUILTIN_PLUGINS" />
+        </NFormItem>
+        <div class="install-hint">内置解析插件由服务端托管脚本提供，安装后自动注册对应解析工具，可用于文档附件解析。自定义插件请使用「新建插件」。</div>
+      </NForm>
+      <template #footer>
+        <div class="modal-footer">
+          <NButton @click="showInstall = false">取消</NButton>
+          <NButton type="primary" :loading="installSubmitting" @click="installBuiltin">安装</NButton>
+        </div>
+      </template>
+    </NModal>
   </div>
 </template>
 
@@ -296,4 +346,5 @@ watch(actAs, () => load())
 .tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .fg { margin-bottom: 8px; }
 .share-hint { font-size: 12px; color: $text-muted; margin-left: 10px; }
+.install-hint { font-size: 12px; color: $text-muted; margin: 4px 0 8px; line-height: 1.5; }
 </style>
