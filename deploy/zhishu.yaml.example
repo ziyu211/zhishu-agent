@@ -81,6 +81,14 @@ agent:
   nudge_interval: 8                  # 每完成 N 次工具调用注入「该存记忆/造技能」内部提醒；0=关闭
   reflection_enabled: false         # 后台记忆反思：每轮后 fork 廉价 LLM 把用户事实沉淀进 MEMORY.md（opt-in）
 
+  # —— 企业级多用户保护（并发 / 配额 / 委派熔断）——
+  # 0 = 不限制（单用户/本地可保持 0）。多用户部署建议显式开启并发上限以保护 GPU/API 额度，
+  # daily_quota 作为成本控制 opt-in，按需开启。
+  max_concurrent_global: 16         # 全局同时在跑对话上限；按实例 GPU/API 额度调整（典型 16~32）
+  max_concurrent_per_user: 4        # 单用户并发上限；防止单一用户占满资源（典型 2~8）
+  daily_quota_per_user: 0           # 单用户每日对话配额；0=不限，典型 100~500（视成本）
+  delegate_timeout: 300.0           # 委派子智能体整体超时（秒）；0=关闭熔断
+
 # 网页搜索（web_search 工具后端；受 security.outbound_allow 出网闸门约束）
 web_search:
   backend: bing_cn         # bing_cn(零Key,国内可达,默认) | duckduckgo(零Key,海外) | tavily(需api_key) | bing(需api_key)
