@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from .base import Tool, ToolContext, Toolset
@@ -68,9 +69,36 @@ class ToolRegistry:
             return "[已拦截] 当前为内网隔离模式，禁止访问外部网络。如需开启，请在配置中设置 security.outbound_allow=true 并配置白名单。"
         try:
             result = await tool.handler(args or {}, ctx)
-            return str(result)[:8000]  # 防止超大输出
+            payload = str(result)[:8000]  # 防止超大输出
         except Exception as e:
+            # 动作级审计：即使工具异常也留痕（谁、哪个智能体、调了什么、是否失败）
+            self._audit_tool(ctx, name, args, ok=False, err=str(e))
             return f"[工具执行异常] {name}: {e}"
+        ok = not payload.startswith(("[工具错误]", "[工具执行异常]", "[已拦截]"))
+        self._audit_tool(ctx, name, args, ok=ok, err="")
+        return payload
+
+    @classmethod
+    def _audit_tool(cls, ctx, name: str, args: dict, ok: bool, err: str) -> None:
+        """动作级审计（企业合规）：记录工具调用归属于哪个用户/智能体。
+
+        失败静默、绝不因审计异常阻断工具执行；审计库未就绪（如测试）时直接跳过。
+        """
+        try:
+            from ...context import get_ctx
+            g = get_ctx()
+            if g is None or getattr(g, "audit", None) is None:
+                return
+            agent = getattr(ctx, "agent_name", "") or "supervisor"
+            args_sum = json.dumps(args, ensure_ascii=False)[:160]
+            status = "ok" if ok else f"fail:{err[:80]}"
+            g.audit.log(
+                getattr(ctx, "user", "anonymous"),
+                "tool_call",
+                f"agent={agent} name={name} status={status} args={args_sum}",
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 自发现 + 工具集

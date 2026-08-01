@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from typing import AsyncIterator, Optional
@@ -257,7 +258,8 @@ class Agent:
                     yield {"type": "tool_call", "name": name, "args": args}
                     if name == DELEGATE_TOOL_NAME and agent_name is None:
                         result = ""
-                        async for ev in self._run_delegate(args, session, owner, is_admin):
+                        async for ev in self._run_delegate(args, session, owner, is_admin,
+                                                          user_role=user_role):
                             if ev.get("type") == "delegate_end":
                                 # 捕获最终结果用于主消息，同时将 delegate_end 转发给前端
                                 # 以关闭委派 UI（与 delegate_start 对称）
@@ -514,7 +516,8 @@ class Agent:
     # 多 Agent 委派：主管调用 delegate_to_agent 时，实时运行子智能体并转发事件
     # =====================================================================
     async def _run_delegate(self, args: dict, session: str, owner: Optional[str],
-                            is_admin: bool = False) -> AsyncIterator[dict]:
+                            is_admin: bool = False,
+                            user_role: Optional[str] = None) -> AsyncIterator[dict]:
         from ...context import get_ctx
 
         name = args.get("agent_name") or args.get("agent")
@@ -538,23 +541,80 @@ class Agent:
             return
 
         g = get_ctx()
+        # 委派审计（动作级）：记录谁把任务委派给了哪个子智能体（企业合规留痕）
+        try:
+            if getattr(g, "audit", None) is not None:
+                g.audit.log(owner or "anonymous", "delegate",
+                            f"target={name} task={(task or '')[:160]}")
+        except Exception:
+            pass
+        # 子智能体使用独立 scratch 会话，避免其推理过程污染主会话历史；
+        # 主管线程仅收到最终结论（delegate_end.result），主对话保持干净（P0-2 会话隔离）。
+        scratch_session = f"{session}::delegate::{name}"
         sub_ctx = ToolContext(
             kb=g.kb, security=g.cfg.security,
-            user=owner or "anonymous", session=session, is_admin=is_admin,
+            user=owner or "anonymous", session=scratch_session,
+            is_admin=is_admin, user_role=user_role or "", agent_name=name,
         )
+        # memory_manager=None：子智能体输出不写用户长期记忆（避免污染；主管最终回答已涵盖）
         sub = Agent(g.cfg, g.llm, g.kb, g.memory, sub_ctx, media=g.media,
-                    context_engine=self.context_engine,
-                    memory_manager=g.memory_manager)
-        collected = []
-        async for ev in sub.run(task, session, model=meta.get("model"),
-                                owner=owner, agent_name=name, is_admin=is_admin,
-                                user_role=user_role):
-            et = ev.get("type")
-            if et == "token":
-                collected.append(ev["text"])
-                yield {"type": "token", "text": ev["text"], "agent": name}
-            elif et in ("tool_call", "tool_result"):
-                yield {**ev, "agent": name}
+                    context_engine=self.context_engine, memory_manager=None)
+
+        # 整体超时熔断（P1-1）：用队列在后台消费子智能体事件流，主协程按「整体超时」
+        # 抽取并实时转发；超时即取消消费任务并返回错误，避免子智能体卡死拖挂主 SSE 流。
+        timeout = float(getattr(self.cfg.agent, "delegate_timeout", 0) or 0)
+        collected: list[str] = []
+        q: "asyncio.Queue" = asyncio.Queue()
+
+        async def _consume():
+            try:
+                async for ev in sub.run(task, scratch_session, model=meta.get("model"),
+                                        owner=owner, agent_name=name,
+                                        is_admin=is_admin, user_role=user_role):
+                    await q.put(ev)
+            except Exception as e:  # noqa: BLE001
+                await q.put({"type": "_delegate_error", "message": str(e)[:200]})
+            finally:
+                await q.put(None)  # 哨兵：正常结束
+
+        cons = asyncio.create_task(_consume())
+        timed_out = False
+        deadline = (time.monotonic() + timeout) if timeout > 0 else None
+        try:
+            while True:
+                remaining = None
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    timed_out = True
+                    break
+                if ev is None:
+                    break
+                if ev.get("type") == "_delegate_error":
+                    yield {"type": "delegate_end", "agent": name,
+                           "result": f"[委派失败] {ev.get('message', '未知错误')}"}
+                    return
+                et = ev.get("type")
+                if et == "token":
+                    collected.append(ev["text"])
+                    yield {"type": "token", "text": ev["text"], "agent": name}
+                elif et in ("tool_call", "tool_result"):
+                    yield {**ev, "agent": name}
+        finally:
+            if not cons.done():
+                cons.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await cons
+        if timed_out:
+            yield {"type": "delegate_end", "agent": name,
+                   "result": f"[委派超时] 子智能体 {name} 超过 {timeout:.0f}s 未完成，已中止"
+                             f"（已收集 {len(collected)} 字结论）。"}
+            return
         yield {"type": "delegate_end", "agent": name, "result": "".join(collected)}
 
     # =====================================================================

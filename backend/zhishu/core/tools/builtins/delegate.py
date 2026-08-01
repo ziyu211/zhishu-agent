@@ -45,13 +45,23 @@ async def delegate_to_agent(args: dict, ctx) -> str:
         return f"[委派失败] 未找到子智能体：{name}"
     if not is_enabled(name):
         return f"[委派失败] 子智能体已停用：{name}"
+    # 委派审计（动作级）：记录谁把任务委派给了哪个子智能体
+    try:
+        g.audit.log(ctx.user or "anonymous", "delegate",
+                    f"target={name} task={(task or '')[:160]}")
+    except Exception:
+        pass
+    # 子智能体使用独立 scratch 会话，避免污染主会话历史；标注 agent_name 供工具审计归属
+    scratch_session = f"{ctx.session}::delegate::{name}"
     sub_ctx = ToolContext(
         kb=g.kb, security=g.cfg.security,
-        user=ctx.user or "anonymous", session=ctx.session, is_admin=is_admin,
+        user=ctx.user or "anonymous", session=scratch_session, is_admin=is_admin,
+        agent_name=name,
     )
-    sub = Agent(g.cfg, g.llm, g.kb, g.memory, sub_ctx, media=g.media)
+    sub = Agent(g.cfg, g.llm, g.kb, g.memory, sub_ctx, media=g.media,
+                memory_manager=None)
     chunks = []
-    async for ev in sub.run(task, ctx.session, model=meta.get("model"),
+    async for ev in sub.run(task, scratch_session, model=meta.get("model"),
                             owner=ctx.user, agent_name=name, is_admin=is_admin):
         if ev.get("type") == "token":
             chunks.append(ev["text"])

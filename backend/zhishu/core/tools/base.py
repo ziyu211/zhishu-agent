@@ -63,6 +63,7 @@ class ToolContext:
     session: str = "default"
     is_admin: bool = False
     user_role: str = ""
+    agent_name: str = ""        # 当前运行所属智能体名；空字符串=主管（supervisor）
 
     def for_run(
         self,
@@ -74,11 +75,13 @@ class ToolContext:
         """派生一份**本次运行专用**的上下文副本（浅拷贝）。
 
         共享单例（AppContext.tool_ctx）保持只读，绝不在其上就地改 user/session，
-        否则并发请求会互相覆盖身份（fail-open 串号）。
+        否则并发请求会互相覆盖身份（fail-open 串号）。agent_name 一并保留，
+        使工具审计能正确归属到「主管」或某个「子智能体」。
         """
         u = (user or "").strip() or "anonymous"
         return replace(self, user=u, session=(session or self.session),
-                       is_admin=bool(is_admin), user_role=(user_role or ""))
+                       is_admin=bool(is_admin), user_role=(user_role or ""),
+                       agent_name=self.agent_name)
 
 
 @dataclass

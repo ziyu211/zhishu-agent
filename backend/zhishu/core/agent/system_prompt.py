@@ -12,7 +12,7 @@ from typing import Optional
 from ..config import ZhishuConfig
 from ..rag import KnowledgeBase
 from ..agents_runtime import build_agent_system_prompt
-from ..modules import build_agent_context_prompt
+from ..modules import build_agent_context_prompt, build_user_memory_prompt
 
 # 工具使用指引（主管模式注入，帮助模型聚焦稳定可用的解析路径，避免调用
 # 已废弃或易失败的旧插件导致空转/死循环）。
@@ -58,12 +58,28 @@ def build_system_prompt(
 ) -> str:
     """组装系统提示。
 
-    agent_name 非空 → 子智能体模式：仅用其独立人设（不注入全局技能/记忆）。
+    agent_name 非空 → 子智能体模式：以独立人设为 stable，并**继承用户知识库(RAG)与
+    长期记忆**（增强专业性、避免重复询问已有偏好），但**不注入全局技能指令**，以免
+    干扰其专属人设与职责聚焦。
     否则 → 主管模式：stable(全局人设) + volatile(技能/记忆/知识库检索)。
     """
     if agent_name:
         system = build_agent_system_prompt(agent_name)
-        return system or cfg.system_prompt
+        system = system or cfg.system_prompt
+        # 继承用户知识库检索上下文（按 owner 隔离，防跨用户泄露）
+        extras: list[str] = []
+        if kb and query:
+            ctx_text = kb.build_context(query, top_k=5, owner=owner)
+            if ctx_text:
+                extras.append("【内部知识库检索结果，仅用于辅助回答】\n" + ctx_text)
+        # 继承用户长期记忆（MEMORY/USER/SOUL.md，按 owner 隔离）
+        if owner:
+            mem_ctx = build_user_memory_prompt(cfg, owner)
+            if mem_ctx:
+                extras.append(mem_ctx)
+        if extras:
+            system += "\n\n" + "\n\n".join(extras)
+        return system
 
     stable = cfg.system_prompt
 

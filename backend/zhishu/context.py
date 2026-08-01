@@ -13,6 +13,7 @@ from .core.llm import LLMClient
 from .core.rag import KnowledgeBase
 from .core.memory import MemoryStore, MemoryManager
 from .core.security import AuthService, AuditLog, UserStore, Crypto
+from .core.concurrency import init_limiter
 from .core.redact import Redactor, set_default as set_default_redactor
 from .core.credentials import ProviderStore
 from .core.conversations import ConversationStore
@@ -73,6 +74,8 @@ class AppContext:
         self.modules = ModuleIntegrator(cfg)
         # 定时任务调度器（生命周期在 main lifespan 中 start/stop）
         self.cron = CronScheduler(cfg)
+        # 企业级并发/配额限流（全局信号量 + 单用户信号量 + 每日配额落盘）
+        init_limiter(cfg, quota_path=os.path.join(cfg.server.data_dir, "quota_usage.json"))
 
     # ------------------------------------------------------------------
     # 运行时设置（用户自助开关，持久化于 config.override.json，重启后自动复现）

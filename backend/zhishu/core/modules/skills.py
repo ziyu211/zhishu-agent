@@ -141,6 +141,15 @@ def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None,
     return "\n\n".join(p for p in parts if p)
 
 
+def build_user_memory_prompt(cfg: ZhishuConfig, owner: str | None = None) -> str:
+    """仅取用户长期记忆（MEMORY/USER/SOUL.md），不含技能指令。
+
+    用于「子智能体继承用户记忆」：子智能体应保持专属人设、不被全局技能清单干扰，
+    但仍需感知用户画像/约定/踩坑经验，避免重复询问或违背既有偏好。按 owner 隔离。
+    """
+    return "\n\n".join(p for p in _read_memory_files(cfg, owner) if p)
+
+
 # ===========================================================================
 # 技能自进化闭环（对标 Hermes learning loop）
 # 复杂任务（步数/工具数达标）且成功完成后，由 LLM 把「原始请求 + 工具调用轨迹 + 最终答案」

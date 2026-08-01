@@ -16,6 +16,7 @@ from ..context import get_ctx
 from ..core.agent import Agent, build_context_engine
 from ..core import parsers
 from ..core.rag import read_file_text
+from ..core.concurrency import get_limiter, ConcurrencyLimitError
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
@@ -242,6 +243,18 @@ async def chat(req: ChatReq, user=require_auth("chat")):
         target = req.agent
 
     async def event_gen():
+        # 企业级并发/配额限流（P0-1）：在整段对话流生命周期内持有信号量，真实反映
+        # 「活跃会话」占用；被拒时返回友好错误而非占用资源。子智能体委派属于嵌套执行，
+        # 不再二次占额（避免死锁）。
+        limiter = get_limiter()
+        acquired = False
+        try:
+            await limiter.acquire(owner)
+            acquired = True
+        except ConcurrencyLimitError as e:
+            yield {"data": json.dumps(
+                {"type": "error", "message": str(e)}, ensure_ascii=False)}
+            return
         try:
             async for ev in agent.run(req.message, memory_session, req.model,
                                       image=req.image, owner=owner, agent_name=target,
@@ -259,6 +272,9 @@ async def chat(req: ChatReq, user=require_auth("chat")):
                 {"type": "error",
                  "message": f"对话处理出错：{e}。请稍后重试，或检查模型/附件配置。"},
                 ensure_ascii=False)}
+        finally:
+            if acquired:
+                await limiter.release(owner)
         ctx.audit.log(user.get("real_u", username), "chat", req.message[:200], f"agent={target or 'supervisor'}")
 
     return EventSourceResponse(

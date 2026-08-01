@@ -10,11 +10,11 @@ from .runtime import (
     sanitize_name, module_dir, DISABLED_KEY, ModuleIntegrator,
 )
 from .plugins import register_plugin_tools
-from .skills import build_agent_context_prompt
+from .skills import build_agent_context_prompt, build_user_memory_prompt
 from .mcp import MCPClient
 
 __all__ = [
     "load_state", "save_state", "read_meta", "write_meta", "delete_module",
     "sanitize_name", "module_dir", "DISABLED_KEY", "ModuleIntegrator",
-    "register_plugin_tools", "build_agent_context_prompt", "MCPClient",
+    "register_plugin_tools", "build_agent_context_prompt", "build_user_memory_prompt", "MCPClient",
 ]
