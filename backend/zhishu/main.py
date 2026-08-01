@@ -28,8 +28,9 @@ async def lifespan(app: FastAPI):
     try:
         import asyncio
         asyncio.create_task(get_ctx().modules.refresh())
-        # 初始化外部长期记忆 provider（向量记忆 opt-in；未开启时 initialize 为 no-op）
-        asyncio.create_task(get_ctx().memory_manager.initialize())
+        # 初始化外部长期记忆 provider（向量记忆 opt-in；未开启时 memory_manager 为 None，跳过）
+        if get_ctx().memory_manager is not None:
+            asyncio.create_task(get_ctx().memory_manager.initialize())
         # 启动定时任务调度器（任务定义持久化，重启后自动续算）
         get_ctx().cron.start()
     except Exception as _e:
