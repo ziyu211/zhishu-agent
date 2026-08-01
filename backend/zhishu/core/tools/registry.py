@@ -72,10 +72,10 @@ class ToolRegistry:
             payload = str(result)[:8000]  # 防止超大输出
         except Exception as e:
             # 动作级审计：即使工具异常也留痕（谁、哪个智能体、调了什么、是否失败）
-            self._audit_tool(ctx, name, args, ok=False, err=str(e))
+            cls._audit_tool(ctx, name, args, ok=False, err=str(e))
             return f"[工具执行异常] {name}: {e}"
         ok = not payload.startswith(("[工具错误]", "[工具执行异常]", "[已拦截]"))
-        self._audit_tool(ctx, name, args, ok=ok, err="")
+        cls._audit_tool(ctx, name, args, ok=ok, err="")
         return payload
 
     @classmethod
