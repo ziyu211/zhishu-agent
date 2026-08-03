@@ -69,6 +69,7 @@ class AgentBody(BaseModel):
     model: str | None = None
     tools: object = "all"          # "all" | "none" | list[str]
     max_steps: int | None = None
+    sub_agents: list[str] = []     # 协调类智能体显式声明的成员清单（供覆盖度闸门精确推断）
     shared: bool = False           # 显式共享：对他人可见可用
     share_with: list[str] = []     # 角色级共享：仅这些角色可见可用（shared=False 时生效）
 
@@ -81,6 +82,7 @@ class AgentUpdate(BaseModel):
     model: str | None = None
     tools: object = None
     max_steps: int | None = None
+    sub_agents: Optional[list[str]] = None
     shared: Optional[bool] = None
     share_with: Optional[list[str]] = None
 
@@ -135,6 +137,7 @@ async def create_agent(body: AgentBody, user=require_auth("agents:write")):
         "model": body.model,
         "tools": body.tools,
         "max_steps": body.max_steps,
+        "sub_agents": list(body.sub_agents or []),
         "owner": _username(user),
         "shared": bool(body.shared),
         "share_with": list(body.share_with or []),
@@ -149,7 +152,7 @@ async def create_agent(body: AgentBody, user=require_auth("agents:write")):
 async def update_agent(name: str, body: AgentUpdate, user=require_auth("agents:write")):
     _guard_edit(name, user)
     meta = read_agent_meta(name)
-    for k in ("description", "version", "system_prompt", "model", "tools", "max_steps", "shared"):
+    for k in ("description", "version", "system_prompt", "model", "tools", "max_steps", "sub_agents", "shared"):
         v = getattr(body, k)
         if v is not None:
             meta[k] = v

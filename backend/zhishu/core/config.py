@@ -239,6 +239,11 @@ class AgentConfig:
     # 防止子智能体因工具卡死/模型长思考拖挂主 SSE 流（曾表现为「长任务不出结果」）。
     # 超时后中止该次委派并返回错误串给主管，不污染主会话。
     delegate_timeout: float = 300.0
+    # 委派最大深度：主管(depth=0) 可委派协调类子智能体(depth=1)，协调类再分派给
+    # 执行型子智能体(depth=2)。设为 1 时协调类子智能体不能再委派（只支持 主管→单级子智能体）；
+    # 设为 3 支持「主管→总监(Orchestrator)→研究员/因子/策略/风控」两级编排，同时以
+    # depth>=3 为递归地板（任何子智能体最多再委派一层），从根上杜绝 A→B→A 递归风暴。
+    delegate_max_depth: int = 3
 
 
 @dataclass
@@ -365,6 +370,12 @@ class ZhishuConfig:
         )
         # 仅保留 enabled 的 provider
         cfg.providers = {k: v for k, v in cfg.providers.items() if v.enabled}
+        # 环境变量覆盖：出网闸门。容器内 /app/deploy/zhishu.yaml 写在可写层，
+        # 一旦 docker rm 重建容器即回到镜像默认 False；用 -e ZHISHU_OUTBOUND_ALLOW=1
+        # 可在部署时固化，避免依赖镜像可写层（仅在显式设置时覆盖 YAML 值）。
+        _env_outbound = os.environ.get("ZHISHU_OUTBOUND_ALLOW")
+        if _env_outbound is not None:
+            cfg.security.outbound_allow = _env_outbound.strip().lower() in ("1", "true", "yes", "on")
         return cfg
 
     def get_provider(self, key: str) -> Optional[ProviderConfig]:

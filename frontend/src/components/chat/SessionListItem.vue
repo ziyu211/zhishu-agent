@@ -23,6 +23,12 @@ const lastText = computed(() => {
   return (last.role === 'user' ? '' : '') + (last.content || '(工具调用)').slice(0, 40)
 })
 
+const isRunning = computed(() => {
+  return props.session.messages.some(
+    (m) => m.role === 'assistant' && m.isStreaming === true
+  )
+})
+
 const menuOptions = computed(() => [
   { label: props.pinned ? '取消置顶' : '置顶', key: 'pin' },
   { label: '重命名', key: 'rename' },
@@ -42,6 +48,9 @@ function onSelect(key: string) {
       <div class="session-item-title-row">
         <svg v-if="pinned" width="11" height="11" viewBox="0 0 24 24" fill="currentColor" class="session-pin-icon"><path d="M16 3l5 5-4 1-3 3-3-3-4 4-1-1 4-4-3-3 3-3 4 4 3-3z" transform="rotate(45 12 12)"/></svg>
         <span class="session-item-title">{{ session.title }}</span>
+        <svg v-if="isRunning" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" class="session-running-icon">
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+        </svg>
       </div>
       <div class="session-item-time">{{ lastText }}</div>
       <div v-if="showOwner && session.owner" class="session-item-owner">@{{ session.owner }}</div>
@@ -96,5 +105,16 @@ function onSelect(key: string) {
   border-radius: 3px;
   transition: all $transition-fast;
   &:hover { color: $error; background: rgba(var(--error-rgb), 0.1); }
+}
+
+.session-running-icon {
+  flex-shrink: 0;
+  color: $accent-primary;
+  animation: session-spin 1s linear infinite;
+}
+
+@keyframes session-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 </style>

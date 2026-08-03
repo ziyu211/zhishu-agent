@@ -6,14 +6,16 @@ from ..base import tool, ToolContext, get_current_role
 
 @tool(
     "delegate_to_agent",
-    "（仅主管智能体可用）把任务委派给某个子智能体协同处理。"
-    "传入子智能体名称与任务，引擎会以其独立人设与工具集运行并返回结果；"
-    "你可基于其返回继续综合作答。可选子智能体见管理后台「智能体」模块。",
+    "【主管首选工具】把用户任务整体或分步委派给指定子智能体。"
+    "当任务涉及专业领域、需要多步骤研究、或属于某个子智能体的专长时，"
+    "必须优先调用本工具，而不是自己调用 web_search/code_exec/read_file 等执行工具。"
+    "传入子智能体名称 agent_name 与任务 task，引擎会以其独立人设与工具集运行并实时返回结果；"
+    "你可基于其返回继续综合作答或再次委派。可选子智能体见系统提示中的「可委派智能体」清单。",
     {
         "type": "object",
         "properties": {
-            "agent_name": {"type": "string", "description": "子智能体名称，如 translator / coder / summarizer"},
-            "task": {"type": "string", "description": "交给该子智能体的具体任务描述"},
+            "agent_name": {"type": "string", "description": "子智能体名称，如 Orchestrator / Research / coder / translator"},
+            "task": {"type": "string", "description": "交给该子智能体的完整任务描述，保留所有上下文与要求"},
         },
         "required": ["agent_name", "task"],
     },

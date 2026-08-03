@@ -38,6 +38,7 @@ class ProviderTransport(ABC):
         temperature: float = 0.7,
         max_tokens: int = 2048,
         stream: bool = False,
+        tool_choice: Any = "auto",
         **extra: Any,
     ) -> dict:
         """组装该 Provider 的 chat 请求体。"""
@@ -49,7 +50,7 @@ class ProviderTransport(ABC):
         }
         if tools:
             kw["tools"] = self.convert_tools(tools)
-            kw["tool_choice"] = "auto"
+            kw["tool_choice"] = tool_choice
         kw.update(extra)
         return kw
 

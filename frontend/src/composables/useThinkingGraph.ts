@@ -9,7 +9,7 @@
  * 全部在浏览器端运行，不引入任何 npm 依赖；抽取为启发式，足够在对话窗口
  * 内给用户一个「看见模型在想什么」的结构化视图。
  */
-import type { Msg } from '@/stores/chat'
+import type { Msg, AgentDelegation } from '@/stores/chat'
 
 /* ───────────────────────── 推理步骤图 ───────────────────────── */
 
@@ -22,6 +22,8 @@ export interface ThinkingStep {
   kind: StepKind
   /** 编号层级（如 "1.2.3" → 2），用于缩进展示 */
   depth: number
+  /** 该步骤归属的子智能体（多 Agent 委派场景），用于步骤上展示智能体标签 */
+  agent?: string
 }
 
 const KIND_KEYWORDS: Record<StepKind, RegExp> = {
@@ -150,6 +152,14 @@ export interface ConceptNode {
   id: string
   label: string
   weight: number
+  /** 节点语义：概念词（默认）或智能体（委派流程图）。 */
+  kind?: 'concept' | 'agent'
+  /** 智能体节点角色：root=主/coordinator=管理/executor=具体/unknown。 */
+  role?: DelegRole
+  /** 智能体节点状态（来自最近一次委派结果）。 */
+  status?: DelegStatus | 'idle'
+  /** 是否为「结束」流程气泡。 */
+  isEnd?: boolean
 }
 
 export interface ConceptEdge {
@@ -314,6 +324,25 @@ export function sessionReasoning(messages: Msg[]): string {
     .filter((m) => m.role === 'assistant' && m.reasoning && m.reasoning.trim())
     .map((m) => m.reasoning as string)
     .join('\n\n')
+}
+
+/**
+ * 汇总一个会话里所有消息的「委派推理链」（agentTrace）。
+ * 多智能体协作时，主智能体的每一步委派 / 子智能体工具调用 / 返回都被结构化为
+ * ThinkingStep，这里按消息顺序拼合并重新编号，作为思维图谱「推理步骤」的优先数据源。
+ */
+export function sessionAgentTrace(messages: Msg[]): ThinkingStep[] {
+  const out: ThinkingStep[] = []
+  let i = 0
+  for (const m of messages) {
+    const trace = (m as { agentTrace?: ThinkingStep[] }).agentTrace
+    if (trace && trace.length) {
+      for (const st of trace) {
+        out.push({ ...st, id: `tg_${i}`, index: ++i })
+      }
+    }
+  }
+  return out
 }
 
 /** 中心核节点 id——「细胞」式基础点，始终存在于概念图谱中。 */
@@ -568,4 +597,153 @@ export function createForceSimulation(
 export function nodeRadius(weight: number, maxWeight: number): number {
   const t = maxWeight > 0 ? weight / maxWeight : 0.5
   return 7 + Math.sqrt(t) * 12
+}
+
+/* ───────────────────────── 多智能体协作调用图（call graph） ─────────────────────────
+ * 数据来自 Msg.agentDelegations（由 chat store 在 SSE 流式处理时结构化记录）。
+ * 回答用户关心的三件事：① 谁发出（caller）② 调用了哪个 agent（callee）③ 是否出结果（status）。
+ */
+
+export type DelegRole = 'root' | 'coordinator' | 'executor' | 'unknown'
+export type DelegStatus = AgentDelegation['status']
+
+export interface AgentGraphNode {
+  id: string // 智能体名（或 '主管(顶层)'）
+  label: string
+  role: DelegRole
+  status: DelegStatus | 'idle'
+  weight: number
+}
+
+export interface AgentGraphEdge {
+  source: string
+  target: string
+  status: DelegStatus
+  task: string
+}
+
+export interface AgentGraph {
+  nodes: AgentGraphNode[]
+  edges: AgentGraphEdge[]
+}
+
+/** 汇总一个会话里所有消息的委派关系。 */
+export function sessionDelegations(messages: Msg[]): AgentDelegation[] {
+  const out: AgentDelegation[] = []
+  for (const m of messages) {
+    const list = (m as { agentDelegations?: AgentDelegation[] }).agentDelegations
+    if (list && list.length) out.push(...list)
+  }
+  return out
+}
+
+/**
+ * 由扁平的委派记录构建调用图：
+ *  - 节点 = 所有 caller + callee；
+ *  - role：仅作 caller → root；既是 caller 又是 callee → coordinator；仅 callee → executor；
+ *  - 节点 status：取该 agent 作为 callee 的最近一次委派状态；root 由其全部子委派是否完成推导；
+ *  - 边 = 每条委派（caller → callee），按 (source,target) 去重，保留最近一次状态。
+ */
+export function buildAgentGraph(delegs: AgentDelegation[]): AgentGraph {
+  if (!delegs.length) return { nodes: [], edges: [] }
+  const callers = new Set<string>()
+  const callees = new Set<string>()
+  const outCount = new Map<string, number>()
+  const inCount = new Map<string, number>()
+  const lastByCallee = new Map<string, AgentDelegation>()
+  const edgeMap = new Map<string, AgentDelegation>() // src|tgt → 最近一次
+
+  for (const d of delegs) {
+    callers.add(d.caller)
+    callees.add(d.callee)
+    outCount.set(d.caller, (outCount.get(d.caller) || 0) + 1)
+    inCount.set(d.callee, (inCount.get(d.callee) || 0) + 1)
+    lastByCallee.set(d.callee, d)
+    edgeMap.set(`${d.caller}|${d.callee}`, d)
+  }
+
+  const names = new Set<string>([...callers, ...callees])
+  const nodes: AgentGraphNode[] = [...names].map((id) => {
+    const isCaller = callers.has(id)
+    const isCallee = callees.has(id)
+    let role: DelegRole = 'unknown'
+    if (isCaller && !isCallee) role = 'root'
+    else if (isCallee && isCaller) role = 'coordinator'
+    else if (isCallee && !isCaller) role = 'executor'
+
+    let status: DelegStatus | 'idle'
+    const own = lastByCallee.get(id)
+    if (own) {
+      status = own.status
+    } else {
+      // root 节点本身不作为 callee，由其子委派完成情况推导
+      const children = [...edgeMap.values()].filter((e) => e.caller === id)
+      const anyRunning = children.some((e) => e.status === 'running')
+      const allDone = children.length > 0 && children.every(
+        (e) => e.status === 'done' || e.status === 'empty',
+      )
+      status = anyRunning ? 'running' : allDone ? 'done' : 'idle'
+    }
+    const weight = (outCount.get(id) || 0) + (inCount.get(id) || 0) + 1
+    return { id, label: id, role, status, weight }
+  })
+
+  const edges: AgentGraphEdge[] = [...edgeMap.values()].map((e) => ({
+    source: e.caller,
+    target: e.callee,
+    status: e.status,
+    task: e.task,
+  }))
+  return { nodes, edges }
+}
+
+/** 把调用图转成力导向布局所需的节点/边形状（复用既有 createForceSimulation）。 */
+export function agentGraphToSim(g: AgentGraph): { nodes: { id: string; weight: number }[]; edges: SimEdge[] } {
+  return {
+    nodes: g.nodes.map((n) => ({ id: n.id, weight: n.weight })),
+    edges: g.edges.map((e) => ({ source: e.source, target: e.target, weight: 1 })),
+  }
+}
+
+/**
+ * 细胞气泡形式的委派流程图：把调用图映射成可被既有力导向引擎渲染的
+ * ConceptGraph 形状，每个智能体是一个「细胞气泡」（圆点 + 脉冲膜），
+ * 用角色配色与状态角标表达「主 agent 发出 → 管理 agent 委派 → 具体 agent → 结束」。
+ *  - root 节点作为中心核（最大），coordinator 中层，executor 外层小泡；
+ *  - 额外追加一个「结束」气泡（连回主 agent），形成完整流程闭环；
+ *  - 节点 status 直接写入，由面板据角色/状态着色。
+ */
+export function buildDelegationCellGraph(delegs: AgentDelegation[]): ConceptGraph {
+  const g = buildAgentGraph(delegs)
+  const nodes: ConceptNode[] = g.nodes.map((n) => ({
+    id: n.id,
+    label: n.id,
+    weight: (n.role === 'root' ? 5 : n.role === 'coordinator' ? 3 : 1.4) + n.weight * 0.3,
+    kind: 'agent',
+    role: n.role,
+    status: n.status,
+  }))
+  const edges: ConceptEdge[] = g.edges.map((e) => ({
+    source: e.source,
+    target: e.target,
+    weight: 1,
+  }))
+  // 补充「结束」气泡：连回主 agent，使「主→管理→具体→结束」流程闭环
+  const root = g.nodes.find((n) => n.role === 'root')
+  if (root) {
+    const allDone =
+      g.edges.length > 0 && g.edges.every((e) => e.status === 'done' || e.status === 'empty')
+    const anyRunning = g.edges.some((e) => e.status === 'running')
+    nodes.push({
+      id: '__end__',
+      label: '结束',
+      weight: 4,
+      kind: 'agent',
+      role: 'root',
+      status: allDone ? 'done' : anyRunning ? 'running' : 'idle',
+      isEnd: true,
+    })
+    edges.push({ source: root.id, target: '__end__', weight: 1.2 })
+  }
+  return { nodes, edges }
 }

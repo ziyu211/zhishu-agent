@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 
@@ -54,6 +54,37 @@ def _extract_upstream_detail(resp: httpx.Response) -> str:
     return ""
 
 
+# 对话级瞬时故障重试：多智能体编排会在数秒内密集打同一个 Provider，很容易撞上
+# 限流（429）。此前 429 会直接把该 Provider 判定为失败、遍历完回退链后抛
+# 「所有 LLM Provider 均不可用」，表现为子智能体整体空输出。此处对**瞬时**故障
+# （限流 / 网关抖动 / 超时）做指数退避重试，鉴权失败等永久性错误则立即失败不重试。
+_TRANSIENT_STATUS = {408, 429, 500, 502, 503, 504, 529}
+_LLM_MAX_RETRIES = 5
+_LLM_RETRY_BASE = 1.5
+_LLM_RETRY_MAX = 15.0
+
+
+def _retry_after_seconds(exc: Exception) -> Optional[float]:
+    """尊重上游 Retry-After 响应头（秒 / HTTP-date 两种格式只解析前者）。"""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    try:
+        v = resp.headers.get("Retry-After")
+        return max(0.0, min(float(v), _LLM_RETRY_MAX)) if v else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError,
+                        httpx.RemoteProtocolError, httpx.PoolTimeout)):
+        return True
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None)
+    return code in _TRANSIENT_STATUS
+
+
 class LLMClient:
     """统一 LLM 客户端：封装 chat / stream / embed，并内置回退链。"""
 
@@ -78,6 +109,7 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         prefer: Optional[str] = None,
+        tool_choice: Any = "auto",
     ) -> dict:
         if self.api_mode == "moa":
             from ..agent.moa import MoAClient
@@ -89,11 +121,25 @@ class LLMClient:
         chain = self._build_chain(model)
         last_err: Optional[Exception] = None
         for pc, mdl in chain:
-            try:
-                return await self._chat_once(pc, mdl, messages, tools, temperature, max_tokens)
-            except Exception as e:
-                last_err = e
-                continue
+            for attempt in range(_LLM_MAX_RETRIES + 1):
+                try:
+                    return await self._chat_once(pc, mdl, messages, tools,
+                                                 temperature, max_tokens, tool_choice)
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    if attempt >= _LLM_MAX_RETRIES or not _is_transient(e):
+                        break  # 永久性错误（401/400/模型不存在）→ 立刻切下一个 Provider
+                    delay = _retry_after_seconds(e)
+                    if delay is None:
+                        # 指数退避 + 抖动，避免多个子智能体同步重试再次撞满限流窗口
+                        delay = min(_LLM_RETRY_BASE * (2 ** attempt), _LLM_RETRY_MAX)
+                        delay *= (0.7 + random.random() * 0.6)
+                    await asyncio.sleep(delay)
+        if getattr(getattr(last_err, "response", None), "status_code", None) == 429:
+            raise RuntimeError(
+                f"模型服务持续限流（HTTP 429），已重试 {_LLM_MAX_RETRIES} 次仍失败。"
+                "多智能体编排会在短时间内密集调用模型，请降低并发/减少子智能体数量，"
+                "或在「模型管理」中再配置一个 Provider 作为回退。")
         raise RuntimeError(f"所有 LLM Provider 均不可用：{last_err}")
 
     @staticmethod
@@ -146,11 +192,12 @@ class LLMClient:
             )
         return chain
 
-    async def _chat_once(self, pc, model, messages, tools, temperature, max_tokens) -> dict:
+    async def _chat_once(self, pc, model, messages, tools, temperature, max_tokens,
+                         tool_choice: Any = "auto") -> dict:
         transport = get_transport(self.api_mode)
         kw = transport.build_kwargs(
             messages, tools, temperature=temperature, max_tokens=max_tokens,
-            stream=False, model=model,
+            stream=False, model=model, tool_choice=tool_choice,
         )
         url = pc.base_url.rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json"}

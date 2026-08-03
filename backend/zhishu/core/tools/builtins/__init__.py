@@ -10,4 +10,4 @@ import os
 SANDBOX_ROOT = os.environ.get("ZHISHU_SANDBOX", "data/sandbox")
 os.makedirs(SANDBOX_ROOT, exist_ok=True)
 
-from . import terminal, file, web, knowledge, delegate, skills, code_exec, sessions, todo, memory  # noqa: E402,F401
+from . import terminal, file, web, knowledge, delegate, skills, code_exec, sessions, todo, memory, agent_admin  # noqa: E402,F401

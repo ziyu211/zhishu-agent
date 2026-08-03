@@ -11,7 +11,7 @@ from typing import Optional
 
 from ..config import ZhishuConfig
 from ..rag import KnowledgeBase
-from ..agents_runtime import build_agent_system_prompt
+from ..agents_runtime import build_agent_system_prompt, list_agents
 from ..modules import build_agent_context_prompt, build_user_memory_prompt
 
 # 工具使用指引（主管模式注入，帮助模型聚焦稳定可用的解析路径，避免调用
@@ -46,6 +46,66 @@ path 参数传入，代码中用 os.environ['TARGET_FILE'] 读取，结果 print
 4. 若文件实为压缩包，read_file 会自动解包并返回内部文本；若仍拿不到内容，用 code_exec 进一步处理内部条目。"""
 
 
+def _delegate_catalogue(owner: Optional[str], is_admin: bool,
+                      user_role: Optional[str]) -> tuple[str, bool]:
+    """生成主管模式下可见的「可委派智能体」清单并注入路由原则。
+
+    返回 (prompt_text, has_coordinator)。其中 has_coordinator 表示是否存在
+    显式携带 delegate_to_agent 的协调类智能体（如 Orchestrator），供外层
+    判断是否需要对主管工具集做裁剪，强制走委派链路。
+
+    让主管（agent_name=None）在对话中认识具名智能体（如 Orchestrator），
+    从而把复合任务委派给协调类智能体，再由它内部分派给执行体，形成
+    主管 → 协调者 → 执行体 的多级协作链路。"""
+    try:
+        agents = list_agents(username=owner, is_admin=is_admin, user_role=user_role)
+    except Exception:
+        agents = []
+    agents = [a for a in agents if a.get("enabled")]
+    has_coordinator = False
+    lines = ["【可委派智能体（用 delegate_to_agent 协同处理专业任务）】"]
+    for a in agents:
+        name = a.get("name", "")
+        desc = (a.get("description") or "").strip()
+        tools = a.get("tools", "all")
+        # 仅在工具被显式声明含委派时标记为协调类（tools="all" 视为通用执行体，不标记）
+        coord = isinstance(tools, list) and "delegate_to_agent" in tools
+        if coord:
+            has_coordinator = True
+        tag = " 〔可再调度子智能体〕" if coord else ""
+        lines.append(f"- {name}{tag}：{desc}" if desc else f"- {name}{tag}")
+    lines.append("")
+    lines.append("【委派路由原则 —— 必须遵守】")
+    # —— 任务复杂度自检：让主管真正按「输入的问题」判断是否进入多 Agent 协作 ——
+    lines.append("- 收到用户消息后，先做一句话自检：本任务是『单一简单任务』还是『需要多角色 / 多步骤"
+                 "协作的专业任务』？据此决定走哪条路径，严禁无差别地调用 create_team / delegate_to_agent。")
+    lines.append("- 路径 A · 单一简单任务（如：问候闲聊、写诗/文案/邮件、解释概念、翻译改写、"
+                 "单一事实问答、简单计算、读取单个文件等）：你自己直接回答即可，"
+                 "【严禁】调用 delegate_to_agent，更【严禁】无谓地调用 create_team 组建团队。")
+    lines.append("- 路径 B · 需要多角色 / 多步骤协作的专业任务（如投资研究、股票分析、行业调研、"
+                 "量化回测、风险评估、跨模块代码工程、需要并行收集多方资料的综合分析等）："
+                 "才进入下方的「委派 / 建团」流程。")
+    lines.append("- 你是主管，负责『决策与编排』，不直接执行需要专业工具的研究/分析/计算细节。")
+    if has_coordinator:
+        lines.append("- 对属于路径 B 的复合任务（如投资研究、股票分析、行业调研、"
+                     "量化回测、风险评估等），必须整体委派给带「可再调度」标记的协调类智能体"
+                     "（如 Orchestrator 投资总监），由其内部分派给执行智能体。")
+        lines.append("- 铁律：当任务属于路径 B 时，你的第一次模型回复必须伴随至少一个 delegate_to_agent 调用；"
+                     "禁止只输出计划/说明文字而不实际调用工具。路径 A 的简单任务不受此限，直接作答。")
+        lines.append("- 若你在本次会话中调用 create_team 成功组建了团队，必须在面向用户的回复**开头**用醒目区块"
+                     "汇报团队组成（协调者与各成员及其职责），并提示用户可在左侧「智能体」菜单查看这些智能体；"
+                     "之后再继续委派与执行任务。")
+    else:
+        lines.append("- 当前没有可用的协调类智能体。若用户任务属于路径 B（需要多角色 / 多步骤协作，"
+                     "如组建分析师团队、研究项目），或用户**明确要求创建子智能体**，"
+                     "请调用 create_team 工具动态组建「1 个协调者 + N 个执行成员」的团队，"
+                     "创建完成后再将用户任务整体委派给协调者，由其内部分派并汇总。")
+        lines.append("- 注意：不要把路径 A 的简单任务误判为需要建团。仅当用户任务天然需要多角色分工、"
+                     "或显式要求「创建团队 / 建一个 agent」时，才调用 create_team。")
+    lines.append("- 简单单一任务始终可由你直接回答，无需委派，也无需组建团队。")
+    return "\n".join(lines), has_coordinator
+
+
 def build_system_prompt(
     cfg: ZhishuConfig,
     *,
@@ -55,7 +115,7 @@ def build_system_prompt(
     query: Optional[str] = None,
     is_admin: bool = False,
     user_role: Optional[str] = None,
-) -> str:
+) -> tuple[str, bool]:
     """组装系统提示。
 
     agent_name 非空 → 子智能体模式：以独立人设为 stable，并**继承用户知识库(RAG)与
@@ -79,7 +139,7 @@ def build_system_prompt(
                 extras.append(mem_ctx)
         if extras:
             system += "\n\n" + "\n\n".join(extras)
-        return system
+        return system, False
 
     stable = cfg.system_prompt
 
@@ -98,4 +158,8 @@ def build_system_prompt(
     if volatile:
         system += "\n\n" + "\n\n".join(volatile)
     system += "\n\n" + _TOOL_GUIDANCE
-    return system
+    # 主管模式：注入可见智能体清单 + 委派路由原则，使其能自动编排委派给协调类智能体
+    cat, has_coordinator = _delegate_catalogue(owner, is_admin, user_role)
+    if cat:
+        system += "\n\n" + cat
+    return system, has_coordinator

@@ -39,7 +39,7 @@ TOOLSETS: dict[str, Toolset] = {
     "agent": Toolset(
         name="agent",
         description="多 Agent 委派工具（仅主管可用）",
-        tools=["delegate_to_agent"],
+        tools=["delegate_to_agent", "create_team"],
     ),
     "skills": Toolset(
         name="skills",

@@ -23,6 +23,38 @@ export interface AttachmentCard {
   status?: 'stored' | 'parsing' | 'done' | 'error' | 'installing'
 }
 
+/**
+ * 多智能体委派推理链：把会话中发生的「委派 / 子智能体工具调用 / 返回」结构化，
+ * 作为「主智能体的思考与推理链」喂给思维图谱的「推理步骤」Tab。
+ * 字段与 useThinkingGraph 的 ThinkingStep 对齐（id/index/text/kind/depth/agent），
+ * 这样面板可直接渲染，无需二次转换。
+ */
+export interface AgentTraceStep {
+  id: string
+  index: number
+  text: string
+  kind: 'goal' | 'observe' | 'analyze' | 'plan' | 'action' | 'conclude' | 'note'
+  depth: number
+  agent?: string
+}
+
+/** 多 Agent 委派关系的结构化记录：谁发出 → 调用了哪个 agent → 是否出结果。
+ *  用于在「思维图谱·概念图谱」中绘制协作调用图（call graph）。 */
+export interface AgentDelegation {
+  id: string
+  /** 委派方（调用者）。顶层主管记为 '主管(顶层)'；嵌套委派时为其父智能体。 */
+  caller: string
+  /** 被调用的子智能体名 */
+  callee: string
+  /** 委派任务摘要 */
+  task: string
+  /** 返回内容（可能为空） */
+  result: string
+  status: 'running' | 'done' | 'empty' | 'error' | 'timeout'
+  startedAt: number
+  endedAt?: number
+}
+
 export interface Msg {
   id: string
   role: 'user' | 'assistant' | 'system' | 'tool'
@@ -49,6 +81,10 @@ export interface Msg {
   attachment?: AttachmentCard
   // 多 Agent 协作：该消息由某个子智能体产生（在气泡上展示其名称标签）
   agent?: string
+  // 多 Agent 协作：主智能体对本次回复的「委派推理链」（喂给思维图谱·推理步骤）
+  agentTrace?: AgentTraceStep[]
+  // 多 Agent 协作：本次回复的完整委派关系（喂给思维图谱·概念图谱 的协作调用图）
+  agentDelegations?: AgentDelegation[]
 }
 
 /** 输入框中「待发送」的本地附件（发送前在托盘中预览，发送后剥离 file 引用）。 */
@@ -63,6 +99,8 @@ export interface PendingAttachment {
 
 // 原始文件引用（非响应式），用于「安装插件后重新解析」时再次上传
 const _pendingFiles = new Map<string, File>()
+// 每会话独立的请求中止控制器：支持多会话并发生成（替代原全局单 abort 锁）
+const _sessionAborts = new Map<string, AbortController>()
 
 export interface Session {
   id: string
@@ -81,8 +119,6 @@ export const useChatStore = defineStore('chat', {
   state: () => ({
     sessions: [] as Session[],
     activeId: '' as string,
-    streaming: false,
-    abort: null as AbortController | null,
     error: '' as string,
     loading: false,
     // 当前对话指定的子智能体（多 Agent 协作）：'' = 主管自动编排
@@ -92,6 +128,12 @@ export const useChatStore = defineStore('chat', {
   }),
   getters: {
     active: (s) => s.sessions.find((x) => x.id === s.activeId) || null,
+    // 「正在生成」改为仅判断当前活动会话（支持多会话并发生成），而非全局单锁：
+    // 旧对话在后台跑时，新对话的输入框仍显示「发送」且可立即生成。
+    streaming: (s) => {
+      const cur = s.sessions.find((x) => x.id === s.activeId)
+      return !!cur && cur.messages.some((m) => m.isStreaming)
+    },
     sorted: (s) =>
       [...s.sessions].sort((a, b) => {
         if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1
@@ -164,6 +206,12 @@ export const useChatStore = defineStore('chat', {
 
     switchSession(id: string) {
       this.activeId = id
+    },
+
+    /** 指定会话是否正在生成（按会话隔离，支持多会话并发）。 */
+    isSessionStreaming(id: string): boolean {
+      const s = this.sessions.find((x) => x.id === id)
+      return !!s && s.messages.some((m) => m.isStreaming)
     },
 
     renameSession(id: string, title: string) {
@@ -486,11 +534,10 @@ export const useChatStore = defineStore('chat', {
       opts?: { image?: string; attachments?: ChatAttachment[] },
     ) {
       const app = useAppStore()
-      if (this.streaming) return
-      this.streaming = true
+      if (this.isSessionStreaming(s.id)) return
       this.error = ''
       const ctrl = new AbortController()
-      this.abort = ctrl
+      _sessionAborts.set(s.id, ctrl)
       // 委派产生的子智能体气泡 id（用于把子智能体 token 路由到独立气泡）
       let subId: string | null = null
       // read_file 按需解析：记录当前正在 read 的附件路径，用于解析状态透明
@@ -503,6 +550,48 @@ export const useChatStore = defineStore('chat', {
         ts: Date.now(),
         isStreaming: true,
       })
+      const mainMsg = s.messages.find((m) => m.id === mainId)
+      // 主智能体「委派推理链」：随 SSE 事件逐步累积，作为思维图谱·推理步骤的数据源。
+      // 关键：必须经由响应式代理（mainMsg.agentTrace）push，面板 computed 才能实时刷新；
+      // 若改闭包内的普通数组，底层数据虽变但 Vue 不会触发重算。
+      if (mainMsg) mainMsg.agentTrace = []
+      // 委派关系栈：随 SSE 事件累积，作为思维图谱·概念图谱「协作调用图」的数据源。
+      // 参照验证脚本的栈推导：delegate_start 入栈、delegate_end 出栈，
+      // 入栈前的栈顶即本次委派的「调用方（谁发出）」；栈空时为顶层主管/所选智能体。
+      if (mainMsg) mainMsg.agentDelegations = []
+      const openDeleg: AgentDelegation[] = []
+      const delegRoot = () => this.selectedAgent || '主管(顶层)'
+      let _delegIdx = 0
+      const pushDeleg = (d: AgentDelegation) => {
+        const arr = mainMsg?.agentDelegations
+        if (arr) {
+          arr.push(d)
+          // 保存响应式代理引用，便于 delegate_end 时就地更新状态触发刷新
+          d = arr[arr.length - 1]
+        }
+        return d
+      }
+      const derivStatus = (result: string): AgentDelegation['status'] => {
+        const r = result || ''
+        if (r.includes('[委派超时]')) return 'timeout'
+        if (r.includes('[委派失败]') || r.includes('[子智能体错误]')) return 'error'
+        if (!r.trim()) return 'empty'
+        return 'done'
+      }
+      let _traceIdx = 0
+      const pushTrace = (st: Omit<AgentTraceStep, 'id' | 'index'>) => {
+        const step: AgentTraceStep = { id: `tr_${_traceIdx}`, index: ++_traceIdx, ...st }
+        if (mainMsg) (mainMsg.agentTrace ||= []).push(step)
+        s.updatedAt = Date.now()
+      }
+      // 以用户原始诉求作为「目标」步骤，让推理链有起点
+      if (content.trim()) {
+        pushTrace({ kind: 'goal', depth: 0, text: '目标：' + content.trim().slice(0, 80) })
+      }
+      const summarize = (t: string, n = 80) => {
+        const c = (t || '').replace(/\s+/g, ' ').trim()
+        return c.length > n ? c.slice(0, n) + '…' : c
+      }
       const findMsg = (id: string) => s.messages.find((m) => m.id === id)
       const appendText = (id: string, delta: string) => {
         const m = findMsg(id)
@@ -514,7 +603,7 @@ export const useChatStore = defineStore('chat', {
       }
 
       // ── 无数据超时守护：120s 内无任何事件 → 判定模型无响应，中止并报错 ──
-      // 防止 streamChat fetch 永久挂起导致 this.streaming 卡在 true，阻断后续所有发送
+      // 防止 streamChat fetch 永久挂起导致本会话 isStreaming 卡在 true，阻断该会话后续发送
       let idleTimer: ReturnType<typeof setTimeout> | null = null
       const IDLE_MS = 120_000
       const resetIdle = () => {
@@ -560,9 +649,24 @@ export const useChatStore = defineStore('chat', {
             } else if (ev.type === 'video') {
               if (ev.url) this.appendAssistantVideo(s.id, ev.url, mainId)
             } else if (ev.type === 'error') {
-              this.setAssistantError(s.id, ev.message || '生成失败', mainId)
+              // 子智能体执行出错也记入推理链（深度 1，备注），让图谱如实反映失败分支；
+              // 主管自身出错才标记整条消息为失败（由 Orchestrator 兜底时不污染主消息）。
+              if (ev.agent) {
+                pushTrace({ kind: 'note', depth: 1, agent: ev.agent, text: `${ev.agent} 出错：${summarize(ev.message || '生成失败', 70)}` })
+              } else {
+                this.setAssistantError(s.id, ev.message || '生成失败', mainId)
+              }
             } else if (ev.type === 'tool_call') {
-              this.appendToolCall(s.id, ev.name, ev.args)
+              // delegate_to_agent 由专属的 delegate_start / delegate_end 渲染委派卡片，
+              // 此处不再生成通用工具气泡，否则该气泡无对应 tool_result 收口会永远停在 running。
+              if (ev.name !== 'delegate_to_agent') {
+                this.appendToolCall(s.id, ev.name, ev.args)
+              }
+              // 委派推理链：子智能体的工具调用作为「行动」步骤（深度 1）。
+              // 主管自身的 delegate_to_agent 由 delegate_start 记录，此处跳过避免重复。
+              if (ev.agent && ev.name !== 'delegate_to_agent') {
+                pushTrace({ kind: 'action', depth: 1, agent: ev.agent, text: `${ev.agent} 调用 ${ev.name}` })
+              }
               // 解析状态透明：模型开始用 read_file 读取某附件 → 该附件进入「解析中」
               if (ev.name === 'read_file' && ev.args?.path) {
                 readPath = ev.args.path
@@ -581,8 +685,37 @@ export const useChatStore = defineStore('chat', {
               console.warn('[run.failed]', ev.name, ev.message)
             } else if (ev.type === 'delegate_start') {
               this.appendToolCall(s.id, '委派 ▸ ' + (ev.agent || ''), { task: ev.task || '' })
+              // 结构化记录委派关系：栈顶即「调用方（谁发出）」，栈空时为顶层主管/所选智能体
+              const _callee = ev.agent || '未知智能体'
+              const _caller = openDeleg.length ? openDeleg[openDeleg.length - 1].callee : delegRoot()
+              const _d: AgentDelegation = {
+                id: `del_${_delegIdx++}`,
+                caller: _caller,
+                callee: _callee,
+                task: ev.task || '',
+                result: '',
+                status: 'running',
+                startedAt: Date.now(),
+              }
+              openDeleg.push(pushDeleg(_d))
+              // 主智能体「调度」动作：记为推理链深度 0 步骤
+              pushTrace({ kind: 'action', depth: 0, agent: ev.agent || undefined, text: `委派 ${ev.agent || '子智能体'}：${summarize(ev.task || '', 70)}` })
             } else if (ev.type === 'delegate_end') {
               this.appendToolResult(s.id, ev.result || '(无返回)')
+              // 关闭对应的委派关系（栈顶优先，否则按 callee 查找），更新状态/结果
+              const _endCallee = ev.agent || ''
+              let _i = openDeleg.length - 1
+              while (_i >= 0 && openDeleg[_i].callee !== _endCallee) _i--
+              if (_i >= 0) {
+                const _d = openDeleg.splice(_i, 1)[0]
+                _d.result = ev.result || ''
+                _d.endedAt = Date.now()
+                _d.status = derivStatus(ev.result || '')
+              }
+              // 子智能体返回 → 推理链「观察」步骤（深度 1，归属该子智能体）
+              if (ev.agent) {
+                pushTrace({ kind: 'observe', depth: 1, agent: ev.agent, text: `${ev.agent} 返回（${String(ev.result || '').length} 字）：${summarize(ev.result || '', 70)}` })
+              }
               if (subId) {
                 const m = findMsg(subId)
                 if (m) m.isStreaming = false
@@ -611,8 +744,7 @@ export const useChatStore = defineStore('chat', {
         }
       } finally {
         if (idleTimer) clearTimeout(idleTimer)
-        this.streaming = false
-        this.abort = null
+        _sessionAborts.delete(s.id)
         // 兜底：主气泡与子智能体气泡均结束打字态，避免卡在「打字中」
         this.finalizeAssistantById(s.id, mainId)
         if (subId) this.finalizeAssistantById(s.id, subId)
@@ -620,10 +752,14 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
-    stop() {
-      this.abort?.abort()
-      this.streaming = false
-      const s = this.active
+    stop(id?: string) {
+      const sid = id || this.activeId
+      const ctrl = _sessionAborts.get(sid)
+      if (ctrl) {
+        ctrl.abort()
+        _sessionAborts.delete(sid)
+      }
+      const s = this.sessions.find((x) => x.id === sid)
       if (s) {
         for (const m of s.messages) {
           if (m.role === 'assistant' && m.isStreaming) m.isStreaming = false
@@ -633,10 +769,9 @@ export const useChatStore = defineStore('chat', {
 
     /** 切换账号时清空内存态（数据在服务端按用户隔离）。 */
     reset() {
+      _sessionAborts.clear()
       this.sessions = []
       this.activeId = ''
-      this.streaming = false
-      this.abort = null
       this.error = ''
     },
   },
