@@ -140,11 +140,15 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
                 if not user:
                     return JSONResponse({"detail": "未登录或登录已过期，无法访问受保护资源"},
                                         status_code=401)
-                # 越权防护：生成类媒体按 /media/<owner>/... 隔离，非本人/非管理员拒绝；
-                # 历史平铺路径（/media/<file>）与附件目录维持仅鉴权（文件名不可猜测）。
+                # 越权防护：所有媒体按 owner 段位隔离校验，非本人/非管理员拒绝。
+                #   /media/<owner>/...             → owner 段为 parts[1]
+                #   /media/attachments/<owner>/... → owner 段为 parts[2]
+                # 取消「附件目录仅鉴权、凭文件名不可猜测」的弱隔离（security by obscurity），
+                # 任何用户的附件均严格按归属校验，杜绝凭 UUID 猜测越权下载他人文件。
                 parts = [s for s in p.split("/") if s]
-                if len(parts) >= 3 and parts[0] == "media" and parts[1] != "attachments":
-                    if parts[1] != (user.get("u") or "") and (user.get("r") or "") != "admin":
+                if len(parts) >= 2 and parts[0] == "media":
+                    seg = parts[2] if (len(parts) >= 3 and parts[1] == "attachments") else parts[1]
+                    if seg != (user.get("u") or "") and (user.get("r") or "") != "admin":
                         return JSONResponse({"detail": "无权访问该资源"}, status_code=403)
         return await call_next(request)
 
@@ -160,19 +164,30 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
             static_dir = default_static
 
     if static_dir and os.path.isdir(static_dir):
+        static_real = os.path.realpath(static_dir)
+
         @app.get("/{full_path:path}")
         async def spa(full_path: str):
-            candidate = os.path.join(static_dir, full_path)
+            # 防路径穿越：归一化后必须仍位于 static_dir 之内，否则一律回退 index.html
+            candidate = os.path.normpath(os.path.join(static_real, full_path))
+            if candidate != static_real and not candidate.startswith(static_real + os.sep):
+                index = os.path.join(static_real, "index.html")
+                if os.path.exists(index):
+                    return FileResponse(
+                        index, headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+                    )
+                return JSONResponse({"detail": "智枢前端未构建"})
             if os.path.isfile(candidate):
                 resp = FileResponse(candidate)
                 # index.html 不缓存（确保浏览器每次获取最新版本，引用正确的 JS/CSS hash）
-                if full_path == "index.html" or full_path == "" or full_path == "/":
+                if full_path in ("index.html", "", "/"):
                     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
                 return resp
-            index = os.path.join(static_dir, "index.html")
+            index = os.path.join(static_real, "index.html")
             if os.path.exists(index):
-                resp = FileResponse(index)
-                resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+                resp = FileResponse(
+                    index, headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+                )
                 return resp
             return JSONResponse({"detail": "智枢前端未构建"})
     else:
@@ -203,6 +218,16 @@ def main():
         cfg.server.static_dir = args.static
 
     app = create_app(cfg)
+    if cfg.security.enable_sm:
+        try:
+            import gmssl  # noqa: F401
+        except Exception:
+            print("[智枢][安全告警] 未检测到国密库 gmssl：Provider 密钥等敏感字段将以 XOR 混淆而非 SM4 加密落盘"
+                  "（非强加密）。生产环境建议 `pip install gmssl` 后重启。")
+    if getattr(cfg.server, "workers", 1) and cfg.server.workers > 1:
+        print(f"[智枢][架构告警] workers={cfg.server.workers}：本服务使用进程内单例"
+              "（限流器/配额/定时调度/工具注册表/会话缓存），多进程下各进程状态独立，将导致限流与定时任务行为不一致。"
+              "生产建议 workers=1；若需横向扩展请改用共享存储（Redis/外部数据库）并启用单进程定时协调。")
     import uvicorn
     print(f"[智枢] 启动于 http://{cfg.server.host}:{cfg.server.port}  "
           f"(鉴权={'开' if cfg.security.enable_auth else '关'}, "

@@ -15,6 +15,7 @@ import urllib.parse
 import httpx
 
 from ..base import tool
+from ...core.ssrf import guard_url
 
 
 @tool(
@@ -28,6 +29,11 @@ async def safe_web_fetch(args: dict, ctx) -> str:
     # 出网隔离开关在 ToolRegistry.execute 中已校验 security.outbound_allow
     url = args.get("url", "")
     timeout = int(args.get("timeout", 20))
+    if not ctx.security or not ctx.security.outbound_allow:
+        return "[已拦截] 当前为内网隔离模式，禁止访问外部网络。"
+    if not guard_url(url, allow_private=getattr(ctx.security, "allow_private_fetch", False)):
+        return ("[已拦截] 目标地址为内网/私有地址，出于 SSRF 防护已拒绝"
+                "（如需放开请配置 security.allow_private_fetch=true）。")
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
             r = await c.get(url, headers={"User-Agent": "ZhishuAgent/1.0"})

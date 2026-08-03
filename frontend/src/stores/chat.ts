@@ -1,8 +1,23 @@
 import { defineStore } from 'pinia'
 import { streamChat, api, getUser } from '@/api/client'
-import { attachAndParse } from '@/api/chat'
+import { attachAndParse, parseAttachment } from '@/api/chat'
 import type { ChatAttachment } from '@/api/chat'
 import { useAppStore } from './app'
+
+// 过程记录（工具调用）增量落盘：流式进行中/异常中断时也能保留 read_file / code_exec 等步骤，
+// 避免仅依赖流结束时的 persistSession（刷新/关闭页面会丢失中间过程记录）。
+const _persistTimers = new Map<string, ReturnType<typeof setTimeout>>()
+function debouncedPersist(store: any, s: any, delay = 700) {
+  const t = _persistTimers.get(s.id)
+  if (t) clearTimeout(t)
+  _persistTimers.set(
+    s.id,
+    setTimeout(() => {
+      _persistTimers.delete(s.id)
+      store.persistSession(s)
+    }, delay),
+  )
+}
 
 export interface AttachmentCard {
   attachment_id?: string
@@ -97,8 +112,6 @@ export interface PendingAttachment {
   file?: File
 }
 
-// 原始文件引用（非响应式），用于「安装插件后重新解析」时再次上传
-const _pendingFiles = new Map<string, File>()
 // 每会话独立的请求中止控制器：支持多会话并发生成（替代原全局单 abort 锁）
 const _sessionAborts = new Map<string, AbortController>()
 
@@ -266,6 +279,7 @@ export const useChatStore = defineStore('chat', {
         toolStatus: 'running',
         ts: Date.now(),
       })
+      debouncedPersist(this, s)
       s.updatedAt = Date.now()
     },
 
@@ -277,6 +291,7 @@ export const useChatStore = defineStore('chat', {
         last.toolResult = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
         last.toolStatus = 'done'
       }
+      debouncedPersist(this, s)
       s.updatedAt = Date.now()
     },
 
@@ -365,8 +380,7 @@ export const useChatStore = defineStore('chat', {
         },
       })
       this.ensureTitle(s, opts?.text || file.name)
-      _pendingFiles.set(msgId, file)
-      
+
       try {
         // 仅上传落盘（不解析）
         const r = await attachAndParse(file)
@@ -384,24 +398,52 @@ export const useChatStore = defineStore('chat', {
       return m?.attachment?.stored_path || null
     },
 
+    /** 主动解析 / 重新解析已落盘的附件（POST /api/v1/chat/parse）。
+     *  用于两种场景：① 仅落盘(stored)的文档，用户想立刻查看正文而不必先提问；
+     *  ② 解析失败(error)后重试。解析结果回填卡片并入知识库，形成完整闭环。 */
+    async reparseAttachment(sessionId: string, msgId: string) {
+      const path = this._storedPathOf(sessionId, msgId)
+      if (!path) {
+        this._setAttachmentStatus(sessionId, msgId, 'error', '缺少文件路径，无法解析')
+        return
+      }
+      // 清掉上一次的错误，避免重试时旧报错残留在卡片上
+      this._setAttachmentStatus(sessionId, msgId, 'parsing', '')
+      try {
+        const r = await parseAttachment(path)
+        this._applyAttachment(sessionId, msgId, r)
+      } catch (e: any) {
+        this._setAttachmentStatus(sessionId, msgId, 'error', e?.message || '解析失败')
+      }
+    },
+
     _applyAttachment(sessionId: string, msgId: string, r: any) {
       const s = this.sessions.find((x) => x.id === sessionId)
       if (!s) return
       const m = s.messages.find((x) => x.id === msgId)
       if (!m || !m.attachment) return
       const a = m.attachment
-      a.attachment_id = r.attachment_id
-      a.file_id = r.file_id
-      a.url = r.url
-      // 仅落盘后 stored_path 不变；重解析结果不含该字段，保留原值
-      if (r.stored_path !== undefined) a.stored_path = r.stored_path
-      a.is_image = r.is_image
-      a.file_type = r.file_type
+      // 该方法同时服务两类响应：
+      //   ① /chat/attach —— 上传落盘，返回完整字段；
+      //   ② /chat/parse  —— 重解析，仅返回 parsed/text/text_total/doc_id/parse_error/status，
+      //      不含 url / file_type / stored_path / attachment_id 等元信息。
+      // 因此所有元信息字段必须「仅在响应中存在时才覆盖」，否则重解析会用 undefined
+      // 抹掉原有的下载链接与类型标签。
+      const put = <K extends keyof typeof a>(k: K, v: any) => {
+        if (v !== undefined) (a as any)[k] = v
+      }
+      put('attachment_id', r.attachment_id)
+      put('file_id', r.file_id)
+      put('url', r.url)
+      put('stored_path', r.stored_path)
+      put('is_image', r.is_image)
+      put('file_type', r.file_type)
+      put('vision_available', r.vision_available)
+      // 解析结果字段：两类响应都会返回，直接覆盖
       a.parsed = r.parsed
       a.text = r.text
       a.doc_id = r.doc_id
-      a.vision_available = r.vision_available
-      a.needs_plugin = r.needs_plugin
+      a.needs_plugin = r.needs_plugin ?? null
       a.text_total = r.text_total ?? null
       a.parse_error = r.parse_error
       a.status = r.parse_error

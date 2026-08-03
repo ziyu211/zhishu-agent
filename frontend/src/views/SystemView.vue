@@ -24,17 +24,27 @@ async function runRedact() {
   }
 }
 
+// 审计日志需要独立的 audit:read 权限，可能在仅有 system:read 时被拒。
+// 必须与运行状态分开处理：否则 Promise.all 整体 reject 会导致 status 也不赋值，
+// 页面「运行状态」区块（v-if="status"）整片不渲染，看起来像白屏。
+const auditDenied = ref(false)
 async function load() {
   loading.value = true
-  try {
-    const [s, a] = await Promise.all([api.adminStatus(), api.adminAudit(200)])
-    status.value = s
-    records.value = a.records || []
-  } catch (e: any) {
-    message.error(e?.message || '加载失败')
-  } finally {
-    loading.value = false
+  const [s, a] = await Promise.allSettled([api.adminStatus(), api.adminAudit(200)])
+  if (s.status === 'fulfilled') {
+    status.value = s.value
+  } else {
+    message.error((s.reason as any)?.message || '加载运行状态失败')
   }
+  if (a.status === 'fulfilled') {
+    auditDenied.value = false
+    records.value = a.value.records || []
+  } else {
+    // 无审计权限属于合理降级，静默提示即可，不弹错误打扰
+    auditDenied.value = true
+    records.value = []
+  }
+  loading.value = false
 }
 
 function badge(v: boolean) {
@@ -83,7 +93,8 @@ onMounted(load)
 
       <section class="card-block">
         <h3 class="block-title">审计日志（最近 {{ records.length }} 条）</h3>
-        <div v-if="!records.length" class="hint-empty">暂无审计记录</div>
+        <div v-if="auditDenied" class="hint-empty">当前账号无审计日志查看权限（需 audit:read）</div>
+        <div v-else-if="!records.length" class="hint-empty">暂无审计记录</div>
         <table v-else class="audit-table">
           <thead><tr><th>时间</th><th>用户</th><th>动作</th><th>详情</th></tr></thead>
           <tbody>

@@ -106,7 +106,8 @@ function render(src: string): string {
       i += 2
       const rows: string[] = []
       while (i < lines.length && /^\|.*\|\s*$/.test(lines[i])) {
-        rows.push(lines[i].split('|').slice(1, -1).map((c) => c.trim()).join('</td><td>'))
+        // 单元格内容必须走 inline() 转义，避免存储型 XSS（此前裸拼入 v-html）
+        rows.push(lines[i].split('|').slice(1, -1).map((c) => inline(c.trim())).join('</td><td>'))
         i++
       }
       const thead = head.map((c) => `<th>${inline(c)}</th>`).join('')

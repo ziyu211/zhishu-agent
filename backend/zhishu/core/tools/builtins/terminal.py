@@ -21,6 +21,9 @@ from . import SANDBOX_ROOT
     toolset="core",
 )
 async def terminal_run(args: dict, ctx) -> str:
+    role = getattr(ctx, "user_role", None)
+    if role not in ("admin", "operator"):
+        return "[已拦截] 当前角色无权执行终端命令（需 operator 及以上）"
     cmd = args.get("command", "")
     timeout = int(args.get("timeout", 30))
     if not cmd.strip():

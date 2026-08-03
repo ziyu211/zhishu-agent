@@ -115,19 +115,39 @@ function confirmDelete(it: CronJob) {
     content: `确认删除「${it.name}」？`,
     positiveText: '删除',
     negativeText: '取消',
-    onPositiveClick: () => cron.remove(it.id),
+    onPositiveClick: async () => {
+      try {
+        await cron.remove(it.id)
+      } catch (e: any) {
+        message.error(e?.message || '删除失败')
+        return false
+      }
+    },
   })
 }
 
+const running = ref<string | null>(null)
 async function handleRun(it: CronJob) {
-  const out = await cron.runNow(it.id)
-  dialog.success({ title: `执行结果：${it.name}`, content: out || '（无输出）', style: { whiteSpace: 'pre-wrap' } })
+  if (running.value) return
+  running.value = it.id
+  try {
+    const out = await cron.runNow(it.id)
+    dialog.success({ title: `执行结果：${it.name}`, content: out || '（无输出）', style: { whiteSpace: 'pre-wrap' } })
+  } catch (e: any) {
+    message.error(e?.message || '执行失败')
+  } finally {
+    running.value = null
+  }
 }
 
 const showHistory = ref(false)
 async function openHistory(it: CronJob) {
-  await cron.loadHistory(it.id)
-  showHistory.value = true
+  try {
+    await cron.loadHistory(it.id)
+    showHistory.value = true
+  } catch (e: any) {
+    message.error(e?.message || '加载执行历史失败')
+  }
 }
 
 const scheduleText = (it: CronJob) => {
@@ -171,7 +191,14 @@ onMounted(() => cron.load())
           <span class="muted">{{ it.next_run || '—' }}</span>
           <span><NSwitch :value="it.enabled" :disabled="!canWrite" @update:value="(v: boolean) => cron.toggle(it.id, v)" /></span>
           <span class="job-actions">
-            <NButton v-if="canWrite" size="small" tertiary @click="handleRun(it)">执行</NButton>
+            <NButton
+              v-if="canWrite"
+              size="small"
+              tertiary
+              :loading="running === it.id"
+              :disabled="!!running && running !== it.id"
+              @click="handleRun(it)"
+            >执行</NButton>
             <NButton size="small" tertiary @click="openHistory(it)">历史</NButton>
             <NButton v-if="canWrite" size="small" tertiary @click="openEdit(it)">编辑</NButton>
             <NButton v-if="canWrite" size="small" tertiary type="error" @click="confirmDelete(it)">删除</NButton>

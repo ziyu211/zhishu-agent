@@ -60,7 +60,10 @@ class Redactor:
                 out = pat.sub(lambda m: self._mask(m.group(0), head, tail), out)
             return out
         except Exception:
-            return text
+            # 脱敏失败不得回退原文（避免 PII 泄露），整体隐藏并记录。
+            import logging
+            logging.getLogger("zhishu.redact").warning("redact 失败，已整体隐藏原文以避免 PII 泄露")
+            return "[内容脱敏失败，已整体隐藏]"
 
     def redact_dict(self, payload: dict, *, redact_keys: bool = True) -> dict:
         """脱敏字典（常用于审计 detail / 请求体）。
@@ -86,7 +89,9 @@ class Redactor:
                     out[k] = v
             return out
         except Exception:
-            return payload
+            import logging
+            logging.getLogger("zhishu.redact").warning("redact_dict 失败，已整体隐藏载荷以避免 PII 泄露")
+            return {"__redacted__": True, "detail": "脱敏失败，内容已隐藏"}
 
     def redact_json(self, raw: str) -> str:
         """尝试按 JSON 解析后脱敏再序列化；非 JSON 则按文本脱敏。"""

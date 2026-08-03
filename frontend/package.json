@@ -6,7 +6,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "check:tdz": "node scripts/tdz-scan.mjs",
+    "check:render": "node scripts/render-check.build.mjs && node scripts/.render-out/render-check.mjs",
+    "build": "node scripts/tdz-scan.mjs && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

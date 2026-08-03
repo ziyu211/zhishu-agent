@@ -46,10 +46,12 @@ async def ingest(req: IngestReq, user=require_auth("knowledge:write")):
     return {"ok": True, **res}
 
 
+from ..core.upload import read_upload_limited
+
 @router.post("/upload")
 async def upload(file: UploadFile = File(...), user=require_auth("knowledge:write")):
     ctx = get_ctx()
-    raw = await file.read()
+    raw = await read_upload_limited(file)
     if not raw:
         raise HTTPException(status_code=400, detail="文件为空")
     owner = user.get("u")

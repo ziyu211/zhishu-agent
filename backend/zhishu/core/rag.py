@@ -712,7 +712,9 @@ def _extract_pdf(raw: bytes) -> str:
     return ""
 
 
-def read_file_text(filename: str, raw: bytes) -> tuple[str, str]:
+def read_file_text(filename: str, raw: bytes,
+                   media_dir: str | None = None,
+                   owner: str | None = None) -> tuple[str, str]:
     """从上传的二进制内容提取纯文本。
 
     返回 (text, file_type)。file_type 用于前端展示标签。
@@ -743,12 +745,17 @@ def read_file_text(filename: str, raw: bytes) -> tuple[str, str]:
             try:
                 import fitz  # type: ignore
                 doc = fitz.open(stream=io.BytesIO(raw), filetype="pdf")
-                # 渲染图写入媒体托管目录（/media 由 main.py 挂载在 data_dir/media.store_dir），
-                # 确保返回的 /media/pdf_render/... URL 可被前端正确访问。
-                if media_dir:
-                    base = os.path.join(media_dir, "pdf_render")
+                # 渲染图按用户命名空间隔离：media_dir/<owner>/pdf_render/...，
+                # 经由 main.py 的 /media 网关按 owner 段位校验，杜绝跨用户读取他人扫描件。
+                if media_dir and owner:
+                    base = os.path.join(media_dir, owner, "pdf_render")
+                    url_prefix = "/media/" + owner + "/pdf_render/"
+                elif media_dir:
+                    base = os.path.join(media_dir, "_shared", "pdf_render")
+                    url_prefix = "/media/_shared/pdf_render/"
                 else:
                     base = os.path.join("data", "generated", "pdf_render")
+                    url_prefix = "/media/pdf_render/"
                 os.makedirs(base, exist_ok=True)
                 safe = re.sub(r"[^\w\-.]", "_", os.path.basename(filename)) or "doc"
                 out_dir = os.path.join(base, safe + "_" + uuid.uuid4().hex[:8])
@@ -759,7 +766,7 @@ def read_file_text(filename: str, raw: bytes) -> tuple[str, str]:
                     p = os.path.join(out_dir, f"page_{i + 1}.png")
                     pix.save(p)
                     media_urls.append(
-                        "/media/pdf_render/" + os.path.basename(out_dir) + f"/page_{i + 1}.png")
+                        url_prefix + os.path.basename(out_dir) + f"/page_{i + 1}.png")
                 doc.close()
                 if media_urls:
                     raise ValueError(
@@ -923,7 +930,7 @@ class KnowledgeBase:
         title: str = None,
     ) -> dict:
         """从上传的二进制内容解析并入库。失败时抛出 ValueError。"""
-        text, file_type = read_file_text(filename, raw, self.media_dir)
+        text, file_type = read_file_text(filename, raw, self.media_dir, owner)
         if not doc_id:
             # 安全：doc_id 以「owner+文件名」哈希命名空间化 —— 不同用户上传同名
             # 文件不会碰撞（旧实现直接用文件名，B 上传同名文件会顶掉 A 的文档
@@ -971,7 +978,7 @@ class KnowledgeBase:
             raw = f.read()
         filename = doc.get("source") or f"{doc_id}.bin"
         try:
-            text, file_type = read_file_text(filename, raw, self.media_dir)
+            text, file_type = read_file_text(filename, raw, self.media_dir, owner)
         except ValueError as e:
             raise ValueError(f"重新解析失败：{e}")
         if not text.strip():

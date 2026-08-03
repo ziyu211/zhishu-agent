@@ -8,9 +8,10 @@ from . import SANDBOX_ROOT
 
 
 def _safe_path(p: str) -> str:
-    full = os.path.normpath(os.path.join(SANDBOX_ROOT, p))
-    if not full.startswith(os.path.normpath(SANDBOX_ROOT)):
-        raise ValueError("路径越界")
+    root = os.path.normpath(os.path.abspath(SANDBOX_ROOT))
+    full = os.path.normpath(os.path.abspath(os.path.join(root, p)))
+    if full != root and not full.startswith(root + os.sep):
+        raise ValueError("路径越权")
     return full
 
 
@@ -32,16 +33,19 @@ async def file_read(args: dict, ctx) -> str:
 _IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff", ".svg"}
 
 
-def _resolve_read_path(path: str) -> str | None:
-    """把各类路径解析为磁盘绝对路径，且必须落在 media 托管目录或 sandbox 内（防越权）。
+def _resolve_read_path(path: str, owner: str | None = None,
+                       is_admin: bool = False) -> str | None:
+    """把各类路径解析为磁盘绝对路径，且必须落在**当前用户命名空间**内（防跨用户越权）。
 
     支持：/media/ URL、附件 stored_path（绝对路径，位于 media 目录内）、
     相对 media 或 sandbox 的路径、以及带 file:// 前缀的绝对路径（模型常返回此类）。
 
-    安全（收紧后的白名单）：仅允许
-      1. data_dir/<media.store_dir>（附件与生成产物托管目录）
-      2. code_exec 沙箱目录
-    显式排除 data_dir 根与后端工作区根 —— 那里存放 providers.json（模型密钥）、
+    安全（按用户收窄的白名单）：
+      * 非管理员：仅允许 sandbox 目录，以及本人媒体目录
+        —— media/<owner>/ 与 media/attachments/<owner>/
+        （其他用户的 attachments 与 media 根均不可达，杜绝读他人附件）。
+      * 管理员：额外允许整个 media 根（含所有用户的媒体，用于代管/审计）。
+    白名单始终排除 data_dir 根与后端工作区根 —— 那里存放 providers.json（模型密钥）、
     users.json（口令哈希）、config.override.json、各 SQLite 库、按用户隔离的
     memory/ 目录以及后端源码，一律不得经 read_file 读取。
     """
@@ -65,10 +69,13 @@ def _resolve_read_path(path: str) -> str | None:
         in_media = os.path.normpath(os.path.join(media_root, p))
         in_data = os.path.normpath(os.path.join(data_dir, p))
         in_sb = os.path.normpath(os.path.join(sb, p))
-        # 相对路径优先按 media → sandbox 解析（data_dir 前缀仅为兼容
-        # "generated/xx" 之类的历史相对写法，最终仍受白名单校验）
         cand = next((x for x in (in_media, in_data, in_sb) if os.path.isfile(x)), in_sb)
-    allowed = [media_root, sb]
+    allowed = [sb]
+    if is_admin:
+        allowed.append(media_root)
+    elif owner:
+        allowed.append(os.path.join(media_root, owner))
+        allowed.append(os.path.join(media_root, "attachments", owner))
     if not any(cand == a or cand.startswith(a + os.sep) for a in allowed):
         return None
     return cand
@@ -119,7 +126,9 @@ async def read_file(args: dict, ctx) -> str:
             except (TypeError, ValueError):
                 pass
 
-    abs_path = _resolve_read_path(path)
+    owner = getattr(ctx, "user", None)
+    is_admin = getattr(ctx, "is_admin", False)
+    abs_path = _resolve_read_path(path, owner, is_admin)
     if not abs_path or not os.path.isfile(abs_path):
         return f"[read_file] 文件不存在或越权: {path}"
 
@@ -135,7 +144,14 @@ async def read_file(args: dict, ctx) -> str:
     try:
         with open(abs_path, "rb") as f:
             raw = f.read()
-        text, ftype = read_file_text(filename, raw)
+        from ....context import get_ctx
+        _c = get_ctx()
+        if _c is not None:
+            media_root = os.path.normpath(os.path.join(
+                os.path.abspath(_c.cfg.server.data_dir), _c.cfg.media.store_dir))
+        else:
+            media_root = None
+        text, ftype = read_file_text(filename, raw, media_root, owner)
     except ValueError as e:
         return f"[read_file] 解析失败: {e}"
     except Exception as e:  # noqa: BLE001

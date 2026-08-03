@@ -3,7 +3,7 @@
 > 一个面向**内网离线、安全合规、自主可控**场景的多用户本地智能体系统。
 > 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端；配置驱动多模型接入，内置 RBAC 多租户、知识库、记忆、工具、插件/技能/MCP、定时任务与技能自进化闭环。
 >
-> 最近更新：2026-07-30 — 全模块功能闭环复核与文档更新（详见第十节「模块功能闭环清单」）。
+> 最近更新：2026-08-03 — 全量代码审计与架构加固（目录清理 · 业务流程梳理 · 漏洞修复 · 多用户架构评估，详见第十一节「安全审计与多用户架构」）。
 
 ---
 
@@ -113,6 +113,11 @@
 - **SSRF 防护**：`/models/fetch` 默认拒绝内网/私有/环回地址（含云 metadata），需 `security.allow_private_fetch: true` 显式放开（本地 Ollama 探测场景）。
 - **审计日志**：关键操作记录，脱敏后落库，operator 以上可查。
 - **CORS**：`allow_credentials=False`，避免 `*` + credentials 危险组合。
+- **上传防护**：知识库与对话附件接口改用 `core/upload.read_upload_limited` 分块读取，超过 100MB 返回 413，防止大文件打满内存/磁盘。
+- **SSRF 扩面**：除 `/models/fetch` 外，`safe_web_fetch` 与插件 http 类工具统一经 `core/ssrf.guard_url` 拦截内网/私有/回环/云元数据地址。
+- **SPA 静态兜底修复路径穿越**：`main.py` 的 SPA fallback 改用 `realpath` 归一化并校验目标仍位于 static 目录内，杜绝 `../` 越权读取 `data/providers.json` 等敏感文件。
+- **前端存储型 XSS 修复**：`MarkdownRenderer.vue` 表格单元格统一走 `inline()` 转义后再 `v-html` 渲染，避免 Markdown 注入持久化跨会话执行。
+- **脱敏 fail-closed**：`redact` / `redact_dict` 在异常时整体隐藏并记录日志，而非回退原文，避免 PII 泄露。
 
 ### 7. 上下文压缩
 `context_engine.py` 超长对话自动截断/摘要/轮转，保证长会话可用。
@@ -385,4 +390,41 @@ curl -X POST http://127.0.0.1:8090/api/v1/models/default -H "Authorization: Bear
 
 ---
 
-> 本系统为「**完整可运行的多用户智能体平台**」：RBAC 多租户、模块共享、运行时 Provider 管理、安全防护均已实现闭环，可直接二次开发接入具体模型与数据库。
+## 十一、安全审计与多用户架构（2026-08-03）
+
+### 11.1 全量代码审计与漏洞修复
+
+对 `backend/zhishu/` 与 `frontend/src/` 做了静态全量审计（AST 扫描 + 人工走查 + 容器内单元/集成验证），本轮修复如下：
+
+| 编号 | 风险 | 位置 | 处置 |
+|------|------|------|------|
+| V1 | 前端存储型 XSS（Markdown 表格单元格未转义即 `v-html`） | `frontend/.../MarkdownRenderer.vue` | 单元格内容统一走 `inline()` 转义 |
+| V2 | SPA fallback 路径穿越（`../` 越权读 `data/providers.json` 等） | `backend/zhishu/main.py` | 改用 `realpath` 归一化并校验位于 static 目录内 |
+| V3 | 国密缺失时密钥降级 XOR 混淆（弱加密） | `core/security.py` | 启动时打印安全告警，建议安装 `gmssl` |
+| V4 | 多 worker 破坏进程内单例（限流/配额/定时任务重复） | `main.py` | 启动时对 `workers>1` 打印架构告警，建议 `workers=1` |
+| V5 | 上传无大小上限（全量 `file.read()` 打满内存） | `api/knowledge.py` / `api/chat.py` | 新增 `core/upload.read_upload_limited` 分块读取，超 100MB 返回 413 |
+| V7 | `safe_web_fetch` / 插件 http 无内网 IP 过滤 | `core/tools/builtins/web.py` / `core/modules/plugins.py` | 统一接入 `core/ssrf.guard_url` 拦截内网/私有/回环/云元数据 |
+| V9 | 脱敏失败 fail-open 回退原文（可能泄露 PII） | `core/redact.py` | 改为 fail-closed，异常时整体隐藏并记录日志 |
+
+V6（插件 shell 命令注入）、V8（operator 任意 shell/cron）属设计性 RCE，已通过角色闸门（`TOOL_MIN_ROLE` 要求 operator、`action=shell` 仅 admin/operator 可建）与出网/沙箱约束收敛；生产建议默认关闭 `allow_code_exec` 并对 shell 类动作加强审计。V10（默认密钥/口令）已由启动硬闸门与告警覆盖。
+
+### 11.2 多用户架构与 FastAPI 适配性分析
+
+**结论：FastAPI（ASGI）本身非常适合多用户并发场景；问题不在框架，而在当前「单进程 + 进程内可变单例」的状态管理方式。**
+
+- **适配性优势**：FastAPI 基于 Starlette/asyncio，对 I/O 密集（LLM 流式、工具调用、文件落盘）的多用户并发吞吐表现良好；本项目的 RBAC、`owner` 归属、媒体网关、审计均已按多用户设计。
+- **当前约束（单进程状态）**：`AppContext`、`ToolRegistry`、`ConcurrencyLimiter`、`CronScheduler`、SQLite 连接与对话缓存均为**进程内单例**。在 `workers=1` 下完全正确；若将 `workers` 设 >1 或横向扩多副本，各进程状态独立，会导致限流/配额/定时任务行为不一致、工具注册表漂移。
+- **并发安全**：任务级身份通过 `contextvars` 透传 + `ToolContext.for_run()` 浅拷贝隔离，避免跨请求串号；`code_exec` 经 `asyncio` 子进程 + `RLIMIT_AS` + 超时强杀，不阻塞事件循环。
+- **推荐部署形态**：
+  - **默认/内网离线（本项目定位）**：单进程 `workers=1` + 进程内状态，简单可靠、数据不出本机，契合「自主可控」。
+  - **更大规模**：将限流器/配额外置到 Redis、对话/审计落到共享数据库、定时任务由单进程协调（分布式锁），再用多容器 + 负载均衡水平扩展。本项目已为这一步预留了 `init_limiter` / `CronScheduler` 等注入点。
+
+### 11.3 端到端业务流程
+
+完整链路：浏览器同源调用 → 登录鉴权（HMAC Token + 四角色 RBAC + X-Act-As 代管）→ 对话入口（SSE 流式、owner 隔离）→ Agent ReAct 循环（上下文组装 / LLM 多 Provider 回退 / 解析 tool_calls）→ 工具执行层（沙箱路径隔离、审计、出网门控、SSRF 内网拦截、代码执行 RLIMIT+超时）→ 结果回填与思维图谱 → 异步闭环（技能蒸馏、记忆反思、定时任务、多智能体委派）。多用户通过 `owner` 归属 + `contextvars` 隔离 + 浅拷贝 + 命名空间保证彼此不可越权。
+
+### 11.4 目录清理（本轮）
+
+移除仓库根目录与 `backend/` 下遗留的调试/临时产物（`verify_*.py`、`_*.py` 测试脚本、`*.log`、`_cell_graph_preview.html` 等）与未使用的 `.venv-test`，不触及 `data/`（运行时数据）、`.venv/`、`frontend/node_modules/`、`backend/zhishu/static/`（构建产物）。
+
+> 本系统为「**完整可运行的多用户智能体平台**」：RBAC 多租户、模块共享、运行时 Provider 管理、安全防护与多用户并发隔离均已实现闭环，可直接二次开发接入具体模型与数据库。

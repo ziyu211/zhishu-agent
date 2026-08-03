@@ -62,10 +62,6 @@ const steps = computed<ThinkingStep[]>(() => {
   const trace = sessionAgentTrace(props.messages)
   return trace.length ? trace : reasoningToSteps(reasoning.value)
 })
-// 若会话已含委派推理链但【未】建多智能体团队，默认展示「推理步骤」；
-// 若已建团队（含委派关系），则停留在「概念图谱」直接呈现细胞气泡流程图。
-if (hasTrace.value && !hasDelegation.value && tab.value === 'concepts') tab.value = 'steps'
-
 /* ── 多智能体协作调用图（call graph）：谁发出 → 调用了哪个 agent → 是否出结果 ── */
 const delegations = computed<AgentDelegation[]>(() => sessionDelegations(props.messages))
 const hasDelegation = computed(() => delegations.value.length > 0)
@@ -80,6 +76,23 @@ const agentEdgeStatus = computed(() => {
   for (const e of agentGraphFull.value.edges) m.set(`${e.source}|${e.target}`, e.status)
   return m
 })
+
+/* 默认 Tab 自适应：会话已有委派推理链但【未】建多智能体团队 → 展示「推理步骤」；
+ * 已建团队（含委派关系）→ 停留在「概念图谱」直接呈现细胞气泡流程图。
+ * 注意：必须在 hasTrace / hasDelegation 均已声明之后再求值（否则触发 TDZ，
+ * 整个组件 setup 抛错、面板无法渲染）。会话为异步加载，故用 watch 首次命中即定，
+ * 之后尊重用户手动切换。 */
+let tabAutoDecided = false
+watch(
+  [hasTrace, hasDelegation],
+  ([trace, deleg]) => {
+    if (tabAutoDecided) return
+    if (!trace && !deleg) return
+    tabAutoDecided = true
+    if (trace && !deleg && tab.value === 'concepts') tab.value = 'steps'
+  },
+  { immediate: true },
+)
 // 摘要列表用：截断任务文本
 const summarizeTask = (t: string, n = 22) => {
   const c = (t || '').replace(/\s+/g, ' ').trim()

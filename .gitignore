@@ -57,3 +57,6 @@ Thumbs.db
 # ===== 例外：部署用 Dockerfile（构建必需，需入库；但真实配置 zhishu.yaml 仍不入库）=====
 !Dockerfile.local
 !deploy/Dockerfile.local
+
+# ===== 前端校验脚本的临时构建产物（渲染冒烟测试）=====
+frontend/scripts/.render-out/

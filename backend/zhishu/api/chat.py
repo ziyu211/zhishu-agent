@@ -66,6 +66,8 @@ def _need_plugin_payload(name: str | None) -> dict | None:
     }
 
 
+from ..core.upload import read_upload_limited
+
 @router.post("/chat/attach")
 async def chat_attach(
     file: UploadFile = File(...),
@@ -78,7 +80,7 @@ async def chat_attach(
     file_id、status="stored"，以及图片的视觉能力标记。
     """
     ctx = get_ctx()
-    raw = await file.read()
+    raw = await read_upload_limited(file)
     if not raw:
         raise HTTPException(status_code=400, detail="文件为空")
     filename = file.filename or "未命名文件"
@@ -117,7 +119,9 @@ def _parse_stored(ctx, abs_path: str, filename: str, owner: str | None) -> dict:
     try:
         with open(abs_path, "rb") as f:
             raw = f.read()
-        text, ftype = read_file_text(filename, raw)
+        media_root = os.path.normpath(os.path.abspath(
+            os.path.join(ctx.cfg.server.data_dir, ctx.cfg.media.store_dir)))
+        text, ftype = read_file_text(filename, raw, media_root, owner)
     except Exception as e:  # noqa: BLE001
         out["parse_error"] = f"解析失败: {e}"
         return out

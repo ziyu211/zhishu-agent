@@ -12,6 +12,27 @@ from typing import Optional
 
 from .base import Tool, ToolContext, Toolset
 
+# ---------------------------------------------------------------------------
+# 工具级 RBAC（深度防御）：每个工具声明最低可调用角色。低于该角色的用户：
+#   * 在 tool_visible_to 中不可见（模型看不到，自然不会调用）；
+#   * 即便被强制调用，也在 execute 的集中闸门处被拦截。
+# 默认不限制的 builtin 工具不在此表中。新增高危工具时务必登记。
+# ---------------------------------------------------------------------------
+ROLE_RANK = {"viewer": 0, "user": 1, "operator": 2, "admin": 3}
+
+TOOL_MIN_ROLE: dict[str, str] = {
+    "terminal_run": "operator",
+    "code_exec": "operator",
+    "create_tool": "operator",
+}
+
+
+def _role_ge(min_role: Optional[str], role: Optional[str]) -> bool:
+    """当前角色是否 >= 最低要求角色；min_role 为空表示无限制。"""
+    if not min_role:
+        return True
+    return ROLE_RANK.get(role or "viewer", 0) >= ROLE_RANK.get(min_role, 99)
+
 
 class ToolRegistry:
     _tools: dict[str, Tool] = {}
@@ -64,6 +85,12 @@ class ToolRegistry:
         tool = cls._tools.get(name)
         if not tool:
             return f"[工具错误] 未注册工具: {name}"
+        # 工具级 RBAC 闸门：低于最低角色要求的用户一律拦截（深度防御，
+        # 与 tool_visible_to 的可见性过滤互补——可见性控制模型能否「看到」工具，
+        # 此处控制即便被强制调用也无法执行）。
+        if not _role_ge(TOOL_MIN_ROLE.get(name), getattr(ctx, "user_role", None)):
+            cls._audit_tool(ctx, name, args, ok=False, err="role_denied")
+            return f"[已拦截] 当前角色无权使用该工具: {name}"
         # 出网隔离开关：涉及外部网络的工具需显式放行
         if name in ("safe_web_fetch", "web_search") and ctx.security and not ctx.security.outbound_allow:
             return "[已拦截] 当前为内网隔离模式，禁止访问外部网络。如需开启，请在配置中设置 security.outbound_allow=true 并配置白名单。"

@@ -26,6 +26,12 @@ function openKb(docId?: string | null) {
   if (docId) openDoc(docId, attachment.value?.title || '文档')
 }
 
+/** 主动解析 / 失败重试：走 POST /api/v1/chat/parse，结果回填卡片并入知识库。
+ *  状态由 store 切换为 parsing → done/error，模板自动响应，无需本地 loading 态。 */
+async function reparse() {
+  await chat.reparseAttachment(ownerSessionId.value, props.message.id)
+}
+
 function fmtDocSize(n?: number): string {
   if (!n) return ''
   if (n < 1024) return `${n} B`
@@ -132,6 +138,14 @@ const timeStr = computed(() => {
                   </template>
                 </div>
                 <div class="attach-actions">
+                  <button
+                    v-if="!attachment.is_image"
+                    class="attach-install-btn"
+                    type="button"
+                    @click="reparse"
+                  >
+                    立即解析正文
+                  </button>
                   <a v-if="attachment.url" class="attach-kb-btn" :href="attachment.url" :download="attachment.title" target="_blank" rel="noopener">下载原文件</a>
                 </div>
               </div>
@@ -148,10 +162,23 @@ const timeStr = computed(() => {
                 <a v-if="attachment.url" class="attach-kb-btn" :href="attachment.url" :download="attachment.title" target="_blank" rel="noopener">下载原文件</a>
               </div>
 
-              <!-- 解析错误 -->
-              <div v-else-if="attachment.parse_error" class="gen-error">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
-                <span>{{ attachment.parse_error }}</span>
+              <!-- 解析错误：可重试（图片无 OCR 能力，重试无意义故不提供） -->
+              <div v-else-if="attachment.parse_error" class="attach-need">
+                <div class="gen-error">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                  <span>{{ attachment.parse_error }}</span>
+                </div>
+                <div class="attach-actions">
+                  <button
+                    v-if="!attachment.is_image && attachment.stored_path"
+                    class="attach-install-btn"
+                    type="button"
+                    @click="reparse"
+                  >
+                    重新解析
+                  </button>
+                  <a v-if="attachment.url" class="attach-kb-btn" :href="attachment.url" :download="attachment.title" target="_blank" rel="noopener">下载原文件</a>
+                </div>
               </div>
             </div>
 

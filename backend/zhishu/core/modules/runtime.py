@@ -188,10 +188,14 @@ def _tool_module(tool_name: str) -> Optional[tuple[str, str]]:
 def tool_visible_to(tool_name: str, username: Optional[str], is_admin: bool = False,
                     user_role: Optional[str] = None) -> bool:
     """运行时守卫：plugin__/mcp__ 工具仅对「共享模块 + 本人模块 + 角色命中模块」可见/可执行。
-    builtin 工具不受限；admin 不受私有归属过滤（否则 admin 自建私有工具失效）。"""
+    builtin 工具默认不受限；但声明了最低角色要求（registry.TOOL_MIN_ROLE）的高危工具
+    仅对达角色的用户可见（避免把 terminal_run/code_exec 暴露给 viewer/user）；
+    admin 不受私有归属过滤（否则 admin 自建私有工具失效）。"""
     hit = _tool_module(tool_name)
     if hit is None:
-        return True
+        # builtin 工具：按最低角色要求做可见性深度防御
+        from ..tools.registry import TOOL_MIN_ROLE, _role_ge
+        return _role_ge(TOOL_MIN_ROLE.get(tool_name), user_role)
     if is_admin:
         return True
     sub, mod = hit

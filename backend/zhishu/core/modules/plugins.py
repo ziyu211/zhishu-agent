@@ -52,7 +52,7 @@ def _make_plugin_handler(plugin: str, t: dict):
             return "[已拦截] 当前为内网隔离模式，禁止 HTTP 插件访问外部网络。"
         try:
             if typ == "http":
-                return await _run_http(t, args)
+                return await _run_http(t, args, getattr(ctx.security, "allow_private_fetch", False))
             return await _run_shell(t, args)
         except Exception as e:
             return f"[插件工具错误] {plugin}/{t.get('name')}: {e}"
@@ -80,9 +80,13 @@ async def _run_shell(t: dict, args: dict) -> str:
     return text[:8000]
 
 
-async def _run_http(t: dict, args: dict) -> str:
+async def _run_http(t: dict, args: dict, allow_private: bool = False) -> str:
+    from ..ssrf import guard_url
     import httpx
     url = _substitute(t.get("url", ""), args)
+    if not guard_url(url, allow_private=allow_private):
+        return ("[已拦截] 目标地址为内网/私有地址，出于 SSRF 防护已拒绝"
+                "（如需放开请配置 security.allow_private_fetch=true）。")
     method = (t.get("method") or "POST").upper()
     headers = dict(t.get("headers") or {})
     body = _substitute(t.get("body_template") or "", args)

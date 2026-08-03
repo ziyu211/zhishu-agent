@@ -56,10 +56,15 @@ _zh_socket.create_server = _zh_blocked
 
 
 def _code_exec_allowed(ctx: Optional[ToolContext]) -> bool:
+    """代码执行授权：仅 operator / admin，且 security.allow_code_exec 开启。
+    fail-closed：无安全配置或非授权角色一律拒绝（默认不再放行）。"""
+    role = getattr(ctx, "user_role", None)
+    if role not in ("admin", "operator"):
+        return False
     sec = getattr(ctx, "security", None)
     if sec is None:
-        return True
-    return bool(getattr(sec, "allow_code_exec", True))
+        return False
+    return bool(getattr(sec, "allow_code_exec", False))
 
 
 def _block_network(ctx: Optional[ToolContext]) -> bool:
@@ -74,11 +79,12 @@ def _block_network(ctx: Optional[ToolContext]) -> bool:
     return not bool(getattr(sec, "outbound_allow", False))
 
 
-def _resolve_path(path: str) -> Optional[str]:
-    """复用 file 工具的路径解析（越权校验 + 绝对化）。"""
+def _resolve_path(path: str, owner: Optional[str] = None,
+                 is_admin: bool = False) -> Optional[str]:
+    """复用 file 工具的路径解析（越权校验 + 绝对化），按用户收窄媒体目录。"""
     from .file import _resolve_read_path
     try:
-        return _resolve_read_path(path)
+        return _resolve_read_path(path, owner, is_admin)
     except Exception:
         return None
 
@@ -205,7 +211,7 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
     extra_env: dict = {}
     path = args.get("path")
     if path:
-        rp = _resolve_path(path)
+        rp = _resolve_path(path, getattr(ctx, "user", None), getattr(ctx, "is_admin", False))
         if not rp:
             return f"[code_exec] 路径越权或不存在: {path}"
         extra_env["TARGET_FILE"] = rp
