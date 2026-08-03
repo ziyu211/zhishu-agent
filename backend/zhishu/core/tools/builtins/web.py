@@ -15,7 +15,7 @@ import urllib.parse
 import httpx
 
 from ..base import tool
-from ...core.ssrf import guard_url
+from ...ssrf import guard_url
 
 
 @tool(
