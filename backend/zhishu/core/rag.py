@@ -869,6 +869,15 @@ class KnowledgeBase:
     def __init__(self, emb_cfg: EmbeddingConfig, vs_cfg: VectorStoreConfig,
                  data_dir: Optional[str] = None, app_cfg=None):
         self.emb = EmbeddingEngine(emb_cfg, app_cfg=app_cfg)
+        # 向量库路径必须与其它持久化（用户/审计/记忆/会话库）一样跟随 data_dir。
+        # 旧实现直接用 vs_cfg.path 这个**相对当前工作目录**的裸路径，导致：
+        #   * 换个 CWD 启动 → 其它库仍在 data_dir，向量库却跑到新目录并被建成空库，
+        #     表现为「知识库突然全空」，排查成本极高；
+        #   * 测试/多实例无法通过 data_dir 隔离，会串到真实运行数据上。
+        # 兼容性：默认配置 data_dir=data、path=data/zhishu_vector.db，去掉重复的
+        # 前导 data/ 后再拼接，结果仍是 data/zhishu_vector.db —— 存量部署零变化。
+        if data_dir:
+            vs_cfg.path = self._resolve_store_path(vs_cfg.path, data_dir)
         self.store = VectorStore(vs_cfg)
         # 原始文件保留目录（用于「重新解析」）。仅当传入 data_dir 时启用。
         self.raw_dir = os.path.join(data_dir, "knowledge_raw") if data_dir else ""
@@ -884,6 +893,23 @@ class KnowledgeBase:
             if _store:
                 self.media_dir = os.path.join(self.data_dir, _store)
         self.graph = KnowledgeGraph(self.data_dir)
+
+    @staticmethod
+    def _resolve_store_path(path: str, data_dir: str) -> str:
+        """把向量库路径归一到 data_dir 下（绝对路径原样保留）。"""
+        p = (path or "").strip() or "zhishu_vector.db"
+        # 注意：Windows 的 os.path.isabs("/data/kb.db") 为 False（无盘符不算绝对），
+        # 但配置里写 POSIX 绝对路径的意图很明确，必须原样保留，否则会被拼到
+        # data_dir 下变成 data/data/kb.db 之类的错误位置。
+        if os.path.isabs(p) or p.startswith(("/", "\\")):
+            return p
+        parts = p.replace("\\", "/").split("/")
+        # 去掉历史默认前缀 "./data/" / "data/"，避免拼出 data/data/xxx.db
+        while parts and parts[0] in (".", "data"):
+            parts.pop(0)
+        if not parts:
+            parts = ["zhishu_vector.db"]
+        return os.path.join(data_dir, *parts)
 
     # ------------------------- 入库（带归属与元数据） -------------------------
     def ingest_text(

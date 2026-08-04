@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import contextlib
+import shutil
 import sys
 import tempfile
 
@@ -33,6 +35,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(_HERE, "..")))
 PASS = 0
 FAIL: list[str] = []
 
+
+
+# sqlite 连接未必已关闭，Windows 上删临时目录会抛 WinError 32，把「清理失败」
+# 误报成「用例失败」。清理尽力而为，失败忽略。
+@contextlib.contextmanager
+def _tmpdir():
+    d = tempfile.mkdtemp()
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 def check(cond: bool, name: str) -> None:
     global PASS
@@ -49,7 +62,7 @@ def test_conversation_partial_update():
     print("\n[P0-1] 对话部分更新不得破坏 messages")
     from zhishu.core.conversations import ConversationStore
 
-    with tempfile.TemporaryDirectory() as d:
+    with _tmpdir() as d:
         st = ConversationStore(os.path.join(d, "c.db"))
         c = st.create(owner="u1", title="原标题")
         cid = c["id"]
@@ -86,7 +99,7 @@ def test_token_revocation():
     from zhishu.core.config import SecurityConfig
     from zhishu.core.security import AuthService, Crypto, UserStore
 
-    with tempfile.TemporaryDirectory() as d:
+    with _tmpdir() as d:
         cfg = SecurityConfig(enable_auth=True, secret="test-secret-123",
                              admin_user="admin", admin_password="pw123456")
         crypto = Crypto(cfg.enable_sm)
@@ -147,7 +160,7 @@ def test_credential_key_preserved():
     from zhishu.core.config import ZhishuConfig
     from zhishu.core.credentials import ProviderStore
 
-    with tempfile.TemporaryDirectory() as d:
+    with _tmpdir() as d:
         p = os.path.join(d, "providers.json")
 
         cfg1 = ZhishuConfig()
@@ -271,7 +284,7 @@ def test_memory_prefix_escape():
     print("\n[级联] 记忆按 owner:session 前缀清理，LIKE 通配符须转义")
     from zhishu.core.memory.sqlite_provider import MemoryStore
 
-    with tempfile.TemporaryDirectory() as d:
+    with _tmpdir() as d:
         m = MemoryStore(os.path.join(d, "m.db"))
         for sid in ("u1:s1", "u1:s2", "u10:s1", "u_x:s1"):
             m.append(sid, "user", "hello")
@@ -386,7 +399,7 @@ def test_embedding_signature_isolation():
     from zhishu.core.embedding import EmbeddingEngine
     from zhishu.core.vector_store import VectorStore
 
-    with tempfile.TemporaryDirectory() as d:
+    with _tmpdir() as d:
         vs = VectorStore(VectorStoreConfig(backend="sqlite",
                                            path=os.path.join(d, "v.db")))
         real_sig = "provider:qwen:text-embedding-v3:1024"
@@ -447,6 +460,86 @@ def test_provider_context_length():
           "ContextEngine 读取 context_length_of 计算历史预算")
 
 
+# ---------------------------------------------------------------- e2e-根因1
+def test_cron_stop_no_cancelled_error():
+    print("\n[e2e-根因1] cron.stop() 不得让 CancelledError 冲出 teardown")
+    import inspect
+    from zhishu.core.config import ZhishuConfig
+    from zhishu.core.cron import CronScheduler
+
+    with _tmpdir() as d:
+        cfg = ZhishuConfig()
+        cfg.server.data_dir = d
+        cfg.cron.store_dir = "cron"
+        cfg.cron.enabled = True
+        cfg.cron.max_concurrency = 2
+        sched = CronScheduler(cfg)
+        check(sched._task is None, "未启动时无后台任务")
+
+        async def _stop():
+            # 必须在运行中的事件循环内启动任务
+            sched.start()
+            check(sched._task is not None, "cron 启动后存在后台任务")
+            # 让调度循环真正进入 await 窗口，模拟真实关停场景
+            await asyncio.sleep(0)
+            await sched.stop()
+            return sched._task
+
+        raised = False
+        try:
+            leftover = asyncio.run(_stop())
+        except asyncio.CancelledError:
+            raised = True
+        check(not raised, "stop() 不会让 CancelledError 冲出（不再污染 lifespan teardown）")
+        check(leftover is None, "stop() 后 _task 已置空（资源可回收）")
+
+    # 源码层面确认修复：stop() 必须显式捕获 asyncio.CancelledError
+    # （它是 BaseException 子类，旧写法 except Exception 抓不住 -> 冲出 -> e2e 关停报 CancelledError）
+    src = inspect.getsource(CronScheduler.stop)
+    check("asyncio.CancelledError" in src,
+          "cron.stop() 源码显式捕获 asyncio.CancelledError")
+
+
+# ---------------------------------------------------------------- e2e-根因2
+def test_lifespan_teardown_isolated():
+    print("\n[e2e-根因2] lifespan teardown 各步自包含 + 回收 boot 任务")
+    # 直接读 main.py 源码（与 #340 一致），避免导入触发 fastapi 依赖
+    main_py = os.path.join(os.path.dirname(__file__), "..", "zhishu", "main.py")
+    with open(os.path.abspath(main_py), "r", encoding="utf-8") as f:
+        src = f.read()
+    n = src.count("asyncio.CancelledError")
+    check(n >= 3, f"teardown 至少 3 处捕获 asyncio.CancelledError（实际 {n}）")
+    check("_boot_tasks" in src, "lifespan 持有并回收启动期后台任务引用（防 GC 提前回收/泄漏）")
+    check("cron.stop()" in src, "teardown 显式停止 cron 调度循环")
+    check("aclose_shared_http" in src, "teardown 回收共享 LLM 连接池")
+
+
+# ---------------------------------------------------------------- e2e-根因3
+def test_vector_store_follows_data_dir():
+    print("\n[e2e-根因3] 向量库路径必须跟随 data_dir（测试不串真实数据）")
+    from zhishu.core.config import EmbeddingConfig, VectorStoreConfig
+    from zhishu.core.rag import KnowledgeBase
+
+    # 静态方法行为校验
+    got = KnowledgeBase._resolve_store_path("data/zhishu_vector.db", "data")
+    check(got == os.path.join("data", "zhishu_vector.db"),
+          "默认 data/zhishu_vector.db + data_dir=data 零迁移")
+    got2 = KnowledgeBase._resolve_store_path("data/zhishu_vector.db", "/tmp/x")
+    check(os.path.normpath(got2) == os.path.normpath("/tmp/x/zhishu_vector.db"),
+          "跟随自定义 data_dir（去掉重复 data 前缀）")
+    check("data/data/" not in got2.replace("\\", "/"), "不拼出 data/data/ 错误层级")
+    abs_p = KnowledgeBase._resolve_store_path("/abs/kb.db", "/tmp/y")
+    check(abs_p == "/abs/kb.db", "绝对路径原样保留（不拼到 data_dir 下）")
+
+    # 端到端：用临时 data_dir 实例化，向量库必须落在临时目录内（CI/测试隔离）
+    with _tmpdir() as d:
+        vs = VectorStoreConfig(backend="sqlite", path="data/zhishu_vector.db")
+        kb = KnowledgeBase(EmbeddingConfig(backend="hash", dim=64), vs, data_dir=d)
+        check(os.path.dirname(os.path.abspath(kb.store.cfg.path)) == os.path.abspath(d),
+              "KnowledgeBase 实例化后向量库位于 data_dir 内（隔离生效）")
+        kb.store._conn.close()
+
+
 def main() -> int:
     print("=" * 64)
     print(" 智枢 · 闭环审计修复回归测试")
@@ -457,7 +550,9 @@ def main() -> int:
                test_memory_prefix_escape,
                test_moa_identity_not_spoofed, test_llm_client_shared_pool,
                test_shell_guard, test_embedding_signature_isolation,
-               test_provider_context_length):
+               test_provider_context_length,
+               test_cron_stop_no_cancelled_error, test_lifespan_teardown_isolated,
+               test_vector_store_follows_data_dir):
         try:
             fn()
         except Exception as e:

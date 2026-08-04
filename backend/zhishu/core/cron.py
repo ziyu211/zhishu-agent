@@ -130,9 +130,14 @@ class CronScheduler:
     async def stop(self):
         if self._task:
             self._task.cancel()
+            # 注意：await 一个「已被自己 cancel」的任务必然抛 asyncio.CancelledError，
+            # 而它继承自 BaseException（Py3.8+），`except Exception` 根本抓不住。
+            # 旧写法会让 CancelledError 冲出 stop() → 冲出 lifespan 的 teardown，
+            # ASGI 层据此判定 lifespan 任务「被取消」，表现为关停报 CancelledError，
+            # 且 lifespan 中排在 cron.stop() 之后的 MCP 连接回收被整段跳过（资源泄漏）。
             try:
                 await self._task
-            except Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
             self._task = None
 

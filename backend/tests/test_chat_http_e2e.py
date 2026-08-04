@@ -17,8 +17,10 @@ chat 路由(event_gen) → SSE 序列化 全链路。LLM 用 FakeLLM 打桩，�
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -37,6 +39,20 @@ from zhishu.core.security import Crypto
 from fastapi.testclient import TestClient
 
 
+
+# ---------------------------------------------------------------------------
+# 临时数据目录：sqlite 连接在测试结束时未必已关闭，Windows 上会让目录删除抛
+# WinError 32（另一个程序正在使用此文件），把「清理失败」误报成「测试失败」，
+# 掩盖真实断言结果。清理是尽力而为，失败直接忽略。
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _tmpdir():
+    d = tempfile.mkdtemp()
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
 # ---------------------------------------------------------------------------
 # FakeLLM：取代真实模型，返回确定性文本，一轮即终止
 # （run 主循环遇纯文本回复即 yield token → done → return，不会死循环）
@@ -49,7 +65,11 @@ class FakeLLM:
         self.cfg = cfg
         self.api_mode = api_mode
 
-    async def chat(self, messages, model=None, tools=None, max_tokens=None):
+    # 签名须与 LLMClient.chat 保持一致（含 tool_choice），否则真实调用点传参会
+    # 抛 TypeError 并被 run() 兜底成 error 事件，测试表象是「回复缺失」而非签名不符。
+    # 用 **_kw 兜住后续新增的可选参数，避免生产接口每加一个参数就要改桩。
+    async def chat(self, messages, model=None, tools=None, max_tokens=None,
+                   tool_choice=None, **_kw):
         return {
             "choices": [{
                 "message": {
@@ -107,7 +127,7 @@ def _parse_sse(text: str) -> list:
 # 测试 A：鉴权闸门
 # ---------------------------------------------------------------------------
 def test_chat_auth_required():
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tmpdir() as tmp:
         cfg = _build_cfg(tmp)
         app = create_app(cfg)
         with TestClient(app) as client:
@@ -121,7 +141,7 @@ def test_chat_auth_required():
 # 测试 B：自签 token 全链路对话
 # ---------------------------------------------------------------------------
 def test_chat_full_chain_signed():
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tmpdir() as tmp:
         cfg = _build_cfg(tmp)
         app = create_app(cfg)
         ctx = get_ctx()
@@ -153,7 +173,7 @@ def test_chat_full_chain_signed():
 # 测试 C：限流拒绝路径在 HTTP 层生效（每日配额耗尽）
 # ---------------------------------------------------------------------------
 def test_chat_daily_quota_reject():
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tmpdir() as tmp:
         cfg = _build_cfg(tmp)
         cfg.agent.daily_quota_per_user = 1   # 同一用户对同一自然日仅 1 次对话
         app = create_app(cfg)

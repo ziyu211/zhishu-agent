@@ -25,12 +25,15 @@ from . import api as api_pkg
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动即异步连接已启用的 MCP 服务器、注册插件/MCP 工具（不阻塞请求）
+    import asyncio
+    _boot_tasks: list = []
     try:
-        import asyncio
-        asyncio.create_task(get_ctx().modules.refresh())
+        # 启动期后台任务需持有引用：否则 GC 可能提前回收（asyncio 只持弱引用），
+        # 且关停时无从取消 → "Task was destroyed but it is pending" 噪声与资源泄漏。
+        _boot_tasks.append(asyncio.create_task(get_ctx().modules.refresh()))
         # 初始化外部长期记忆 provider（向量记忆 opt-in；未开启时 memory_manager 为 None，跳过）
         if get_ctx().memory_manager is not None:
-            asyncio.create_task(get_ctx().memory_manager.initialize())
+            _boot_tasks.append(asyncio.create_task(get_ctx().memory_manager.initialize()))
         # 启动定时任务调度器（任务定义持久化，重启后自动续算）
         get_ctx().cron.start()
     except Exception as _e:
@@ -42,24 +45,36 @@ async def lifespan(app: FastAPI):
     # （此前 lifespan 只有启动分支，没有任何 teardown：HTTP 连接池、MCP 子进程、
     #   cron 循环都靠进程退出被动回收，reload / 多次 create_app 场景会累积泄漏。）
     import sys as _sys
+    # 关停期每一步都必须「自包含」：任何一步抛出都不能带走后续步骤，否则先失败的
+    # 一步会让排在后面的资源永远不被回收。特别注意 asyncio.CancelledError 继承自
+    # BaseException，`except Exception` 抓不到——它一旦冲出 teardown，ASGI 层会把
+    # 整个 lifespan 判定为「被取消」（TestClient 表现为关停 CancelledError）。
     try:
         from .core.providers.client import aclose_shared_http
         await aclose_shared_http()
-    except Exception as _e:  # noqa: BLE001
+    except (asyncio.CancelledError, Exception) as _e:  # noqa: BLE001
         print(f"[智枢] 关停时关闭 LLM 连接池失败：{_e!r}", file=_sys.stderr, flush=True)
     try:
         await get_ctx().cron.stop()
-    except Exception as _e:  # noqa: BLE001
+    except (asyncio.CancelledError, Exception) as _e:  # noqa: BLE001
         print(f"[智枢] 关停时停止定时任务失败：{_e!r}", file=_sys.stderr, flush=True)
+    # 回收启动期后台任务（refresh / memory 初始化）：未完成则取消并等待其收敛
+    for _t in _boot_tasks:
+        try:
+            if not _t.done():
+                _t.cancel()
+            await _t
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
     try:
         mods = get_ctx().modules
         for _name in list(getattr(mods, "clients", {}).keys()):
             try:
                 await mods.clients[_name].close()
-            except Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
         getattr(mods, "clients", {}).clear()
-    except Exception as _e:  # noqa: BLE001
+    except (asyncio.CancelledError, Exception) as _e:  # noqa: BLE001
         print(f"[智枢] 关停时断开 MCP 连接失败：{_e!r}", file=_sys.stderr, flush=True)
 
 

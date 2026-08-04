@@ -12,10 +12,12 @@
 """
 from __future__ import annotations
 
+import contextlib
 import asyncio
 import json
 import os
 import sqlite3
+import shutil
 import sys
 import tempfile
 
@@ -29,6 +31,20 @@ from zhishu.core.agent import Agent, build_context_engine
 from zhishu.core.tools.registry import ToolRegistry
 from zhishu.core.tools.base import Tool, ToolContext
 
+
+
+# ---------------------------------------------------------------------------
+# 临时数据目录：sqlite 连接在测试结束时未必已关闭，Windows 上会让目录删除抛
+# WinError 32（另一个程序正在使用此文件），把「清理失败」误报成「测试失败」，
+# 掩盖真实断言结果。清理是尽力而为，失败直接忽略。
+# ---------------------------------------------------------------------------
+@contextlib.contextmanager
+def _tmpdir():
+    d = tempfile.mkdtemp()
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
 # FakeLLM：取代真实模型，按 system prompt 中的标记区分主管 / 子智能体
@@ -138,7 +154,7 @@ async def _collect(run_gen):
 # 测试 1：委派正常 + 子智能体继承 RAG（按 owner）+ 委派审计落库
 # ---------------------------------------------------------------------------
 async def test_delegation_normal_and_rag():
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tmpdir() as tmp:
         g, cfg = _make_ctx(tmp)
         _write_subagent(tmp)
 
@@ -186,7 +202,7 @@ async def test_delegation_normal_and_rag():
 # ---------------------------------------------------------------------------
 async def test_delegation_timeout():
     global FAKE_HANG
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tmpdir() as tmp:
         g, cfg = _make_ctx(tmp, delegate_timeout=0.5)
         _write_subagent(tmp)
 
@@ -215,7 +231,7 @@ async def test_delegation_timeout():
 # 测试 3：动作级审计 —— 工具调用经 ToolRegistry.execute 落 tool_call（验证 self→cls 修复）
 # ---------------------------------------------------------------------------
 async def test_action_audit_tool_call():
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tmpdir() as tmp:
         g, cfg = _make_ctx(tmp)
 
         captured = {}
@@ -301,7 +317,7 @@ class _RoutingFakeLLM(FakeLLM):
 
 
 async def test_routing_path_a_simple_no_delegate():
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tmpdir() as tmp:
         g, cfg = _make_ctx(tmp)
         _write_coordinator(tmp)
         ToolRegistry.discover_builtin_tools()
@@ -320,7 +336,7 @@ async def test_routing_path_a_simple_no_delegate():
 
 
 async def test_routing_path_b_complex_delegate():
-    with tempfile.TemporaryDirectory() as tmp:
+    with _tmpdir() as tmp:
         g, cfg = _make_ctx(tmp)
         _write_coordinator(tmp)
         _write_subagent(tmp)

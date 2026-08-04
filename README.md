@@ -479,3 +479,22 @@ V6（插件 shell 命令注入）、V8（operator 任意 shell/cron）属设计�
 - **连接池**：`workers=1` 下单例共享池零开销；若未来扩多进程，需配合外部状态后端（见 11.2），避免每进程独立池。
 
 > 本系统为「**完整可运行的多用户智能体平台**」：RBAC 多租户、模块共享、运行时 Provider 管理、安全防护与多用户并发隔离均已实现闭环，可直接二次开发接入具体模型与数据库。
+
+### 12.5 CI e2e 失败根因与修复（2026-08-04）
+
+GitHub Actions `E2E Tests / e2e`（`.github/workflows/e2e.yml`，push/PR 到 `main` 时执行 `python tests/run_e2e.py --verbose`，env `ZHISHU_ALLOW_INSECURE_DEFAULTS=1`）在 commit `cec5f1f1`（「深度审计闭环 #338–#342」）引入回归，自 run 3 起全部失败（"Failed in 23 seconds"）。根因均为 **asyncio 生命周期缺陷，且只在关停阶段触发**，故表现为 `TestClient` 关停即抛 `CancelledError`——任一 e2e 套件 FAIL 即令 job 失败。
+
+| 根因 | 位置 | 表象 | 修复 |
+|------|------|------|------|
+| `cron.stop()` 用 `except Exception` 捕获 `await self._task`；但 `await` 一个「已被自己 `cancel()`」的任务必抛 `asyncio.CancelledError`（继承自 `BaseException`，`except Exception` 抓不住）→ 异常冲出 `stop()` → 冲出 `lifespan` teardown → ASGI 判定 lifespan 被取消 → 关停报 `CancelledError`，且排在 `cron.stop()` 之后的 MCP 回收被整段跳过 | `core/cron.py` | `test_chat_http_e2e.py` 在 `TestClient.__exit__` 关停时抛 `CancelledError`，HTTP 套件 FAIL | `stop()` 改为 `except (asyncio.CancelledError, Exception)` |
+| `main.lifespan` 关停期三步资源回收（共享连接池 / cron / MCP 客户端）均用 `except Exception`，且未持有启动期后台任务引用——GC 可能提前回收，或在任务取消时泄漏 | `main.py` | 同上，且关停阶段资源泄漏 | 每步改为 `except (asyncio.CancelledError, Exception)` 自包含；新增 `_boot_tasks` 列表持有启动期任务引用，teardown 对未完成任务统一 `cancel()` + `await` 回收 |
+| HTTP e2e 桩 `FakeLLM.chat` 缺 `tool_choice` 形参，而 `LLMClient.chat` 已新增该参数 → 真实调用抛 `TypeError` 被兜底成 error 事件，表象为「回复缺失」 | `tests/test_chat_http_e2e.py` | 自签 token 全链路对话用例失效 | 补 `tool_choice=None, **_kw` 兼容新签名 |
+| 向量库路径 `RagConfig.path="data/zhishu_vector.db"` 为硬编码相对 CWD 裸路径，不跟随 `server.data_dir`，测试无法用临时目录隔离 → 串到仓库真实数据（本地曾因 17.8GB 真实向量库导致锁等待超时） | `core/rag.py` + `core/config.py` | 本地/多实例测试串数据、偶发 `database is locked` | `KnowledgeBase` 新增 `_resolve_store_path`：绝对路径原样保留，相对路径去掉重复 `data/` 前缀后拼到 `data_dir` 下；默认配置落点零迁移 |
+
+附带清理：`backend/` 下调试/临时产物（`_diag_*.py`、`_dbg_*.txt`、`_e2e_run.txt`）已删除，不入库。
+
+修复后验证（与 CI 干净环境等价复跑）：
+
+- `python tests/run_e2e.py --verbose`（env `ZHISHU_ALLOW_INSECURE_DEFAULTS=1`）：`test_multiagent_e2e.py` **6/6 PASS** + `test_chat_http_e2e.py` **A/B/C 3 项 PASS** → **ALL E2E SUITES PASSED**。
+- `backend/tests/test_closure_audit.py`：新增 3 个针对本根因的回归测试（`test_cron_stop_no_cancelled_error` / `test_lifespan_teardown_isolated` / `test_vector_store_follows_data_dir`），**89/89 断言通过**。
+- 既有 `backend/tests/http_closure_check.py` 24/24 不受影响。
