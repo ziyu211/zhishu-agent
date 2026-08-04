@@ -29,6 +29,9 @@ class ProviderStore:
         self.path = path
         self.crypto = crypto or Crypto(enable_sm=cfg.security.enable_sm)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        # 原始密文缓存：轮换 security.secret 或卸载 gmssl 会导致解密失败（api_key 变空），
+        # 此时 _save 必须保留磁盘上的原密文，绝不能把有效密钥静默覆盖成空串。
+        self._raw: dict[str, str] = {}
         self._load()
 
     def _load(self):
@@ -45,6 +48,7 @@ class ProviderStore:
             key = d.get("api_key", "")
             if isinstance(key, str) and key.startswith(("sm4:", "xor:")):
                 d["api_key"] = self._decrypt(key)
+                self._raw[d["name"]] = key
             valid = {f for f in ProviderConfig.__dataclass_fields__}
             providers[d["name"]] = ProviderConfig(**{k: v for k, v in d.items() if k in valid})
         if providers:
@@ -58,8 +62,12 @@ class ProviderStore:
         arr = []
         for p in self.cfg.providers.values():
             d = asdict(p)
+            raw = self._raw.get(p.name)
             if d.get("api_key"):
                 d["api_key"] = self.crypto.encrypt_sm4(self.cfg.security.secret, d["api_key"])
+            elif raw:
+                # 内存中明文为空（如密钥轮换后解密失败）：保留原密文，避免静默清空有效密钥。
+                d["api_key"] = raw
             arr.append(d)
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump({
@@ -174,6 +182,15 @@ class ProviderStore:
         del self.cfg.providers[name]
         self._save()
         return {"ok": True}
+
+    def delete_by_owner(self, owner: str) -> int:
+        """级联删除：删除某用户拥有的全部 Provider（用于删除用户时清理孤儿凭证）。"""
+        removed = [n for n, p in self.cfg.providers.items() if (p.owner or "") == owner]
+        for n in removed:
+            del self.cfg.providers[n]
+        if removed:
+            self._save()
+        return len(removed)
 
     def set_default(self, model: str, username: Optional[str] = None) -> dict:
         if not model:

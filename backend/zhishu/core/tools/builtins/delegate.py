@@ -64,7 +64,8 @@ async def delegate_to_agent(args: dict, ctx) -> str:
                 memory_manager=None)
     chunks = []
     async for ev in sub.run(task, scratch_session, model=meta.get("model"),
-                            owner=ctx.user, agent_name=name, is_admin=is_admin):
+                            owner=ctx.user, agent_name=name, is_admin=is_admin,
+                            user_role=user_role, delegate_depth=1):
         if ev.get("type") == "token":
             chunks.append(ev["text"])
     return ("【子智能体 %s 返回】\n" % name) + "".join(chunks)

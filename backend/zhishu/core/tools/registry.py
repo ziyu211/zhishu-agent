@@ -134,11 +134,17 @@ class ToolRegistry:
     def discover_builtin_tools(cls) -> None:
         if cls._discovered:
             return
-        cls._discovered = True
         try:
             from . import builtins  # 触发各工具模块的自注册
         except Exception:
-            pass
+            # 自发现失败（如某工具模块 import 抛错）必须显式告警：否则所有内置工具会
+            # 静默全部消失且永不重试。记录日志后返回（不置 _discovered），下次调用仍会重试。
+            import logging
+            logging.getLogger("zhishu.tools").exception(
+                "内置工具自发现失败：工具将全部不可用，请检查 core/tools/builtins 下模块"
+            )
+            return
+        cls._discovered = True
 
     @classmethod
     def resolve_toolset(cls, name: str) -> list[str]:

@@ -118,13 +118,26 @@ class ConcurrencyLimiter:
                 day[user] = used + 1
                 self._save_quota()
 
-        # 2) 全局并发
-        if self._global_sem is not None:
-            await self._global_sem.acquire()
-        # 3) 单用户并发
-        sem = self._ensure_user_sem(user)
-        if sem is not None:
-            await sem.acquire()
+        # 2) 全局 + 单用户并发信号量：任一环节被取消（如客户端断连）都必须回滚
+        #    已获取的许可，否则许可会永久泄漏、最终全实例对话死锁。
+        g_acquired = False
+        u_acquired = False
+        try:
+            if self._global_sem is not None:
+                await self._global_sem.acquire()
+                g_acquired = True
+            sem = self._ensure_user_sem(user)
+            if sem is not None:
+                await sem.acquire()
+                u_acquired = True
+        except BaseException:
+            if u_acquired:
+                s = self._user_sems.get(user)
+                if s is not None:
+                    s.release()
+            if g_acquired and self._global_sem is not None:
+                self._global_sem.release()
+            raise
 
     async def release(self, user: Optional[str]) -> None:
         user = user or "anonymous"

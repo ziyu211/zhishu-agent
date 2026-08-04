@@ -2,6 +2,7 @@
  * 对话 / 会话 + 流式对话（SSE）。
  */
 import { request, getToken, resolveUrl } from './http'
+import { getActAs } from './actas'
 import type {
   Conversation,
   ConversationListResp,
@@ -90,6 +91,10 @@ export async function streamChat(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
+  // 管理员代管（X-Act-As）：发消息也必须携带，否则会穿透代管以 admin 身份执行，
+  // 导致会话归属错乱、审计留痕失真。
+  const act = getActAs()
+  if (act) headers['X-Act-As'] = act
   const resp = await fetch(resolveUrl('/api/v1/chat'), {
     method: 'POST',
     headers,

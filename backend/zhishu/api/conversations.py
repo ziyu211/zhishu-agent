@@ -1,6 +1,9 @@
 """智枢智能体 —— 多用户对话路由（按 owner 隔离，管理员可看全部）。"""
 from __future__ import annotations
 
+import os
+import shutil
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -91,11 +94,26 @@ async def update_conversation(cid: str, req: UpdateConvReq, user=require_auth("c
 @router.delete("/{cid}")
 async def delete_conversation(cid: str, user=require_auth("chat")):
     ctx = get_ctx()
+    owner = user.get("u", "")
     try:
-        ctx.conversations.delete(cid, user.get("u", ""), user.get("r", ""))
+        ctx.conversations.delete(cid, owner, user.get("r", ""))
     except PermissionError:
         raise HTTPException(status_code=403, detail="无权删除该对话")
     except ValueError:
         raise HTTPException(status_code=404, detail="对话不存在")
-    ctx.audit.log(user.get("u", ""), "delete_conversation", f"删除对话 {cid}")
+    # 级联清理：服务端记忆（turns）与磁盘附件必须一并删除，否则已删对话仍可被
+    # session_search 召回、附件残留磁盘（合规与存储闭环）。
+    try:
+        ctx.memory.clear_session_prefix(f"{owner}:{cid}")
+    except Exception:
+        pass
+    try:
+        att_root = os.path.join(
+            ctx.cfg.server.data_dir, ctx.cfg.media.store_dir, "attachments", owner, cid
+        )
+        if os.path.isdir(att_root):
+            shutil.rmtree(att_root, ignore_errors=True)
+    except Exception:
+        pass
+    ctx.audit.log(owner, "delete_conversation", f"删除对话 {cid}")
     return {"ok": True}

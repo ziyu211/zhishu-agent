@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
-import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NSelect } from 'naive-ui'
+import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NSelect, NTag } from 'naive-ui'
 import { api } from '@/api/client'
 import { actAs } from '@/api/actas'
 import { useAppStore } from '@/stores/app'

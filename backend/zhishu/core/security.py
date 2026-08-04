@@ -331,6 +331,33 @@ class AuthService:
             data = json.loads(payload_b64)
             if data.get("exp", 0) < time.time():
                 return None
+            # 吊销检查：用户被删除/停用后，旧令牌立即失效；角色被降级后，令牌里的
+            # 旧角色不再被信任（避免「降级无效」）。
+            # 注意三种「查不到用户」的语义必须区分，否则会误杀合法令牌：
+            #   a) 无用户库 / 关闭鉴权(匿名令牌)   -> 放行（无从校验，且系统本就不做用户管理）
+            #   b) 用户库为空（首次引导期）        -> 放行（bootstrap 尚未落库）
+            #   c) 用户库非空但查无此人（已删除）  -> 拒绝（吊销生效）
+            if self.users is not None and data.get("u"):
+                row = None
+                lookup_ok = True
+                try:
+                    row = self.users.get_by_name(data["u"])
+                except Exception:
+                    lookup_ok = False          # 存储异常：不因基础设施抖动误杀会话
+                if lookup_ok:
+                    if row is not None:
+                        u = dict(row)
+                        if (u.get("status") or "active") != "active":
+                            return None        # 已停用
+                        if u.get("role") and u["role"] != data.get("r"):
+                            data = dict(data)  # 角色降级/变更：以库中当前角色为准
+                            data["r"] = u["role"]
+                    else:
+                        try:
+                            if self.users.count() > 0:
+                                return None    # 情形 c：已删除用户的残留令牌
+                        except Exception:
+                            pass               # 情形 a/b：放行
             return data
         except Exception:
             return None

@@ -35,11 +35,16 @@ class ConversationStore:
     def _row(self, row: sqlite3.Row) -> dict:
         d = dict(row)
         try:
-            d["messages"] = json.loads(d.get("messages") or "[]")
+            msgs = json.loads(d.get("messages") or "[]")
         except Exception:
-            d["messages"] = []
+            msgs = []
+        # 防御：历史脏数据可能把 messages 写成了 "null"/非数组，必须兜底为空列表，
+        # 否则 len(None) 会在列表接口抛出 TypeError → 整个用户对话列表 500。
+        if not isinstance(msgs, list):
+            msgs = []
+        d["messages"] = msgs
         d["pinned"] = bool(d.get("pinned"))
-        d["message_count"] = len(d["messages"])
+        d["message_count"] = len(msgs)
         return d
 
     # --------------------- 变更 ---------------------
@@ -87,7 +92,9 @@ class ConversationStore:
         allowed = {"title", "pinned", "messages"}
         sets, vals = [], []
         for k, v in fields.items():
-            if k in allowed:
+            # 跳过未提供的字段（None）：部分更新（如仅置顶/仅改名）绝不能
+            # 把其它字段覆盖成 SQL NULL / 字符串 "null"，否则历史消息会被清空。
+            if k in allowed and v is not None:
                 if k == "messages" and not isinstance(v, str):
                     v = json.dumps(v, ensure_ascii=False)
                 sets.append(f"{k}=?")
@@ -110,6 +117,12 @@ class ConversationStore:
             raise PermissionError("forbidden")
         self.conn.execute("DELETE FROM conversations WHERE id=?", (cid,))
         self.conn.commit()
+
+    def delete_by_owner(self, owner: str) -> int:
+        """级联删除：删除某用户全部对话（用于删除用户时清理孤儿数据）。"""
+        cur = self.conn.execute("DELETE FROM conversations WHERE owner=?", (owner,))
+        self.conn.commit()
+        return cur.rowcount
 
     def owner_of(self, cid: str) -> Optional[str]:
         row = self.conn.execute("SELECT owner FROM conversations WHERE id=?", (cid,)).fetchone()

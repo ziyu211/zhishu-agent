@@ -298,7 +298,10 @@ class CronScheduler:
         try:
             row = ctx.users.get_by_name(_owner) if _owner else None
             if row:
-                _role = row.get("role")
+                # sqlite3.Row 没有 .get()：先转 dict 再取角色，否则 AttributeError 被
+                # 外层 except 吞掉 → 定时任务永远以「无角色/非管理员」身份运行，
+                # 看不到共享(share_with) Provider/模块，表现为「手动正常、定时报错」。
+                _role = dict(row).get("role")
                 _is_admin = _role == "admin"
         except Exception:
             _is_admin = False

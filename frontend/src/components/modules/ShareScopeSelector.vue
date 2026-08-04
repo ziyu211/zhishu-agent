@@ -21,22 +21,33 @@ const ROLE_OPTIONS = [
   { label: '访客', value: 'viewer' },
 ]
 
-// 父组件打开「编辑」时会重新赋值 shared / share_with，需同步内部 scope
+// 父组件打开「编辑」时会重新赋值 shared / share_with，需同步内部 scope。
+// internal：标记「本轮 scope 变化由本组件自身发出」，避免回写 props 触发 syncFromProps
+// 又把 scope 弹回（典型症状：选「按角色共享」→ 父组件 shared 变 false → scope 被改回「私有」）。
+const internal = ref(false)
 function syncFromProps() {
+  if (internal.value) {
+    internal.value = false
+    return
+  }
   scope.value = props.shared ? 'all' : (props.shareWith && props.shareWith.length ? 'roles' : 'private')
 }
 watch(() => [props.shared, props.shareWith], syncFromProps, { immediate: true })
 
-// 用户切换共享范围 → 回写 shared / share_with（roles 模式保留已选角色）
+// 用户切换共享范围 → 回写 shared / share_with（roles 模式保留已选角色，仅置 shared=false）
 watch(scope, (s) => {
   if (s === 'all') {
+    internal.value = true
     emit('update:shared', true)
     emit('update:shareWith', [])
   } else if (s === 'private') {
+    internal.value = true
     emit('update:shared', false)
     emit('update:shareWith', [])
   } else {
+    internal.value = true
     emit('update:shared', false)
+    // 不在此清空 share_with：角色勾选项由 NCheckboxGroup 独立管理
   }
 })
 

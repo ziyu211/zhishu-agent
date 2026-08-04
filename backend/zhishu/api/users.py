@@ -4,6 +4,9 @@
 """
 from __future__ import annotations
 
+import os
+import shutil
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -92,9 +95,51 @@ async def reset_password(uid: int, req: ResetPwdReq, user=require_auth("users:wr
 @router.delete("/{uid}")
 async def delete_user(uid: int, user=require_auth("users:write")):
     ctx, store = _store()
+    # 删除前先取用户名（删除后无法再查），用于级联清理其全部归属数据。
+    target = store.get(uid)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    username = target.get("username", "")
     try:
         store.delete(uid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    ctx.audit.log(user.get("u", ""), "delete_user", f"删除用户 #{uid}")
+    # 级联清理：删除用户时一并清除其孤儿数据，避免同名重建后继承前任全部内容
+    # （对话、记忆、凭证、定时任务、知识库、本地文件目录）。
+    try:
+        ctx.conversations.delete_by_owner(username)
+    except Exception:
+        pass
+    try:
+        ctx.providers.delete_by_owner(username)
+    except Exception:
+        pass
+    try:
+        ctx.memory.clear_session_prefix(f"{username}:")
+    except Exception:
+        pass
+    try:
+        for j in ctx.cron.list_jobs():
+            if isinstance(j, dict) and j.get("owner") == username:
+                ctx.cron.delete_job(j["id"])
+    except Exception:
+        pass
+    try:
+        docs = ctx.kb.list_documents(owner=username, limit=10000)
+        for d in docs:
+            try:
+                ctx.kb.delete_document(d.get("doc_id"), owner=username)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for d in (os.path.join(ctx.cfg.server.data_dir, "memory", username),
+              os.path.join(ctx.cfg.server.data_dir, ctx.cfg.media.store_dir, "attachments", username),
+              os.path.join(ctx.cfg.server.data_dir, ctx.cfg.media.store_dir, username)):
+        try:
+            if os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+    ctx.audit.log(user.get("u", ""), "delete_user", f"删除用户 {username}（已级联清理归属数据）")
     return {"ok": True}

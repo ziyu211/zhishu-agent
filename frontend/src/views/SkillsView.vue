@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch } from 'vue'
 import { useMessage } from 'naive-ui'
-import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NUpload, NDrawer, NDrawerContent, NAlert } from 'naive-ui'
+import { NModal, NForm, NFormItem, NInput, NSwitch, NButton, NUpload, NDrawer, NDrawerContent, NAlert, NTag } from 'naive-ui'
 import { api } from '@/api/client'
 import { importSkills, exportSkills, exportSkill } from '@/api/skills'
 import { actAs } from '@/api/actas'

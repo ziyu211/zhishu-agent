@@ -427,4 +427,44 @@ V6（插件 shell 命令注入）、V8（operator 任意 shell/cron）属设计�
 
 移除仓库根目录与 `backend/` 下遗留的调试/临时产物（`verify_*.py`、`_*.py` 测试脚本、`*.log`、`_cell_graph_preview.html` 等）与未使用的 `.venv-test`，不触及 `data/`（运行时数据）、`.venv/`、`frontend/node_modules/`、`backend/zhishu/static/`（构建产物）。
 
+## 十二、全链路闭环审计与修复（2026-08-04）
+
+在第十一节安全审计之上，本轮对**后端 core / 后端 API / 数据与持久化层 / 前端**四大面做了逐模块业务闭环走查，重点排查「入口 → 处理 → 持久化 → 反馈」链路上的断点（数据被静默破坏、资源不回收、状态不一致、删除不级联等）。
+
+### 12.1 已修复的闭环断点
+
+| 编号 | 断点 | 位置 | 影响 | 处置 |
+|------|------|------|------|------|
+| C1 | 对话部分更新把未传字段写成 `"null"` | `core/conversations.py` | 只改标题会清空全部消息，列表接口 `len(None)` 抛 500 | `update` 跳过 `None` 字段；`_row` 对反序列化结果做 `isinstance(list)` 兜底 |
+| C2 | 轮换 `security.secret` 后 Provider 密钥被静默清空 | `core/credentials.py` | 全部 LLM 调用 401，且原密文不可恢复 | 新增 `_raw` 原始密文缓存，明文解不出时**保留原密文**而非写空 |
+| C3 | 令牌无吊销机制 | `core/security.py` | 用户删除/停用/降级后旧令牌仍有效至 7 天 | `verify()` 回查用户库：不存在或非 active 拒绝；角色以库中当前值为准（无用户库的引导期/离线模式跳过，避免锁死） |
+| C4 | 委派兜底 handler 丢失递归深度与角色 | `core/tools/builtins/delegate.py` | 子智能体可无限递归委派、越权使用工具 | 补齐 `delegate_depth` / `user_role` / `is_admin` 透传 |
+| C5 | 内置工具自发现静默吞异常 | `core/tools/registry.py` | 单个 builtins 模块导入失败 → 工具全量消失且永不重试 | 改 fail-loud：记录 exception 日志，失败时不置 `_discovered`，允许后续重试 |
+| C6 | 并发信号量取消时许可泄漏 | `core/concurrency.py` | 请求被取消后全局许可永久丢失，最终全站死锁 | 获取过程包裹 try/except，异常时回滚已获取许可再抛出 |
+| C7 | cron 对 `sqlite3.Row` 调 `.get()` | `core/cron.py` | 定时对话任务角色回查必抛 `AttributeError` | 改为 `dict(row).get("role")` |
+| C8 | 删除对话不级联清理 | `api/conversations.py` | 记忆 turns 与附件成为孤儿，长期膨胀 | 删除时清理 `memory` 中 `{owner}:{cid}` 前缀 turns + `attachments/<owner>/<cid>` 目录 |
+| C9 | 删除用户不级联清理 | `api/users.py` | 对话/Provider/记忆/定时任务/知识库文档/本地目录全部残留 | 重写为「删用户 → 级联清理六类资源 → 审计埋点」 |
+| C10 | 记忆前缀删除未转义通配符 | `core/memory/sqlite_provider.py` | 用户名含 `_`/`%` 会误删他人数据 | 新增 `clear_session_prefix`，`LIKE ... ESCAPE '\'` 转义 |
+| C11 | `SkillsView`/`PluginsView` 未导入 `NTag` | `frontend/src/views/` | naive-ui 未全局注册，只读模式标签渲染失败 | 补齐 import |
+| C12 | `streamChat` 绕过统一 `request()`，不带 `X-Act-As` | `frontend/src/api/chat.ts` | admin 代管他人时对话仍以自己身份发出 | 发送前注入 `X-Act-As` 头 |
+| C13 | 设置/系统接口缺 `skipActAs` | `frontend/src/api/settings.ts`、`system.ts` | 代管态下读回的是被代管者的系统状态 | 管理端接口统一加 `skipActAs: true` |
+| C14 | `ShareScopeSelector` 选「按角色共享」被弹回「私有」 | `frontend/src/components/modules/` | 角色级共享无法保存 | 加 `internal` 标志位打断 props↔state 回环 |
+| C15 | `AgentsView` 缺 `sub_agents` 字段 | `frontend/src/views/AgentsView.vue` | 协调者无法在 UI 上配置成员智能体 | 表单新增「成员智能体（协调者）」多选项，读写全链路补齐 |
+
+### 12.2 回归验证
+
+新增两套可复现的验证脚本，均在运行容器 `zsagent` 内执行：
+
+- `backend/tests/test_closure_audit.py` — 模块级闭环回归，**36/36 通过**（覆盖 C1–C7、C10 与令牌吊销的引导期兼容）。
+- `backend/tests/http_closure_check.py` — 真实 HTTP 全链路验证，**18/18 通过**（对话部分更新不破坏消息、列表接口不再 500、删除级联生效、伪造但签名合法的令牌被 401 拒绝、协作工具在运行实例中已注册共 22 个）。
+- 既有 `backend/tests/test_multiagent_e2e.py` **6/6 通过**（含委派路由 A/B 与超时熔断），确认无回归。
+
+### 12.3 遗留观察（不阻塞，记录备查）
+
+- `moa.py` 绕过 `filter_tool_specs` 且使用伪身份 `user="moa"`，建议后续统一走真实身份的工具裁剪。
+- 每请求新建 `LLMClient` 而 `aclose()` 无调用点，连接池依赖 GC 回收；高并发下建议改为共享客户端或显式关闭。
+- cron 的 shell 类任务在宿主进程直跑，无沙箱；生产环境建议关闭或加容器级隔离。
+- Embedding 降级为 hash 向量时会与真实语义向量混入同一库，建议按模型维度分库或标记来源。
+- 对话接口的 `context_length` 入参当前被静默丢弃，尚未接入上下文组装。
+
 > 本系统为「**完整可运行的多用户智能体平台**」：RBAC 多租户、模块共享、运行时 Provider 管理、安全防护与多用户并发隔离均已实现闭环，可直接二次开发接入具体模型与数据库。

@@ -77,6 +77,27 @@ class MemoryStore:
             self.conn.execute("DELETE FROM turns")
         self.conn.commit()
 
+    def clear_session_prefix(self, prefix: str) -> int:
+        """删除 session 以 prefix 开头的全部 turns（含委派子会话 cid::delegate::x）。
+
+        用于级联清理：删除对话/用户时，其服务端记忆（turns）必须一并清除，
+        否则已删内容仍可被 session_search 召回、且构成数据残留（合规闭环）。
+        prefix 中的 % / _ 通配符已转义，避免用户名含这些字符时误删他人数据。
+        """
+        esc = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = esc + "%"
+        cur = self.conn.execute(
+            "DELETE FROM turns WHERE session LIKE ? ESCAPE '\\'", (pattern,)
+        )
+        try:
+            self.conn.execute(
+                "DELETE FROM turns_fts WHERE session LIKE ? ESCAPE '\\'", (pattern,)
+            )
+        except sqlite3.OperationalError:
+            pass
+        self.conn.commit()
+        return cur.rowcount
+
 
 class SQLiteMemoryProvider(MemoryProvider):
     """内置会话记忆 Provider：包装 MemoryStore。"""

@@ -42,6 +42,7 @@ const form = reactive<{
   max_steps: string | null
   shared: boolean
   share_with: string[]
+  sub_agents: string[]
 }>({
   name: '',
   description: '',
@@ -54,6 +55,7 @@ const form = reactive<{
   max_steps: null,
   shared: false,
   share_with: [],
+  sub_agents: [],
 })
 
 async function load() {
@@ -96,6 +98,7 @@ function openCreate() {
     max_steps: null,
     shared: false,
     share_with: [],
+    sub_agents: [],
   })
   showModal.value = true
 }
@@ -121,6 +124,7 @@ async function openEdit(it: any) {
       max_steps: d.max_steps ?? null,
       shared: !!d.shared,
       share_with: d.share_with || [],
+      sub_agents: d.sub_agents || [],
     })
     showModal.value = true
   } catch (e: any) {
@@ -146,8 +150,16 @@ function buildPayload() {
     max_steps: ms,
     shared: form.shared,
     share_with: form.share_with,
+    sub_agents: form.sub_agents,
   }
 }
+
+// 可作为「成员」挂到本协调者下的其它智能体（排除自身）
+const subAgentOptions = computed(() =>
+  agents.value
+    .filter((a: any) => a.name !== editing.value)
+    .map((a: any) => ({ label: a.name, value: a.name })),
+)
 
 async function submit() {
   if (!form.name.trim()) {
@@ -316,6 +328,16 @@ watch(actAs, () => load())
               style="margin-top: 8px"
             />
           </div>
+        </NFormItem>
+        <NFormItem label="成员智能体（协调者）">
+          <NSelect
+            v-model:value="form.sub_agents"
+            :options="subAgentOptions"
+            multiple
+            filterable
+            placeholder="若该智能体是协调者，可指定其下成员（用于委派覆盖度与并行扇出推断）"
+          />
+          <div class="role-hint" style="margin-top: 6px">仅协调类智能体（含 delegate_to_agent）需要；普通成员留空即可。</div>
         </NFormItem>
         <NFormItem label="最大推理步数（可选）">
           <NInput
