@@ -282,48 +282,46 @@ _CHITCHAT_RE = re.compile(
 )
 
 
-_CAPABILITY_RE = re.compile(
-    r"(你能|你会|可以|能|能不能|会不会|可不可以|是否可以|是否|能否)"
-    r"[^，。！？\n]{0,14}"
-    r"(吗|呢|？|\?)\s*$"
-    r"|你会(什么|哪些|哪些功能|啥|干啥|做什么|会什么)"
-    r"|你能(做什么|干啥|干什么|做啥)"
-    r"|有什么(功能|能力|本事|用|用途)"
-    r"|怎么(用|使用|操作|玩|上手)|如何(用|使用|操作)"
-    r"|什么是|是什么意思|有什么区别|解释一下|讲讲|介绍一下",
+# 显式请求「组建团队 / 子智能体」：必须建团或委派给协调者。
+_EXPLICIT_TEAM_RE = re.compile(
+    r"创建?(团队|team)|组(建|个)?(团队|agent)|建(一个|个)?(子智能体|agent|智能体)|"
+    r"委派(给|到|给到)|用\s*(orchestrator|协调者|投资总监)|"
+    r"多(个|角色).{0,4}(协作|分工|智能体)|让\s*.{0,6}(负责|处理|分析)",
     re.IGNORECASE,
 )
-# 真实任务信号：出现则视为需要委派/执行的复合任务，不被「能力咨询」误判为简单问答。
-_TASK_TRIGGER_RE = re.compile(
-    r"帮我|请(问|帮|你|处理|分析|做)|咱|给(我|我们)|"
+# 复合专业任务（多角色 / 多步骤 / 并行收集）：需要走委派链路。
+# 注意：刻意只命中「专业领域动词 + 领域名词」，避免把写诗/翻译/天气等单智能体任务误判。
+_COMPLEX_TASK_RE = re.compile(
+    r"投资研究|股票分析|行业调研|量化回测|风险评估|尽职调查|竞品分析|"
+    r"综合(分析|报告|评估)|对比分析|并行收集|多源(资料|信息)|"
     r"分析|研究|调研|评估|回测|对比|比较|评测|审查|审计|诊断|排查|"
-    r"写(一|份|个|篇|段)?(文|报|代码|方案|计划|总结|邮件|脚本)|"
-    r"生成|创建|制作|设计|制定|规划|总结|归纳|翻译|润色|改写|校(对|验)|排版|"
-    r"查(一|看|询|找)?(资料|数据|行情|股价|信息|财报)|找(出|到)?(资料|数据|信息|答案)|"
-    r"这份|这个|该(文件|表格|股|报告|项目)|这只|这一(份|个)|上述|上传的|附件",
+    r"制定策略|技术方案|架构设计|需求分析|研究(报告|课题)|"
+    r"投资|股票|行业|量化|风险",
     re.IGNORECASE,
 )
 
 
 def _needs_supervisor_delegation(text: str) -> bool:
-    """判断主管是否「必须」把该任务委派给协调类智能体。
+    """判断主管是否「必须」把该任务委派给协调类智能体（路径 B）。
 
-    存在协调类智能体时，主管对复合任务必须委派（用户核心诉求）；但对寒暄、
-    极短问句、以及「能力咨询 / 元问题 / 定义性问答」等简单对话应允许直接作答，
-    否则「你能直接修改Excel吗」「你会做什么」也会被派给投资总监。
-    判定口径：先排除明确闲聊与过短输入；再排除「能力咨询类」问句（无具体交付物）；
-    其余一律视为需要委派的复合任务。
+    设计原则（对标 Hermes 委派路由）：路由由**服务端分类器权威决定**，而非仅靠
+    系统提示软约束让模型自律——否则弱模型会把普通问题也丢进多 Agent 协作，浪费资源。
+    判定口径刻意「保守」：默认不委派，仅当命中明确的「建团请求」或「复合专业任务」
+    信号时才委派；能力咨询 / 简单创作 / 简单事实 / 模糊输入一律直接作答。
     """
     t = (text or "").strip()
     if len(t) < 6:
         return False
     if _CHITCHAT_RE.match(t):
         return False
-    # 能力咨询 / 元问题 / 定义性问答：无具体交付物，主管直接作答即可；
-    # 但若句中同时出现明确的「真实任务信号」（帮我/请/这份/分析…），仍视为需要委派。
-    if _CAPABILITY_RE.search(t) and not _TASK_TRIGGER_RE.search(t):
-        return False
-    return True
+    # 显式要求团队 / 子智能体 → 必须建团 / 委派
+    if _EXPLICIT_TEAM_RE.search(t):
+        return True
+    # 复合专业任务（多角色 / 多步骤 / 并行收集）→ 委派
+    if _COMPLEX_TASK_RE.search(t):
+        return True
+    # 其余（能力咨询 / 简单创作 / 简单事实 / 模糊输入）→ 直接作答，不委派
+    return False
 
 
 class Agent:
@@ -501,13 +499,13 @@ class Agent:
             specs = filter_tool_specs(ToolRegistry.specs(), owner, is_admin, user_role)
             if not can_delegate:
                 specs = [s for s in specs if s["function"]["name"] != DELEGATE_TOOL_NAME]
-            # 主管模式下若存在协调类子智能体，且本任务确需委派（路径 B），强制走委派链路：
-            # 裁剪 web/执行类工具，仅保留 delegate_to_agent 与少量元工具（历史回忆、记忆、
-            # 任务清单、知识库/读文件）。这是防止主管把复合任务（如股票分析）当成普通问答
-            # 自己执行 16 步的关键闸门。
-            # 注意：仅当 _needs_supervisor_delegation 判定为「需要委派」时裁剪；否则（路径 A
-            # 简单问答 / 能力咨询）主管保留完整工具、直接作答，避免「你能改 Excel 吗」也被派给协调者。
-            if can_delegate and has_coordinator and _needs_supervisor_delegation(user_message):
+            # 主管委派路由（对标 Hermes：路由由服务端分类器权威决定）。
+            # 路径 B · 复合任务（需要多角色/多步骤协作）：强制走委派链路——
+            #   裁剪成元工具 + 委派，并收集协调者名单供兜底代委派。
+            # 路径 A · 简单问答 / 能力咨询：主管直接作答，**权威移除 delegate_to_agent /
+            #   create_team**，使模型物理上无法把普通问题丢进多 Agent 协作（根治资源浪费）。
+            need_del = _needs_supervisor_delegation(user_message)
+            if can_delegate and has_coordinator and need_del:
                 allowed = {
                     "delegate_to_agent", "create_team", "session_search", "memory", "todo",
                     "knowledge_search", "knowledge_list", "knowledge_read",
@@ -525,6 +523,10 @@ class Agent:
                             _sup_coordinators.append(_a["name"])
                 except Exception:
                     pass
+            elif can_delegate and has_coordinator and not need_del:
+                specs = [s for s in specs
+                         if s["function"]["name"] not in
+                         {"delegate_to_agent", "create_team"}]
             max_steps = MAX_STEPS
 
         # ---- MoA 多智能体 facade：把单轮对话路由到并行聚合 ----

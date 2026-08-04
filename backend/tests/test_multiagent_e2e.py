@@ -67,7 +67,8 @@ class FakeLLM:
         self.api_mode = api_mode
         self._calls = 0
 
-    async def chat(self, messages, model=None, tools=None, max_tokens=None):
+    async def chat(self, messages, model=None, tools=None, max_tokens=None,
+                   tool_choice=None):
         sys_c = (messages[0].get("content", "") if messages else "")
         if "SUBECHO_MARKER" in sys_c:
             # —— 子智能体分支 ——
@@ -243,12 +244,111 @@ async def test_action_audit_tool_call():
 
 
 # ---------------------------------------------------------------------------
+# 测试 4（纯单测）：委派分类器保守判定（默认不委派，仅命中明确信号才委派）
+# ---------------------------------------------------------------------------
+def test_classifier_conservative():
+    f = agent_mod._needs_supervisor_delegation
+    # 路径 A：普通问题 / 能力咨询 / 简单创作 → 不应委派
+    for q in ["你能直接修改EXECL吗", "你会做什么", "什么是RAG", "今天天气怎么样",
+              "帮我写一首关于春天的诗", "能读取PDF吗", "你好", "今天几号"]:
+        assert f(q) is False, f"普通问题被误判为需委派: {q!r}"
+    # 路径 B：显式建团 / 复合专业任务 → 应委派
+    for q in ["帮我分析一下贵州茅台", "创建一个股票分析团队", "用Orchestrator调研新能源",
+              "研究一下半导体行业", "做个量化回测", "对比一下工行和建行"]:
+        assert f(q) is True, f"复合任务未判为需委派: {q!r}"
+    print("  [4] 分类器保守判定（默认不委派，仅明确信号才委派）  ✓")
+
+
+# ---------------------------------------------------------------------------
+# 测试 5/6：路由治理 —— 路径 A 权威剥离委派工具，路径 B 保留并实际委派
+# ---------------------------------------------------------------------------
+def _write_coordinator(tmp: str) -> None:
+    d = os.path.join(tmp, "agents", "orchestrator")
+    os.makedirs(d, exist_ok=True)
+    meta = {
+        "name": "orchestrator",
+        "description": "投资总监（协调者）",
+        "version": "1.0.0",
+        "enabled": True,
+        "system_prompt": "你是协调者。",
+        "model": None,
+        "tools": ["delegate_to_agent", "web_search"],
+        "max_steps": 8,
+    }
+    with open(os.path.join(d, "agent.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+class _RoutingFakeLLM(FakeLLM):
+    def __init__(self, cfg, expect_delegate=None):
+        super().__init__(cfg)
+        self.expect_delegate = expect_delegate  # True/False：断言 delegate 工具可见性
+        self.saw_delegate_tool = None
+
+    async def chat(self, messages, model=None, tools=None, max_tokens=None,
+                   tool_choice=None):
+        names = [t["function"]["name"] for t in (tools or [])]
+        if self.saw_delegate_tool is None:
+            self.saw_delegate_tool = "delegate_to_agent" in names
+        if self.expect_delegate is not None:
+            assert self.saw_delegate_tool == self.expect_delegate, (
+                f"路由不符预期：路径{'B(应委派)' if self.expect_delegate else 'A(应直答)'} "
+                f"下 delegate_to_agent 可见性={self.saw_delegate_tool}, tools={names}")
+        if self.saw_delegate_tool:
+            return _resp_tool("delegate_to_agent",
+                              {"agent_name": "subecho", "task": "分析"})
+        return _resp_text("（主管直接作答）普通问题无需多 Agent 协作。")
+
+
+async def test_routing_path_a_simple_no_delegate():
+    with tempfile.TemporaryDirectory() as tmp:
+        g, cfg = _make_ctx(tmp)
+        _write_coordinator(tmp)
+        ToolRegistry.discover_builtin_tools()
+
+        llm = _RoutingFakeLLM(g.cfg, expect_delegate=False)
+        agent_mod.LLMClient = lambda c, m=None: llm
+        sup = Agent(g.cfg, llm, g.kb, g.memory, g.tool_ctx, media=g.media,
+                    context_engine=build_context_engine(g.cfg, llm),
+                    memory_manager=g.memory_manager)
+        events = await _collect(sup.run(
+            "你能直接修改EXECL吗", session="ra", owner="admin"))
+        types = [e.get("type") for e in events]
+        assert "delegate_start" not in types, f"路径A普通问题不应委派, events={types}"
+        assert llm.saw_delegate_tool is False, "路径A下 delegate_to_agent 不应出现在工具集"
+        print("  [5] 路由A：普通问题权威剥离委派工具、直接作答（不浪费资源）  ✓")
+
+
+async def test_routing_path_b_complex_delegate():
+    with tempfile.TemporaryDirectory() as tmp:
+        g, cfg = _make_ctx(tmp)
+        _write_coordinator(tmp)
+        _write_subagent(tmp)
+        ToolRegistry.discover_builtin_tools()
+
+        llm = _RoutingFakeLLM(g.cfg, expect_delegate=True)
+        agent_mod.LLMClient = lambda c, m=None: llm
+        sup = Agent(g.cfg, llm, g.kb, g.memory, g.tool_ctx, media=g.media,
+                    context_engine=build_context_engine(g.cfg, llm),
+                    memory_manager=g.memory_manager)
+        events = await _collect(sup.run(
+            "帮我分析一下贵州茅台", session="rb", owner="admin"))
+        types = [e.get("type") for e in events]
+        assert "delegate_start" in types, f"路径B复合任务应委派, events={types}"
+        assert llm.saw_delegate_tool is True, "路径B下 delegate_to_agent 应可见"
+        print("  [6] 路由B：复合任务保留委派工具并实际委派  ✓")
+
+
+# ---------------------------------------------------------------------------
 # 运行器
 # ---------------------------------------------------------------------------
 async def _run_all():
     await test_delegation_normal_and_rag()
     await test_delegation_timeout()
     await test_action_audit_tool_call()
+    test_classifier_conservative()
+    await test_routing_path_a_simple_no_delegate()
+    await test_routing_path_b_complex_delegate()
 
 
 def main():
