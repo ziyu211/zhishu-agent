@@ -264,15 +264,19 @@ async def test_action_audit_tool_call():
 # ---------------------------------------------------------------------------
 def test_classifier_conservative():
     f = agent_mod._needs_supervisor_delegation
-    # 路径 A：普通问题 / 能力咨询 / 简单创作 → 不应委派
+    # 路径 A：普通问题 / 能力咨询 / 简单创作 / 顺带提及领域词 → 不应委派
     for q in ["你能直接修改EXECL吗", "你会做什么", "什么是RAG", "今天天气怎么样",
-              "帮我写一首关于春天的诗", "能读取PDF吗", "你好", "今天几号"]:
+              "帮我写一首关于春天的诗", "能读取PDF吗", "你好", "今天几号",
+              "除了股票分析呢，你还能做什么", "帮我分析一下贵州茅台", "研究一下半导体行业",
+              "做个量化回测", "对比一下工行和建行", "帮我分析一下这段代码的性能",
+              "风险评估一般怎么做", "我们团队最近在讨论股票"]:
         assert f(q) is False, f"普通问题被误判为需委派: {q!r}"
-    # 路径 B：显式建团 / 复合专业任务 → 应委派
-    for q in ["帮我分析一下贵州茅台", "创建一个股票分析团队", "用Orchestrator调研新能源",
-              "研究一下半导体行业", "做个量化回测", "对比一下工行和建行"]:
-        assert f(q) is True, f"复合任务未判为需委派: {q!r}"
-    print("  [4] 分类器保守判定（默认不委派，仅明确信号才委派）  ✓")
+    # 路径 B：显式建团 / 点名团队 / 显式多智能体协作 → 应委派
+    for q in ["创建一个股票分析团队", "组建一个业务分析团队", "用Orchestrator调研新能源",
+              "用股票分析团队分析贵州茅台", "业务分析团队帮我评估这个商业模式",
+              "股票分析团队：分析贵州茅台", "多智能体协作分析这个项目", "多模型并行生成方案"]:
+        assert f(q) is True, f"显式团队/多智能体请求未判为需委派: {q!r}"
+    print("  [4] 分类器保守判定（默认不委派，仅显式点名团队/多智能体才委派）  ✓")
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +352,7 @@ async def test_routing_path_b_complex_delegate():
                     context_engine=build_context_engine(g.cfg, llm),
                     memory_manager=g.memory_manager)
         events = await _collect(sup.run(
-            "帮我分析一下贵州茅台", session="rb", owner="admin"))
+            "用Orchestrator分析贵州茅台", session="rb", owner="admin"))
         types = [e.get("type") for e in events]
         assert "delegate_start" in types, f"路径B复合任务应委派, events={types}"
         assert llm.saw_delegate_tool is True, "路径B下 delegate_to_agent 应可见"
