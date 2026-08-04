@@ -900,7 +900,18 @@ class KnowledgeBase:
         chunks = _split_text(text)
         if not chunks:
             return {"doc_id": doc_id, "chunks": 0, "skipped": True}
-        vecs = self.emb.embed(chunks)
+        # 降级隔离：向量随「实际使用的后端」打签名。Provider 抖动时产生的 hash
+        # 伪向量与真语义向量不在同一空间，混存会污染检索（维度不同还会抛异常）。
+        # strict_ingest=True 时宁可入库失败也不写脏数据。
+        vecs, emb_sig, degraded = self.emb.embed_tagged(chunks)
+        if degraded and getattr(self.emb.cfg, "strict_ingest", True):
+            raise ValueError(
+                "入库已中止：当前 embedding 模型不可用，系统本会降级为 hash 伪向量，"
+                "而伪向量与既有语义向量不在同一空间，写入会污染知识库检索。"
+                "请在「模型管理」中确认 embedding 模型（embedding.embed_model）可用后重试；"
+                "若确需先入库，可将 embedding.strict_ingest 设为 false（该文档需在模型"
+                "恢复后重新解析才能被语义检索到）。"
+            )
         full_meta = {
             "title": title or doc_id,
             "source": source or title or doc_id,
@@ -911,7 +922,7 @@ class KnowledgeBase:
             "content_preview": text,
             **(meta or {}),
         }
-        n = self.store.add(doc_id, chunks, vecs, full_meta)
+        n = self.store.add(doc_id, chunks, vecs, full_meta, emb_sig=emb_sig)
         # 增量构建知识图谱（关键词共现网络）
         if self.graph is not None:
             try:
@@ -919,7 +930,14 @@ class KnowledgeBase:
             except Exception as e:  # 图谱失败绝不影响主链路
                 import logging
                 logging.getLogger("zhishu.rag").warning("知识图谱分析失败 doc_id=%s: %s", doc_id, e)
-        return {"doc_id": doc_id, "chunks": n, "title": title or doc_id, "file_type": file_type}
+        out = {"doc_id": doc_id, "chunks": n, "title": title or doc_id,
+               "file_type": file_type}
+        if degraded:
+            out["degraded"] = True
+            out["warning"] = (
+                "embedding 模型不可用，本次已使用 hash 伪向量入库：该文档在语义"
+                "检索中不可见，请在模型恢复后对其执行「重新解析」。")
+        return out
 
     def ingest_file(
         self,
@@ -1022,8 +1040,15 @@ class KnowledgeBase:
     # ------------------------- 检索 / 上下文 -------------------------
     def query(self, question: str, top_k: int = 5,
               owner: Optional[str] = None) -> List[dict]:
-        qv = self.emb.embed([question])[0]
-        return self.store.search(qv, top_k, owner=owner)
+        # 检索侧同样按签名隔离：用 hash 伪向量去比对真语义向量（或反之）只会
+        # 得到噪声排序，且维度不同会抛异常。签名不匹配的分块直接不参与打分。
+        vecs, emb_sig, degraded = self.emb.embed_tagged([question])
+        if degraded:
+            import logging
+            logging.getLogger("zhishu.rag").warning(
+                "检索时 embedding 已降级为 hash，仅能命中同为 hash 签名的分块；"
+                "语义检索结果将显著变差，请检查 embedding 模型可用性。")
+        return self.store.search(vecs[0], top_k, owner=owner, emb_sig=emb_sig)
 
     def build_context(self, question: str, top_k: int = 5,
                       owner: Optional[str] = None) -> str:
@@ -1055,9 +1080,18 @@ class KnowledgeBase:
         return ok
 
     def stats(self, owner: Optional[str] = None) -> dict:
-        return {
+        out = {
             "backend": self.store.backend,
             "embedding_dim": self.emb.dim,
             "vectors": self.store.count(owner),
             "documents": self.store.doc_count(owner),
         }
+        # 暴露向量空间签名与「陈旧分块」数量：换了 embedding 模型或曾经降级过的
+        # 分块在当前配置下检索不到，前端可据此提示用户重新解析。
+        try:
+            sig = self.emb.signature
+            out["embedding_signature"] = sig
+            out.update(self.store.signature_stats(sig))
+        except Exception:  # noqa: BLE001 —— 统计失败不应影响主接口
+            pass
+        return out

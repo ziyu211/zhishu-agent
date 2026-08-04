@@ -17,6 +17,8 @@ from typing import AsyncIterator, Optional
 from ..config import ZhishuConfig
 from ...context import get_ctx
 from ..tools import ToolRegistry, ToolContext
+from ..tools.base import get_current_user, get_current_is_admin, get_current_role
+from ..modules.runtime import filter_tool_specs
 from ..agents_runtime import DELEGATE_TOOL_NAME
 
 
@@ -60,8 +62,11 @@ class MoAClient:
         models = self._reference_models()
         if not models:
             return []
+        # 在派发并发任务**之前**抓取身份快照，杜绝子任务读不到 contextvars 时
+        # fail-closed 成 anonymous（会误伤本人私有工具）或继承错误身份。
+        ident = (get_current_user(), get_current_is_admin(), get_current_role() or "")
         results = await asyncio.gather(
-            *(self._run_reference(m, messages) for m in models),
+            *(self._run_reference(m, messages, ident) for m in models),
             return_exceptions=True,
         )
         out = []
@@ -72,14 +77,29 @@ class MoAClient:
                 out.append(r)
         return out
 
-    async def _run_reference(self, model: str, messages) -> str:
+    async def _run_reference(self, model: str, messages, ident=None) -> str:
         g = get_ctx()
         llm = g.llm
-        ctx = ToolContext(kb=g.kb, security=g.cfg.security,
-                          user="moa", session="moa")
-        # 禁用委派，避免 reference agent 再派生子 agent 形成递归
-        ref_specs = [s for s in ToolRegistry.specs()
+        # 多用户隔离：MoA 的 reference agent 必须继承**发起本轮请求的真实用户身份**，
+        # 绝不能用 user="moa" 这类伪身份 —— 否则工具执行时 owner 判定失真，
+        # A 用户通过 MoA 就能读到 B 用户的私有插件 / MCP / 知识库。
+        # asyncio.gather 派生的子任务会复制 contextvars，但为稳妥起见由调用方
+        # 在派发前抓取快照（ident）传入，避免任何上下文丢失导致 fail-open。
+        owner, is_admin, user_role = ident or (
+            get_current_user(), get_current_is_admin(), get_current_role() or "")
+        base_ctx = getattr(g, "tool_ctx", None)
+        if base_ctx is not None:
+            # session 传 None → for_run 保留基础上下文的会话标识
+            ctx = base_ctx.for_run(owner, None, is_admin, user_role)
+        else:
+            ctx = ToolContext(kb=g.kb, security=g.cfg.security, user=owner,
+                              is_admin=is_admin, user_role=user_role)
+        # 工具裁剪：与主链路同一门控（plugin__/mcp__ 按归属 + 共享 + 角色过滤），
+        # 再禁用委派，避免 reference agent 递归派生子 agent。
+        ref_specs = [s for s in filter_tool_specs(ToolRegistry.specs(), owner,
+                                                  is_admin, user_role)
                      if s["function"]["name"] != DELEGATE_TOOL_NAME]
+        allowed_names = {s["function"]["name"] for s in ref_specs}
         sys_prompt = g.cfg.system_prompt
         msgs = [{"role": "system", "content": sys_prompt}] + list(messages)
 
@@ -88,11 +108,16 @@ class MoAClient:
         if msg.get("tool_calls"):
             for tc in msg["tool_calls"]:
                 fn = tc.get("function", {})
+                name = fn.get("name", "")
                 try:
                     args = json.loads(fn.get("arguments", "{}") or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                res = await ToolRegistry.execute(fn.get("name", ""), args, ctx)
+                # 纵深防御：模型幻觉出裁剪清单之外的工具名时直接拒绝执行。
+                if name not in allowed_names:
+                    res = f"[拒绝] 工具 {name} 不在当前用户可用范围内。"
+                else:
+                    res = await ToolRegistry.execute(name, args, ctx)
                 msgs.append({"role": "assistant", "content": msg.get("content"),
                              "tool_calls": msg["tool_calls"]})
                 msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": res})

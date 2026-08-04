@@ -58,6 +58,7 @@ export interface Provider {
   owner?: string
   shared?: boolean
   share_with?: string[]
+  context_length?: number | null   // 上下文窗口 token；null=未知
 }
 export interface RemoteModelsResp {
   models: string[]

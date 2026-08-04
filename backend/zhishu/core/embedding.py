@@ -37,11 +37,22 @@ class EmbeddingEngine:
         self._dim = cfg.dim
         self._http: Optional[httpx.Client] = None
         self._provider_failed = False  # 缓存：provider 网络 embedding 失败时置位，后续直接走 hash，避免反复打网络
+        # 降级隔离：记录「本应使用的后端」与「上一批实际使用的后端」。
+        # hash 伪向量与真实语义向量不在同一向量空间（维度也常不同），混存会污染
+        # 检索库，故每批向量都要带签名，由 VectorStore 按签名隔离。
+        self._intended: Optional[str] = None
+        self._last_kind: Optional[str] = None
 
     def _lazy_init(self):
         if self._backend is not None:
             return
         backend = self.cfg.backend
+        # 「本应使用的后端」：backend=provider/auto 且配了 embed_model 才算真语义模型，
+        # 否则本来就是 hash（此时用 hash 向量不算降级，签名一致即可正常检索）。
+        if backend in ("provider", "auto"):
+            self._intended = "provider" if self.cfg.embed_model else "hash"
+        else:
+            self._intended = backend
         if backend in ("provider", "auto"):
             # 「自定义配置」：仅当显式指定了 embedding.embed_model 才尝试网络 embedding；
             # 未配置 embed_model（即未自定义）时，直接降级 hash，绝不发起网络请求。
@@ -141,13 +152,17 @@ class EmbeddingEngine:
         self._lazy_init()
         if self._backend == "local":
             vecs = self._model.encode(texts, normalize_embeddings=True)
+            self._last_kind = "local"
             return [v.tolist() for v in vecs]
         if self._backend == "provider":
             # 已确认该 Provider 网络 embedding 不可用时，直接走 hash，避免反复打网络
             if self._provider_failed:
+                self._last_kind = "hash"
                 return [self._hash_vec(t) for t in texts]
             try:
-                return self._embed_provider(texts)
+                out = self._embed_provider(texts)
+                self._last_kind = "provider"
+                return out
             except Exception as e:  # 网络/模型不可用：优雅降级，不让其拖垮上下文组装
                 if self.cfg.fallback_hash:
                     logger.warning(
@@ -157,6 +172,7 @@ class EmbeddingEngine:
                         "或显式设置 embedding.backend=hash/local。",
                         getattr(self._provider_pc, "name", "?"), e)
                     self._provider_failed = True
+                    self._last_kind = "hash"
                     return [self._hash_vec(t) for t in texts]
                 raise
         if self._backend == "ollama":
@@ -168,9 +184,47 @@ class EmbeddingEngine:
                 )
                 r.raise_for_status()
                 out.append(r.json()["embedding"])
+            self._last_kind = "ollama"
             return out
         # hash 降级：字符 n-gram 哈希到 dim 维，再做 L2 归一化
+        self._last_kind = "hash"
         return [self._hash_vec(t) for t in texts]
+
+    # --------------------- 降级隔离：向量签名 ---------------------
+    @property
+    def degraded(self) -> bool:
+        """上一批向量是否为「降级产物」（本应真语义模型，实际退回 hash）。"""
+        return bool(self._last_kind and self._intended
+                    and self._last_kind != self._intended)
+
+    def _signature(self, kind: Optional[str], dim: int) -> str:
+        """向量空间签名：不同签名的向量**不可互相比较**，必须隔离。"""
+        kind = kind or self._backend or "hash"
+        if kind == "hash":
+            return f"hash:{dim}"
+        if kind == "local":
+            return f"local:{self.cfg.model}:{dim}"
+        if kind == "ollama":
+            return f"ollama:{self.cfg.ollama_model}:{dim}"
+        pc_name = getattr(getattr(self, "_provider_pc", None), "name", "?")
+        return f"provider:{pc_name}:{self.cfg.embed_model}:{dim}"
+
+    @property
+    def signature(self) -> str:
+        """当前**预期**的向量空间签名（用于展示与陈旧向量统计）。"""
+        self._lazy_init()
+        return self._signature(self._intended, self._dim)
+
+    def embed_tagged(self, texts: List[str]) -> tuple:
+        """返回 (向量, 本批实际签名, 是否降级)。
+
+        入库/检索一律走本方法：签名随**实际使用的后端**走，Provider 临时抖动
+        产生的 hash 伪向量会被打上 `hash:<dim>`，与真语义向量天然隔离，
+        既不会污染检索结果，也不会因维度不同在余弦计算时抛异常。
+        """
+        vecs = self.embed(texts)
+        dim = len(vecs[0]) if vecs else self._dim
+        return vecs, self._signature(self._last_kind, dim), self.degraded
 
     def _embed_provider(self, texts: List[str]) -> List[List[float]]:
         """走配置的模型 Provider 的 /embeddings（网络）。与 LLM 共用解析链。

@@ -38,6 +38,29 @@ async def lifespan(app: FastAPI):
         print(f"[智枢] 启动期后台任务初始化失败：{_e!r}", file=__import__("sys").stderr, flush=True)
         _tb.print_exc()
     yield
+    # ---- 关停：回收全局资源，避免连接 / 子进程 / 后台任务泄漏 ----
+    # （此前 lifespan 只有启动分支，没有任何 teardown：HTTP 连接池、MCP 子进程、
+    #   cron 循环都靠进程退出被动回收，reload / 多次 create_app 场景会累积泄漏。）
+    import sys as _sys
+    try:
+        from .core.providers.client import aclose_shared_http
+        await aclose_shared_http()
+    except Exception as _e:  # noqa: BLE001
+        print(f"[智枢] 关停时关闭 LLM 连接池失败：{_e!r}", file=_sys.stderr, flush=True)
+    try:
+        await get_ctx().cron.stop()
+    except Exception as _e:  # noqa: BLE001
+        print(f"[智枢] 关停时停止定时任务失败：{_e!r}", file=_sys.stderr, flush=True)
+    try:
+        mods = get_ctx().modules
+        for _name in list(getattr(mods, "clients", {}).keys()):
+            try:
+                await mods.clients[_name].close()
+            except Exception:
+                pass
+        getattr(mods, "clients", {}).clear()
+    except Exception as _e:  # noqa: BLE001
+        print(f"[智枢] 关停时断开 MCP 连接失败：{_e!r}", file=_sys.stderr, flush=True)
 
 
 def create_app(cfg: ZhishuConfig) -> FastAPI:

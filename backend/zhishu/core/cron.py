@@ -3,7 +3,8 @@
 特性：
   * 纯 asyncio + SQLite，零外部调度依赖，离线可用。
   * 调度类型：interval（每隔 N 秒/分/时/天）、daily（每天 HH:MM）、cron（5 段表达式）。
-  * 任务动作：chat（用 Agent 跑一段提示词，结果落库）、shell（在沙箱内限时执行命令）。
+  * 任务动作：chat（用 Agent 跑一段提示词，结果落库）、shell（经 core/shellguard 闸门
+    校验后，在沙箱目录内以最小化环境变量 + 独立进程组 + 资源上限限时执行）。
   * 任务定义持久化，重启后自动恢复并续算 next_run。
   * 并发受 max_concurrency 限制；全部异常内部吞掉，单任务失败不影响调度。
 """
@@ -13,7 +14,6 @@ import asyncio
 import json
 import os
 import sqlite3
-import subprocess
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -319,21 +319,63 @@ class CronScheduler:
                 break
         return "".join(parts)[:4000]
 
+    def _shell_role_ok(self, owner: Optional[str]) -> tuple[bool, str]:
+        """执行期复核任务归属者角色（纵深防御）。
+
+        创建/修改接口已限制 shell 动作仅 admin/operator 可建，但任务是**持久化**的：
+        用户被降级或删除后，旧任务仍会按原样触发。故执行前再查一次实时角色。
+        """
+        if not owner:
+            return False, "定时 shell 任务缺少归属者，已拒绝执行（请重建任务）"
+        try:
+            from ..context import get_ctx
+
+            row = get_ctx().users.get_by_name(owner)
+        except Exception as e:  # noqa: BLE001
+            return False, f"无法校验任务归属者角色（{e}），已拒绝执行"
+        if not row:
+            return False, f"任务归属者 {owner} 已不存在，已拒绝执行"
+        role = (dict(row).get("role") or "").strip()
+        if role not in ("admin", "operator"):
+            return False, f"任务归属者 {owner} 当前角色为 {role or '未知'}，无权执行 shell 任务"
+        return True, ""
+
     async def _run_shell(self, job: dict) -> str:
+        """执行 shell 动作。
+
+        安全闸门（此前完全缺失，命令在宿主机裸跑并继承含密钥的全量环境变量）：
+          1. 总开关 security.allow_shell；
+          2. 归属者实时角色复核（admin/operator）；
+          3. 高危拒绝清单 + 可执行文件白名单（core/shellguard.check_command）；
+          4. 最小化环境变量 + 独立进程组 + 超时整组击杀 + rlimit（run_guarded）。
+        """
+        from .shellguard import check_command, run_guarded
+
+        sec = self.cfg.security
+        if not getattr(sec, "allow_shell", True):
+            return "[已拦截] 系统已关闭 shell 任务执行（security.allow_shell=false）"
+
+        ok, why = self._shell_role_ok(job.get("owner"))
+        if not ok:
+            return f"[已拦截] {why}"
+
+        payload = job.get("payload") or ""
+        reason = check_command(
+            payload,
+            allowlist=getattr(sec, "shell_allowlist", None) or None,
+            enforce_allowlist=getattr(sec, "shell_enforce_allowlist", True),
+        )
+        if reason:
+            return f"[已拦截] {reason}"
+
         sandbox = os.environ.get("ZHISHU_SANDBOX",
                                  os.path.join(self.cfg.server.data_dir, "sandbox"))
-        os.makedirs(sandbox, exist_ok=True)
-        proc = await asyncio.create_subprocess_shell(
-            job["payload"],
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            cwd=sandbox,
+        return await run_guarded(
+            payload, cwd=sandbox,
+            timeout=max(5, int(getattr(sec, "shell_timeout", 300))),
+            max_output=4000,
+            mem_mb=int(getattr(sec, "shell_mem_limit_mb", 1024) or 0),
         )
-        try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
-        except asyncio.TimeoutError:
-            proc.kill()
-            return "（命令执行超时 300s 已终止）"
-        return (out or b"").decode("utf-8", "ignore")[:4000]
 
     # --------------------- 手动触发 ---------------------
     async def run_now(self, jid) -> str:

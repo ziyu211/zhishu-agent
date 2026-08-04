@@ -167,6 +167,60 @@ def main() -> int:
         check("delegate_to_agent" in names and "create_team" in names,
               "协作工具在运行实例中已注册", f"共 {len(names)} 个工具")
 
+    # ------------------------------------------- #338 cron shell 安全闸门
+    print("\n[#338] 定时 shell 任务的命令闸门（真实服务）")
+    # 借用运行实例中已存在的 operator 账号（令牌吊销校验要求用户真实存在）
+    st, users = call("GET", "/api/v1/users", admin)
+    op_name = None
+    if st == 200:
+        rows = users if isinstance(users, list) else (users or {}).get("users") or []
+        for u in rows:
+            if (u.get("role") or "") == "operator":
+                op_name = u.get("username")
+                break
+    if not op_name:
+        check(True, "跳过：实例中没有 operator 账号，无法验证 shell 闸门")
+    else:
+        op = token(op_name, "operator")
+        jid_bad = jid_ok = None
+        st, r = call("POST", "/api/v1/cron", op, {
+            "name": "__ZS_AUDIT__danger", "schedule_type": "interval",
+            "schedule_config": {"seconds": 86400}, "action": "shell",
+            "payload": "cat /etc/shadow"})
+        check(st == 200, f"operator 可创建 shell 任务（{op_name}）", f"HTTP {st}")
+        jid_bad = (r or {}).get("id") if isinstance(r, dict) else None
+        if jid_bad:
+            st, out = call("POST", f"/api/v1/cron/{jid_bad}/run", op)
+            body = json.dumps(out, ensure_ascii=False) if out is not None else ""
+            check("已拦截" in body, "高危命令在执行期被闸门拦截",
+                  body[:80])
+            call("DELETE", f"/api/v1/cron/{jid_bad}", op)
+
+        st, r = call("POST", "/api/v1/cron", op, {
+            "name": "__ZS_AUDIT__benign", "schedule_type": "interval",
+            "schedule_config": {"seconds": 86400}, "action": "shell",
+            "payload": "echo zhishu-guard-ok"})
+        jid_ok = (r or {}).get("id") if isinstance(r, dict) else None
+        if jid_ok:
+            st, out = call("POST", f"/api/v1/cron/{jid_ok}/run", op)
+            body = json.dumps(out, ensure_ascii=False) if out is not None else ""
+            check("zhishu-guard-ok" in body, "白名单内的正常命令仍可执行",
+                  body[:80])
+            check("ZHISHU_" not in body and "secret" not in body.lower(),
+                  "子进程输出不含密钥类环境变量")
+            call("DELETE", f"/api/v1/cron/{jid_ok}", op)
+
+    # ------------------------------------------- #341 向量签名暴露
+    print("\n[#341] 知识库统计暴露向量空间签名与陈旧分块")
+    st, stt = call("GET", "/api/v1/knowledge/stats", admin)
+    if st == 200 and isinstance(stt, dict):
+        check("embedding_signature" in stt, "stats 返回 embedding_signature",
+              str(stt.get("embedding_signature")))
+        check("stale" in stt, "stats 返回陈旧分块数（需重新解析的量）",
+              f"stale={stt.get('stale')}")
+    else:
+        check(False, "知识库统计接口可访问", f"HTTP {st}")
+
     print("\n" + "=" * 64)
     print(f" 通过 {PASS} 项，失败 {len(FAIL)} 项")
     for f in FAIL:

@@ -14,6 +14,8 @@ from typing import Optional
 
 import yaml
 
+from .shellguard import DEFAULT_SHELL_ALLOWLIST
+
 
 # ---------------------------------------------------------------------------
 # 国产 LLM Provider 预设（OpenAI 兼容协议）
@@ -135,6 +137,9 @@ class ProviderConfig:
     enabled: bool = True
     priority: int = 100  # 越小越优先（回退链顺序）
     mode: str = ""        # 扩展模式：空=普通 LLM；"moa"=多智能体 facade（并行聚合）
+    # 上下文窗口（token）。用户在「模型管理」中填写，为空表示未知（按全局默认预算处理）。
+    # 生效点：ContextEngine 按此预算裁剪/压缩历史，避免请求超出模型窗口被服务端 400 拒绝。
+    context_length: Optional[int] = None
     # ---- 多用户隔离 ----
     owner: str = ""       # 归属用户；空=历史系统级（全员可见，仅 admin 可管理）
     shared: bool = False  # 显式共享：对他人可见可用（共享后他人可用其密钥，但密钥对其脱敏）
@@ -152,6 +157,12 @@ class EmbeddingConfig:
     ollama_model: str = "bge-m3:latest"
     ollama_base: str = "http://127.0.0.1:11434"
     dim: int = 512          # hash 降级维度
+    # 降级隔离（见 core/vector_store.py 的 emb_sig）：hash 伪向量与真实语义向量
+    # 不在同一空间，混存会让检索结果失真（维度不同还会直接抛异常）。
+    #   strict_ingest=True  —— 入库时若发生降级则**拒绝写入**并报错，宁可失败也不脏库；
+    #   strict_ingest=False —— 允许写入，但会打上降级签名，检索时自动隔离（该文档
+    #                          在模型恢复后检索不到，需重新解析）。
+    strict_ingest: bool = True
 
 
 @dataclass
@@ -271,6 +282,14 @@ class SecurityConfig:
     allow_code_exec: bool = True
     code_exec_timeout: int = 30            # 子进程默认超时（秒），上限 120
     code_exec_mem_limit_mb: int = 0        # 子进程内存上限(MB)，0=不限制
+    # --- Shell 闸门（cron shell 任务 + terminal_run 工具共用，见 core/shellguard.py）---
+    # 此前 cron 的 shell 动作在宿主机裸跑：不过滤命令、继承全量环境变量（含密钥）、
+    # 超时只杀直接子进程。下列开关为纵深防御，默认开启白名单。
+    allow_shell: bool = True               # 总闸：关闭后 cron shell / terminal_run 一律拒绝
+    shell_enforce_allowlist: bool = True   # 是否强制可执行文件白名单（关闭仅保留高危拒绝清单）
+    shell_allowlist: list = field(default_factory=lambda: list(DEFAULT_SHELL_ALLOWLIST))
+    shell_timeout: int = 300               # cron shell 单次执行上限（秒）
+    shell_mem_limit_mb: int = 1024         # 子进程内存上限(MB)，0=不限制（仅 POSIX 生效）
 
 
 @dataclass
@@ -422,6 +441,24 @@ class ZhishuConfig:
         if not model:
             model = pc.models[0] if pc.models else "local-model"
         return pc, model
+
+    def context_length_of(self, key: Optional[str]) -> Optional[int]:
+        """解析某模型（"provider/model" 或默认模型）配置的上下文窗口 token 数。
+
+        未配置 / 解析失败 → None（调用方按「未知」处理，不做窗口裁剪）。
+        本方法是用户在「模型管理」填写的 context_length 的**唯一生效入口**，
+        供 ContextEngine 计算历史预算，避免请求超出窗口被服务端 400 拒绝。
+        """
+        try:
+            pc, _ = self.resolve_model(key)
+        except Exception:
+            return None
+        n = getattr(pc, "context_length", None)
+        try:
+            n = int(n) if n is not None else None
+        except (TypeError, ValueError):
+            return None
+        return n if (n and n > 0) else None
 
     def ordered_providers(self, include_disabled: bool = False) -> list[ProviderConfig]:
         vals = self.providers.values()

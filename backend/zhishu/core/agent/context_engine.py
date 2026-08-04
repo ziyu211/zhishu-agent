@@ -19,15 +19,77 @@ from ..memory import MemoryStore
 from ..providers.client import LLMClient
 
 
+def _msg_chars(m: dict) -> int:
+    """估算一条消息的字符数（列表型多模态 content 仅计文本部分）。"""
+    c = m.get("content")
+    if isinstance(c, str):
+        return len(c)
+    if isinstance(c, list):
+        return sum(len(str(p.get("text", ""))) for p in c if isinstance(p, dict))
+    return len(str(c or ""))
+
+
+def window_budget_chars(cfg: Optional[ZhishuConfig], model: Optional[str] = None) -> Optional[int]:
+    """把用户配置的模型上下文窗口（token）换算成**留给历史**的字符预算。
+
+    * 中英混排保守按 1 token ≈ 1.5 字符估算；
+    * 只把窗口的 50% 留给历史，其余让给 system 提示词、工具 schema、本轮输入与输出。
+    未配置 context_length 时返回 None（不做窗口裁剪，保持既有行为）。
+    """
+    if cfg is None:
+        return None
+    try:
+        n = cfg.context_length_of(model)
+    except Exception:
+        return None
+    if not n:
+        return None
+    return max(1000, int(n * 1.5 * 0.5))
+
+
+def enforce_window(history: list[dict], budget_chars: Optional[int]) -> list[dict]:
+    """硬性窗口守护：从最近往前保留，累计字符超预算即截断（至少保留最后一轮）。
+
+    这是 `context_length` 的兜底生效点 —— 即使未开启 LLM 压缩，也不会把超出
+    模型窗口的历史整包发出去（那会被服务端以 400 context_length_exceeded 拒绝，
+    表现为「聊久了就报错」且用户无从下手）。
+    """
+    if not budget_chars or not history:
+        return history
+    total = 0
+    kept: list[dict] = []
+    for m in reversed(history):
+        total += _msg_chars(m)
+        if kept and total > budget_chars:
+            break
+        kept.append(m)
+    kept.reverse()
+    if len(kept) < len(history):
+        dropped = len(history) - len(kept)
+        kept.insert(0, {
+            "role": "system",
+            "content": f"[上下文窗口守护：较早的 {dropped} 条历史已省略，"
+                       f"当前模型窗口预算约 {budget_chars} 字符]",
+        })
+    return kept
+
+
 class ContextEngine(ABC):
     @abstractmethod
-    async def compress_history(self, session: str, history: list[dict]) -> list[dict]:
-        """返回压缩后的历史消息列表。"""
+    async def compress_history(self, session: str, history: list[dict],
+                               model: Optional[str] = None) -> list[dict]:
+        """返回压缩后的历史消息列表。model 用于按该模型的窗口预算裁剪。"""
 
 
 class NoOpContextEngine(ContextEngine):
-    async def compress_history(self, session: str, history: list[dict]) -> list[dict]:
-        return history
+    """不做 LLM 压缩，但仍执行窗口守护（使 context_length 配置始终有效）。"""
+
+    def __init__(self, cfg: Optional[ZhishuConfig] = None):
+        self.cfg = cfg
+
+    async def compress_history(self, session: str, history: list[dict],
+                               model: Optional[str] = None) -> list[dict]:
+        return enforce_window(history, window_budget_chars(self.cfg, model))
 
 
 class CompressionContextEngine(ContextEngine):
@@ -38,15 +100,20 @@ class CompressionContextEngine(ContextEngine):
         self.threshold = threshold
         self.keep_recent = keep_recent
 
-    async def compress_history(self, session: str, history: list[dict]) -> list[dict]:
-        if len(history) <= self.threshold:
+    async def compress_history(self, session: str, history: list[dict],
+                               model: Optional[str] = None) -> list[dict]:
+        budget = window_budget_chars(self.cfg, model)
+        # 触发条件二选一：轮数超阈值，或字符数已超出该模型窗口预算。
+        over_budget = bool(budget) and sum(_msg_chars(m) for m in history) > budget
+        if len(history) <= self.threshold and not over_budget:
             return history
         # 前 (len - keep_recent) 轮压缩为摘要，保留最近 keep_recent 轮原样
         early = history[: len(history) - self.keep_recent]
         recent = history[len(history) - self.keep_recent:]
         summary = await self._summarize(early)
         compressed = [{"role": "system", "content": f"[早期对话摘要]\n{summary}"}]
-        return compressed + recent
+        # 摘要后若仍超窗口（保留轮本身过长），再做一次硬性窗口守护兜底
+        return enforce_window(compressed + recent, budget)
 
     async def _summarize(self, early: list[dict]) -> str:
         """用 LLM 把多轮历史压缩为简洁中文摘要（失败则降级为占位文本，不影响主流程）。"""
@@ -90,11 +157,11 @@ class CompressionContextEngine(ContextEngine):
 
 
 def build_context_engine(cfg: ZhishuConfig, llm: Optional[LLMClient] = None) -> ContextEngine:
-    """按配置构建上下文引擎；未开启压缩则返回 NoOp。"""
+    """按配置构建上下文引擎；未开启 LLM 压缩时返回 NoOp（仍带窗口守护）。"""
     if getattr(cfg.agent, "compression_enabled", False) and llm is not None:
         return CompressionContextEngine(
             cfg, llm,
             threshold=getattr(cfg.agent, "compression_threshold", 24),
             keep_recent=getattr(cfg.agent, "compression_keep_recent", 8),
         )
-    return NoOpContextEngine()
+    return NoOpContextEngine(cfg)

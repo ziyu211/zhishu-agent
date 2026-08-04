@@ -51,6 +51,7 @@ class UpdateProviderReq(BaseModel):
     models: list[str] | None = None
     shared: bool | None = None
     share_with: list[str] | None = None
+    context_length: int | None = None   # 上下文窗口 token；传 0 表示清空为「未知」
 
 
 class DefaultModelReq(BaseModel):
@@ -144,6 +145,7 @@ async def update_provider(name: str, req: UpdateProviderReq, user=require_auth("
             name, api_key=req.api_key, enabled=req.enabled,
             priority=req.priority, base_url=req.base_url, models=req.models,
             shared=req.shared, share_with=req.share_with,
+            context_length=req.context_length,
             username=_username(user), is_admin=_is_admin(user),
         )
     except PermissionError as e:

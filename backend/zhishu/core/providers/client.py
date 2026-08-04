@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import threading
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -85,20 +86,77 @@ def _is_transient(exc: Exception) -> bool:
     return code in _TRANSIENT_STATUS
 
 
+# ---------------------------------------------------------------------------
+# 进程级共享连接池
+#
+#   历史缺陷：LLMClient 在 __init__ 里各自新建 httpx.AsyncClient，而 agent.run()
+#   为实现「按用户隔离模型」会**每轮请求**重建一次 LLMClient（见 agent.py），
+#   MoA / adapters 亦会按需构建。这些实例的 aclose() 零调用点 ⇒ 每次对话都泄漏
+#   一个连接池（含 keep-alive socket 与 SSL 上下文），长跑必然 FD 耗尽。
+#
+#   修复：HTTP 传输参数对所有实例完全一致（LLMClient 实例之间只有 cfg / api_mode
+#   不同，这两者不参与传输层），因此全进程共用一个 AsyncClient 既安全又省资源，
+#   还能真正复用 keep-alive 连接。关停时由 lifespan 统一 aclose。
+# ---------------------------------------------------------------------------
+# 连接超时设短：本地推理端点（Ollama / vLLM）未启动时，防火墙常静默丢弃 SYN，
+# 默认 120s 总超时会让「无可用 LLM」的失败反馈卡很久；5s 连接超时即可快速判定。
+_HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=10.0)
+_HTTP_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20,
+                            keepalive_expiry=30.0)
+_shared_http: Optional[httpx.AsyncClient] = None
+_shared_http_lock = threading.Lock()
+
+
+def get_shared_http() -> httpx.AsyncClient:
+    """获取（惰性创建）进程级共享 httpx.AsyncClient。
+
+    双重检查加锁：FastAPI 单事件循环下不会并发进入，但 cron / 线程池里的同步
+    调用方也可能触发首次创建，故用线程锁兜底。若此前被 aclose 过（如测试用例
+    反复起停事件循环），`is_closed` 为真时自动重建，避免复用已关闭的池。
+    """
+    global _shared_http
+    cli = _shared_http
+    if cli is None or cli.is_closed:
+        with _shared_http_lock:
+            cli = _shared_http
+            if cli is None or cli.is_closed:
+                cli = httpx.AsyncClient(timeout=_HTTP_TIMEOUT, limits=_HTTP_LIMITS)
+                _shared_http = cli
+    return cli
+
+
+async def aclose_shared_http() -> None:
+    """关闭共享连接池（应用关停时调用；再次使用会自动惰性重建）。"""
+    global _shared_http
+    with _shared_http_lock:
+        cli, _shared_http = _shared_http, None
+    if cli is not None and not cli.is_closed:
+        try:
+            await cli.aclose()
+        except Exception:  # noqa: BLE001 —— 关停期异常不应影响退出流程
+            pass
+
+
 class LLMClient:
     """统一 LLM 客户端：封装 chat / stream / embed，并内置回退链。"""
 
     def __init__(self, cfg: ZhishuConfig, api_mode: str = "openai"):
         self.cfg = cfg
         self.api_mode = api_mode
-        # 连接超时设短：本地推理端点（Ollama / vLLM）未启动时，防火墙常静默丢弃 SYN，
-        # 默认 120s 总超时会让「无可用 LLM」的失败反馈卡很久；5s 连接超时即可快速判定。
-        self._http = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5.0, read=120.0, write=30.0, pool=10.0)
-        )
+
+    @property
+    def _http(self) -> httpx.AsyncClient:
+        """所有实例共享同一连接池 —— 构造 LLMClient 不再产生任何资源。"""
+        return get_shared_http()
 
     async def aclose(self):
-        await self._http.aclose()
+        """关闭共享连接池。
+
+        注意语义：连接池是进程级共享的，这里关闭的是**全局**池，仅应由应用
+        关停钩子（main.lifespan）调用；业务代码里构造的临时 LLMClient 无需、
+        也不应调用本方法（构造本身不占资源）。
+        """
+        await aclose_shared_http()
 
     # --------------------------- 非流式对话 ---------------------------
     async def chat(

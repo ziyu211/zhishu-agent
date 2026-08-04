@@ -28,6 +28,9 @@ const model = ref('')            // 默认模型（单选，可手输）
 const modelsSel = ref<string[]>([]) // 模型列表（多选，可手输）
 const local = ref(false)
 const priority = ref(50)
+// 上下文窗口（token）。留空=未知，后端按全局默认预算处理；填写后用于历史裁剪，
+// 避免长对话超出模型窗口被服务端 400 拒绝。
+const contextLength = ref<number | null>(null)
 const enabled = ref(true)
 const shared = ref(false)
 const share_with = ref<string[]>([])
@@ -104,6 +107,7 @@ watch(
       modelsSel.value = [...(p.models || [])]
       local.value = !!p.local
       priority.value = p.priority ?? 50
+      contextLength.value = p.context_length ?? null
       enabled.value = p.enabled !== false
       shared.value = !!p.shared
       share_with.value = p.share_with || []
@@ -117,6 +121,7 @@ watch(
       modelsSel.value = []
       local.value = false
       priority.value = 50
+      contextLength.value = null
       enabled.value = true
       shared.value = false
       share_with.value = []
@@ -142,7 +147,10 @@ function handleSave() {
     priority: priority.value,
     shared: shared.value,
     share_with: share_with.value,
+    // 编辑态传 0 表示「清空为未知」；新增态留空则不传
+    context_length: contextLength.value ?? (props.mode === 'edit' ? 0 : null),
   }
+  if (payload.context_length === null) delete payload.context_length
   if (props.mode === 'edit') {
     payload.enabled = enabled.value
     // 编辑也允许更新模型目录（含默认模型）
@@ -222,6 +230,16 @@ function handleSave() {
           </div>
         </NFormItem>
       </div>
+      <NFormItem label="上下文窗口（token，可留空）">
+        <NInputNumber
+          v-model:value="contextLength"
+          :min="0"
+          :step="1024"
+          clearable
+          placeholder="如 32768；留空表示未知，按全局默认预算"
+          style="width: 100%"
+        />
+      </NFormItem>
       <NFormItem label="共享范围">
         <ShareScopeSelector v-model:shared="shared" v-model:share-with="share_with" />
       </NFormItem>

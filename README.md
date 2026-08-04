@@ -427,7 +427,7 @@ V6（插件 shell 命令注入）、V8（operator 任意 shell/cron）属设计�
 
 移除仓库根目录与 `backend/` 下遗留的调试/临时产物（`verify_*.py`、`_*.py` 测试脚本、`*.log`、`_cell_graph_preview.html` 等）与未使用的 `.venv-test`，不触及 `data/`（运行时数据）、`.venv/`、`frontend/node_modules/`、`backend/zhishu/static/`（构建产物）。
 
-## 十二、全链路闭环审计与修复（2026-08-04）
+## 十二、全链路闭环审计与修复（2026-08-03）
 
 在第十一节安全审计之上，本轮对**后端 core / 后端 API / 数据与持久化层 / 前端**四大面做了逐模块业务闭环走查，重点排查「入口 → 处理 → 持久化 → 反馈」链路上的断点（数据被静默破坏、资源不回收、状态不一致、删除不级联等）。
 
@@ -455,16 +455,27 @@ V6（插件 shell 命令注入）、V8（operator 任意 shell/cron）属设计�
 
 新增两套可复现的验证脚本，均在运行容器 `zsagent` 内执行：
 
-- `backend/tests/test_closure_audit.py` — 模块级闭环回归，**36/36 通过**（覆盖 C1–C7、C10 与令牌吊销的引导期兼容）。
-- `backend/tests/http_closure_check.py` — 真实 HTTP 全链路验证，**18/18 通过**（对话部分更新不破坏消息、列表接口不再 500、删除级联生效、伪造但签名合法的令牌被 401 拒绝、协作工具在运行实例中已注册共 22 个）。
+- `backend/tests/test_closure_audit.py` — 模块级闭环回归，**75/75 通过**（覆盖 C1–C15、令牌吊销引导期兼容，以及本轮新增的 #339 多智能体身份/工具裁剪、#340 共享连接池、#338 Shell 闸门、#341 向量签名隔离、#342 context_length 接入）。
+- `backend/tests/http_closure_check.py` — 真实 HTTP 全链路验证，**24/24 通过**（对话部分更新不破坏消息、列表接口不再 500、删除级联生效、伪造但签名合法的令牌被 401 拒绝、协作工具已注册、#338 operator shell 任务拦截 `cat /etc/shadow` 且 `echo` 正常执行不泄露密钥、#341 `/knowledge/stats` 返回 `embedding_signature` 与 `stale`）。
 - 既有 `backend/tests/test_multiagent_e2e.py` **6/6 通过**（含委派路由 A/B 与超时熔断），确认无回归。
+- 真实对话冒烟：容器内 SSE 请求 `/api/v1/chat`，回复「连接正常」，证明 #340 共享连接池在真实流式场景下工作正常。
 
-### 12.3 遗留观察（不阻塞，记录备查）
+### 12.3 深度审计闭环（#338–#342，原遗留观察已全部闭环）
 
-- `moa.py` 绕过 `filter_tool_specs` 且使用伪身份 `user="moa"`，建议后续统一走真实身份的工具裁剪。
-- 每请求新建 `LLMClient` 而 `aclose()` 无调用点，连接池依赖 GC 回收；高并发下建议改为共享客户端或显式关闭。
-- cron 的 shell 类任务在宿主进程直跑，无沙箱；生产环境建议关闭或加容器级隔离。
-- Embedding 降级为 hash 向量时会与真实语义向量混入同一库，建议按模型维度分库或标记来源。
-- 对话接口的 `context_length` 入参当前被静默丢弃，尚未接入上下文组装。
+上一轮 12.3 列出的 5 条遗留观察，本轮已逐条完成代码闭环 + 回归验证：
+
+| 编号 | 原遗留观察 | 处置 | 关键改动 |
+|------|-----------|------|----------|
+| #339 | `moa.py` 绕过 `filter_tool_specs` 且使用伪身份 `user="moa"` | 多智能体统一走 `contextvars` 真实身份 + `ToolContext.for_run()` 浅派生 + `filter_tool_specs` 裁剪，杜绝伪身份越权 | `core/agent/moa.py`、`core/agent/context_engine.py`、`core/agent/agent.py` |
+| #340 | 每请求新建 `LLMClient` 且 `aclose()` 无调用点，连接池依赖 GC | 改为**全局共享连接池单例** `get_shared_http()`（双重检查加锁 + `is_closed` 惰性重建）；`main.py` lifespan teardown 显式回收 HTTP/cron/MCP 三处资源 | `core/providers/client.py`、`main.py` |
+| #338 | cron shell 类任务在宿主进程裸跑，无沙箱 | 新增 `core/shellguard.py` **纵深防御闸门**：高危正则拒绝清单 + 可执行白名单（按 shell 控制算符切段校验首 token）+ 禁命令/进程替换 + 禁环境变量前缀 + 最小化子进程环境（剔除 `ZHISHU_*`/`SECRET`/`TOKEN`/`KEY` 类变量）+ 独立进程组（setsid/CREATE_NEW_PROCESS_GROUP）+ POSIX rlimit（AS/CPU/FSIZE/NPROC）+ 超时整组击杀；cron 与 terminal 工具接入 `check_command` + `run_guarded`；执行期实时回查角色（admin/operator），用户降级后旧任务即停 | `core/shellguard.py`（新增）、`core/cron.py`、`core/tools/builtins/terminal.py`、`core/config.py`（`allow_shell`/`shell_enforce_allowlist`/`shell_allowlist`/`shell_timeout`/`shell_mem_limit_mb`） |
+| #341 | Embedding 降级 hash 向量与真实语义向量混入同一库 | **向量空间签名隔离**：每批向量随实际后端打 `emb_sig`（如 `hash:512` / `provider:qwen:text-embedding-v3:1024`），检索只与同签名向量比较 + 维度守卫防 `np.dot` 崩溃；`strict_ingest=True` 时降级入库直接报错；`signature_stats()` 暴露陈旧分块 | `core/embedding.py`、`core/vector_store.py`、`core/rag.py`、`core/config.py`（`strict_ingest`） |
+| #342 | 对话接口 `context_length` 入参被静默丢弃 | 入参接入上下文组装链路，按模型/用户真实上下文窗口截断，未填不臆造、未知模型返回 `None` | `api/models.py`、`core/agent/context_engine.py` 等 |
+
+### 12.4 安全配置建议（生产部署）
+
+- **Shell 类能力**：默认 `allow_shell=true` 仅用于内网可信运维；生产建议将 `shell_enforce_allowlist=true` 保留，并显式收窄 `shell_allowlist`（白名单刻意不含 `sh/bash/cmd/powershell/env/xargs/eval/sudo/chmod/ssh/nc/docker/crontab` 等提权/横向移动工具）。
+- **向量库**：保持 `strict_ingest=true`，避免 hash 伪向量污染真实语义检索；跨模型/跨 Provider 检索通过 `emb_sig` 自动隔离。
+- **连接池**：`workers=1` 下单例共享池零开销；若未来扩多进程，需配合外部状态后端（见 11.2），避免每进程独立池。
 
 > 本系统为「**完整可运行的多用户智能体平台**」：RBAC 多租户、模块共享、运行时 Provider 管理、安全防护与多用户并发隔离均已实现闭环，可直接二次开发接入具体模型与数据库。

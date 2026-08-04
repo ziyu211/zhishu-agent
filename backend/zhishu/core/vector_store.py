@@ -72,6 +72,15 @@ class VectorStore:
             if "raw_path" not in cols:
                 self._conn.execute("ALTER TABLE documents ADD COLUMN raw_path TEXT")
                 self._conn.commit()
+            # 老库迁移：emb_sig 记录该分块所用的**向量空间签名**（模型/维度）。
+            # 不同签名的向量不可互相比较：hash 伪向量与真语义向量混存会让检索
+            # 结果失真，维度不同时 np.dot 还会直接抛 shape 异常。老库无签名的行
+            # 按「未知」处理，检索时与当前签名不匹配则跳过（提示重新解析）。
+            vcols = [r[1] for r in self._conn.execute(
+                "PRAGMA table_info(vectors)").fetchall()]
+            if "emb_sig" not in vcols:
+                self._conn.execute("ALTER TABLE vectors ADD COLUMN emb_sig TEXT")
+                self._conn.commit()
         else:
             # 占位：milvus / pgvector / dm 接入点（保持接口一致）
             raise NotImplementedError(
@@ -86,6 +95,7 @@ class VectorStore:
         chunks: List[str],
         vectors: List[List[float]],
         meta: Optional[dict] = None,
+        emb_sig: Optional[str] = None,
     ):
         meta = meta or {}
         # 安全/一致性：同一 doc_id 重复入库时，先清掉旧分块向量再写入，
@@ -93,10 +103,10 @@ class VectorStore:
         # 旧内容分块 —— 旧实现会导致检索命中已被覆盖文档的历史内容（串库）。
         self._conn.execute("DELETE FROM vectors WHERE doc_id=?", (doc_id,))
         cur = self._conn.executemany(
-            "INSERT INTO vectors (doc_id, text, meta, vec) VALUES (?,?,?,?)",
+            "INSERT INTO vectors (doc_id, text, meta, vec, emb_sig) VALUES (?,?,?,?,?)",
             [
                 (doc_id, text, json.dumps(meta, ensure_ascii=False),
-                 np.array(v, dtype=np.float32).tobytes())
+                 np.array(v, dtype=np.float32).tobytes(), emb_sig)
                 for text, v in zip(chunks, vectors)
             ],
         )
@@ -144,11 +154,11 @@ class VectorStore:
         if (not self._index_dirty) and (self._index is not None):
             return
         rows = self._conn.execute(
-            "SELECT id, doc_id, vec FROM vectors"
+            "SELECT id, doc_id, vec, emb_sig FROM vectors"
         ).fetchall()
         # copy()：frombuffer 为只读视图，底层 bytes 在函数返回后可能被回收
         self._index = [
-            (r[0], r[1], np.frombuffer(r[2], dtype=np.float32).copy())
+            (r[0], r[1], np.frombuffer(r[2], dtype=np.float32).copy(), r[3] or "")
             for r in rows
         ]
         own_rows = self._conn.execute(
@@ -158,7 +168,8 @@ class VectorStore:
         self._index_dirty = False
 
     def search(self, query_vec: List[float], top_k: int = 5,
-               owner: Optional[str] = None) -> List[dict]:
+               owner: Optional[str] = None,
+               emb_sig: Optional[str] = None) -> List[dict]:
         self._ensure_index()
         q = np.array(query_vec, dtype=np.float32)
         qn = np.linalg.norm(q)
@@ -172,12 +183,23 @@ class VectorStore:
             # （宁可漏显也不外泄），杜绝因内存索引未及时重建导致私有文档被误判为
             # 共享文档而跨用户泄露。
             cand = [
-                (i, d, v) for (i, d, v) in self._index
+                (i, d, v, s) for (i, d, v, s) in self._index
                 if d in self._owner_map
                 and (self._owner_map[d] == owner or self._owner_map[d] is None)
             ]
+        # 向量空间隔离：只与**同签名**的向量比较。
+        #   * 签名不同 = 不同模型/不同维度/hash 伪向量，余弦相似度无意义；
+        #   * 老库（emb_sig 为空）视为未知签名，按「维度相同才比」的宽松规则放行，
+        #     保证升级后历史文档仍可检索，不需要强制重建索引。
+        if emb_sig:
+            cand = [c for c in cand if (c[3] == emb_sig) or (not c[3])]
         scored = []
-        for _id, doc_id, v in cand:
+        qdim = q.shape[0]
+        for _id, doc_id, v, _sig in cand:
+            # 纵深防御：维度不一致直接跳过（历史脏数据 / 未打签名的混存向量），
+            # 否则 np.dot 会抛 shape 异常，整次检索失败。
+            if v.shape[0] != qdim:
+                continue
             vn = np.linalg.norm(v)
             if vn > 0:
                 v = v / vn
@@ -203,6 +225,23 @@ class VectorStore:
                 "meta": json.loads(meta or "{}"), "score": sim,
             })
         return out
+
+    def signature_stats(self, current_sig: Optional[str] = None) -> dict:
+        """按向量空间签名统计分块数，用于暴露「需要重新解析」的陈旧向量。
+
+        返回 {"by_signature": {sig: n}, "stale": n}；stale 指签名与当前不一致
+        且非空的分块（这些分块在当前 embedding 配置下检索不到）。
+        """
+        rows = self._conn.execute(
+            "SELECT COALESCE(emb_sig,''), COUNT(*) FROM vectors GROUP BY 1"
+        ).fetchall()
+        by_sig = {(r[0] or "(未标记)"): r[1] for r in rows}
+        stale = 0
+        if current_sig:
+            for r in rows:
+                if r[0] and r[0] != current_sig:
+                    stale += r[1]
+        return {"by_signature": by_sig, "stale": stale}
 
     def count(self, owner: Optional[str] = None) -> int:
         if owner is None:

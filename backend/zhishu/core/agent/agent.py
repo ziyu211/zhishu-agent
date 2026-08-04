@@ -371,6 +371,8 @@ class Agent:
         # 按用户隔离模型：把 cfg/llm 收窄为「当前 owner 可见」的配置副本
         # （仅本人 + 共享 Provider + 角色命中 Provider 及其默认模型）。admin 视为可见全部，返回原 cfg。
         # 注意：Agent 实例为每轮请求独立创建，此处改写 self.cfg/self.llm 不会产生并发串号。
+        # 资源：LLMClient 已改为共享进程级 httpx 连接池（core/providers/client.py），
+        # 构造实例本身零开销、不再每轮泄漏一个连接池，故此处重建是安全的。
         if owner:
             self.cfg = self.cfg.for_user(owner, is_admin, user_role=user_role)
             self.llm = LLMClient(self.cfg, self.llm.api_mode)
@@ -430,9 +432,10 @@ class Agent:
         messages = [{"role": "system", "content": system}]
         if self.memory:
             history = self.memory.history(session, limit=20)
-            # 上下文压缩（ContextEngine 可插拔；NoOp 时原样返回）。
+            # 上下文压缩（ContextEngine 可插拔；NoOp 时仅做窗口守护）。
             # compress_history 为异步方法（会调用 LLM 摘要），必须在事件循环中 await。
-            history = await self.context_engine.compress_history(session, history)
+            # 传入本轮实际模型，使「模型管理」里配置的 context_length 生效于历史裁剪。
+            history = await self.context_engine.compress_history(session, history, model)
             for h in history:
                 c = h["content"]
                 # 历史消息若含视觉图片部件（列表型 content），仅保留文本部分，

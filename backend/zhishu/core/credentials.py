@@ -113,6 +113,7 @@ class ProviderStore:
                 "owner": p.owner or None,
                 "shared": p.shared,
                 "share_with": list(p.share_with or []),
+                "context_length": p.context_length,
             })
         return out
 
@@ -135,12 +136,17 @@ class ProviderStore:
         existing = self.cfg.providers.get(name)
         if existing is not None and (existing.owner or "") != (owner or ""):
             raise ValueError("Provider 名称已存在，且属于其他用户或公共配置，无法覆盖（请使用其他名称）")
+        try:
+            _ctxlen = int(context_length) if context_length is not None else None
+        except (TypeError, ValueError):
+            _ctxlen = None
         pc = ProviderConfig(
             name=name, label=label or name, base_url=base_url.strip(),
             api_key=api_key.strip(), models=models or [], local=local,
             enabled=True, priority=priority,
             owner=owner or "", shared=bool(shared),
             share_with=list(share_with or []),
+            context_length=_ctxlen if (_ctxlen and _ctxlen > 0) else None,
         )
         self.cfg.providers[name] = pc
         self._save()
@@ -148,6 +154,7 @@ class ProviderStore:
 
     def update(self, name, *, api_key=None, enabled=None, priority=None,
                base_url=None, models=None, shared=None, share_with=None,
+               context_length=None,
                username: Optional[str] = None, is_admin: bool = False) -> dict:
         pc = self.cfg.providers.get(name)
         if not pc:
@@ -169,6 +176,13 @@ class ProviderStore:
             pc.shared = bool(shared)
         if share_with is not None:
             pc.share_with = list(share_with or [])
+        if context_length is not None:
+            # 传 0 / 负数 / 非法值 → 视为「清空，恢复未知」，不写脏数据
+            try:
+                n = int(context_length)
+            except (TypeError, ValueError):
+                n = 0
+            pc.context_length = n if n > 0 else None
         self._save()
         return {"ok": True, "provider": name}
 
