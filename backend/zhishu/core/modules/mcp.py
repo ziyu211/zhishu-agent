@@ -245,5 +245,12 @@ class MCPClient:
                 pass
         if self._reader_task:
             self._reader_task.cancel()
+            # 与 cron.stop() 同理：await 一个已被自己 cancel 的任务必抛
+            # asyncio.CancelledError（继承 BaseException，except Exception 抓不住），
+            # 不捕获会冲出 close() -> 冲出 lifespan teardown -> 关停报 CancelledError。
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._http_session:
             await self._http_session.close()

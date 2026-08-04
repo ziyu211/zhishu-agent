@@ -498,3 +498,4 @@ GitHub Actions `E2E Tests / e2e`（`.github/workflows/e2e.yml`，push/PR 到 `ma
 - `python tests/run_e2e.py --verbose`（env `ZHISHU_ALLOW_INSECURE_DEFAULTS=1`）：`test_multiagent_e2e.py` **6/6 PASS** + `test_chat_http_e2e.py` **A/B/C 3 项 PASS** → **ALL E2E SUITES PASSED**。
 - `backend/tests/test_closure_audit.py`：新增 3 个针对本根因的回归测试（`test_cron_stop_no_cancelled_error` / `test_lifespan_teardown_isolated` / `test_vector_store_follows_data_dir`），**89/89 断言通过**。
 - 既有 `backend/tests/http_closure_check.py` 24/24 不受影响。
+- 复查补充：`core/modules/mcp.py` 的 `MCPClient.close()` 取消 `_reader_task` 后未 `await`（同类隐患，未触发 e2e 因测试不连接 MCP client），已补 `await` + `except (asyncio.CancelledError, Exception)` 与 `cron.stop` 一致。
