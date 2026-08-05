@@ -40,12 +40,14 @@ cat > "$OUT/install-offline.sh" <<'EOF'
 #!/usr/bin/env bash
 # 内网离线安装：无需任何外网访问
 set -e
-cd "$(dirname "$0")"
+# 进入 backend/ 目录，使 zhishu 包可经 `python -m zhishu.main` 导入；
+# 相对路径统一相对 backend/ 解析（wheels 在 ../wheels，配置在 ../deploy）。
+cd "$(dirname "$0")/backend"
 python3 -m venv venv
 source venv/bin/activate
-pip install --no-index --find-links ./wheels -r backend/requirements.txt
+pip install --no-index --find-links ../wheels -r requirements.txt
 echo "安装完成。启动："
-echo "  python -m zhishu.main --config deploy/zhishu.yaml --static backend/zhishu/static"
+echo "  python -m zhishu.main --config ../deploy/zhishu.yaml --static zhishu/static"
 EOF
 chmod +x "$OUT/install-offline.sh"
 
