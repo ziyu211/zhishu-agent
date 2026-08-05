@@ -612,6 +612,60 @@ def _looks_like_zip(raw: bytes) -> bool:
     return raw[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 
+# 以下扩展名内部虽是 ZIP 容器，但属于有专用解析器的办公文档，
+# 绝不能走通用压缩包解包分支（否则会吐出原始 XML 标签噪声）。
+_ZIP_BASED_DOC_EXTS = (".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub")
+
+
+def _sniff_office_ext(raw: bytes) -> str | None:
+    """通过 magic bytes + 容器结构嗅探办公文档真实类型，纠错错配/缺失的扩展名。
+
+    返回 '.docx' / '.xlsx' / '.pptx' / '.odt' / '.ods' / '.odp' / '.epub'
+    / '.doc' / '.xls' 之一，或 None（不是可识别的办公文档）。只读探测，不解析正文。
+    """
+    if not raw:
+        return None
+    # 旧版 OLE 二进制（.doc / .xls），非 ZIP
+    if raw[:4] == b"\xd0\xcf\x11\xe0":
+        if b"WordDocument" in raw:
+            return ".doc"
+        if b"Workbook" in raw or b"Book" in raw:
+            return ".xls"
+        return ".doc"  # 兜底：走 _extract_legacy_best_effort 尽力而为
+    if not _looks_like_zip(raw):
+        return None
+    try:
+        z = zipfile.ZipFile(io.BytesIO(raw))
+        names = set(z.namelist())
+    except Exception:
+        return None
+    # OpenDocument：mimetype 文件标识
+    try:
+        if "mimetype" in names:
+            mt = z.read("mimetype").decode("utf-8", "ignore").strip()
+            if mt == "application/vnd.oasis.opendocument.text":
+                return ".odt"
+            if mt == "application/vnd.oasis.opendocument.spreadsheet":
+                return ".ods"
+            if mt == "application/vnd.oasis.opendocument.presentation":
+                return ".odp"
+        # EPUB：container.xml + OEBPS 内容目录
+        if "META-INF/container.xml" in names and any(
+                n.startswith("OEBPS/") for n in names):
+            return ".epub"
+    except Exception:
+        pass
+    # OOXML
+    if "word/document.xml" in names:
+        return ".docx"
+    joined = " ".join(names)
+    if "xl/workbook.xml" in names or "xl/worksheets" in joined:
+        return ".xlsx"
+    if "ppt/presentation.xml" in names or "ppt/slides" in joined:
+        return ".pptx"
+    return None
+
+
 def _extract_zip(raw: bytes, depth: int = 0) -> str:
     """从 ZIP 压缩包递归提取可读文本（零依赖标准库，对标 Hermes 自愈式解析）。
 
@@ -721,11 +775,19 @@ def read_file_text(filename: str, raw: bytes,
     无法解析时抛出 ValueError（带友好中文说明）。
     """
     ext = _ext(filename)
+    # 纠错：扩展名缺失/错配但 magic bytes 表明是办公文档时，按真实类型派发，
+    # 避免被下方通用压缩包分支当成 ZIP 吐出原始 XML。
+    if ext not in _ZIP_BASED_DOC_EXTS and ext != ".zip":
+        sniffed = _sniff_office_ext(raw)
+        if sniffed:
+            ext = sniffed
     file_type = ext.lstrip(".").upper() or "TXT"
 
     # ── 压缩包：自动解包并递归提取内部文本（自愈核心，而非报错甩锅）──
     # 即使文件被错配扩展名（如 .txt 实为 zip），也按 magic bytes 识别处理。
-    if ext == ".zip" or _looks_like_zip(raw):
+    # 但 .docx/.xlsx/.pptx/.odt/.ods/.odp/.epub 内部也是 ZIP，需先走专用解析器，
+    # 故当且仅当扩展名不在办公文档集合时才进入通用解包分支。
+    if (ext == ".zip" or _looks_like_zip(raw)) and ext not in _ZIP_BASED_DOC_EXTS:
         text = _extract_zip(raw)
         if text.strip():
             return text, "ZIP"

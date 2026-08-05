@@ -207,7 +207,7 @@ onMounted(() => { loadStats(); loadDocs() })
               <span>{{ uploading ? '上传中…' : '点击或拖拽文件到此处（可多选）' }}</span>
               <input type="file" hidden multiple @change="onFileInput" />
             </div>
-            <div class="hint-small">支持 TXT / MD / CSV / JSON / 代码 / 日志等文本；PDF / DOCX / XLSX 需安装解析库</div>
+            <div class="hint-small">已支持：TXT / MD / CSV / JSON / 代码 / 日志等文本，Word(.docx/.doc) / Excel(.xlsx/.xls) / PPT(.pptx) / OpenDocument(.odt/.ods/.odp) / RTF / EPUB / PDF（文本型）</div>
             <div v-if="pending.length" class="pending-list">
               <div v-for="(p, i) in pending" :key="i" class="pending-item">
                 <span class="pi-name">{{ p.name }}</span>

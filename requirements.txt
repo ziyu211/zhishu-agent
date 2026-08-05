@@ -17,6 +17,13 @@ PyMuPDF>=1.24          # 首选 PDF 文本/版面提取（fitz）
 pypdf>=4.0             # PyMuPDF 不可用时的兜底 PDF 解析
 pdfminer.six>=20221105 # 进一步兜底（pdfminer.high_level.extract_text）
 
+# ---- 文档解析：Office / 富文本（纯 wheel，无编译；read_file 已有回退/标准库解析器）----
+python-docx>=1.1      # .docx 第三方回退解析器（标准库提取为空时启用）
+openpyxl>=3.1         # .xlsx 第三方回退解析器（标准库提取为空时启用）
+python-pptx>=0.6.23   # .pptx 增强解析（heading/备注），标准库解析器仍为主路径
+xlrd>=2.0             # 旧版 .xls（OLE）结构化解析增强
+Pillow>=10.0          # 图片缩放/转码（image_routing），缺失则降级为原样透传
+
 # ---- 知识图谱：中文分词（关键词共现网络，离线零 token）----
 jieba>=0.42            # 中文分词 + 词性标注；缺失则退化为正则切词（效果较弱）
 
