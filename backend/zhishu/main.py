@@ -21,6 +21,9 @@ from .core.config import ZhishuConfig
 from .context import init_ctx, get_ctx
 from . import api as api_pkg
 
+# 单一版本来源：登录页通过 /health 拉取此版本展示
+APP_VERSION = "1.0.5"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -126,7 +129,7 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
               file=sys.stderr, flush=True)
 
     init_ctx(cfg)
-    app = FastAPI(title="智枢智能体 Zhishu Agent", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="智枢智能体 Zhishu Agent", version=APP_VERSION, lifespan=lifespan)
 
     # 同源部署（FastAPI 直接托管前端）下本不需 CORS；保留以兼容独立前端/调试。
     # 采用 Bearer Token 鉴权（非 Cookie），故 credentials 置 False，避免
@@ -151,7 +154,7 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "service": "zhishu-agent", "version": "1.0.0"}
+        return {"status": "ok", "service": "zhishu-agent", "version": APP_VERSION}
 
     # ---- 多模态产物托管（/media，需在 SPA catch-all 之前挂载）----
     # 安全：/media 存放所有用户的附件与生成产物，挂载鉴权闸门中间件，
