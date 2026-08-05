@@ -38,6 +38,13 @@ from ..agents_runtime import (
 from ..modules.runtime import can_view, filter_tool_specs
 from ..config import ZhishuConfig, classify_model
 from .system_prompt import build_system_prompt
+from .download_guard import (
+    guard_download_links,
+    extract_media_links,
+    find_leaked_paths,
+    strip_evasion,
+    strip_leaked_paths,
+)
 from .context_engine import NoOpContextEngine, ContextEngine, CompressionContextEngine
 from ..modules.skills import maybe_learn, maybe_reflect
 from .. import image_routing
@@ -357,8 +364,16 @@ class Agent:
         self.llm = llm
         self.kb = kb
         self.memory = memory
-        self.ctx = ctx or ToolContext(kb=kb, security=cfg.security, media=media)
+        # 修复（闭环回归 H1）：生产链路传入的 ctx 恒为非 None 的 ToolContext 实例，
+        # 且 ToolContext 未定义 __bool__，故 `ctx or ...` 会永远取 ctx，导致构造入参
+        # media 被丢弃 -> self.ctx.media 为 None，工具无法自动发布 /media 下载链接、
+        # 下载护栏自愈失效。这里在 ctx 自身未携带 media 时，用构造入参 media 补齐
+        # （for_run 浅拷贝会保留 media）。
+        self.ctx = ctx if ctx is not None else ToolContext(kb=kb, security=cfg.security, media=media)
         self.media = media
+        if self.ctx.media is None and media is not None:
+            from dataclasses import replace as _dc_replace
+            self.ctx = _dc_replace(self.ctx, media=media)
         self.context_engine = context_engine or NoOpContextEngine()
         # 外部长期记忆（向量 provider，opt-in）。为 None 时 prefetch/sync 全为 no-op，零回归。
         self.memory_manager = memory_manager
@@ -416,6 +431,8 @@ class Agent:
                 yield ev
             return
 
+        # 每轮复位本轮工具产出的 /media 链接收集（防止跨轮 / 跨子智能体累积污染）
+        self._turn_media_links = []
         # ---- 1. 组装上下文（分层系统提示）----
         # 先发一个状态事件保活 SSE：知识库检索（向量相似度）/ 系统提示组装可能耗时
         # （尤其首轮需惰性加载数 GB 向量索引）。若首字节迟迟不发，前端 / 反向代理的读
@@ -718,6 +735,16 @@ class Agent:
                         })
                         continue
                     result = await ToolRegistry.execute(name, args, self.ctx)
+                    # 收集本轮工具产出的 /media 下载链接，供最终回复护栏兜底
+                    # （即使模型最终没透传链接，也能强制补回，见 guard_download_links）
+                    if "/media/" in (result or ""):
+                        _ml = extract_media_links(result)
+                        if _ml:
+                            _col = getattr(self, "_turn_media_links", None)
+                            if _col is None:
+                                _col = []
+                                self._turn_media_links = _col
+                            _col.extend(_ml)
                     # 动态建团队（create_team）成功后：刷新可委派协调者清单、置位强制委派标志，
                     # 并注入系统提醒，使主管下一步把用户原始任务整体委派给新建协调者，形成
                     # 主管 → 协调者 → 成员 的完整链路（无需预配置任何 agent）。
@@ -927,6 +954,22 @@ class Agent:
                 continue
 
             final = choice.get("content", "")
+            # 下载链接护栏：本轮工具已产出 /media 链接、但模型未透传且搪塞时，强制补回
+            _guarded = False
+            _turn_links = getattr(self, "_turn_media_links", None) or []
+            if _turn_links:
+                final, _guarded = guard_download_links(final, _turn_links)
+                if _guarded:
+                    try:
+                        from ...context import get_ctx
+                        _gctx = get_ctx()
+                        if getattr(_gctx, "audit", None) is not None:
+                            _gctx.audit.log(
+                                self.ctx.user or "anonymous", "download_guard",
+                                f"recovered {len(_turn_links)} link(s) in final",
+                            )
+                    except Exception:
+                        pass
             # 协调类覆盖度闸门：若尚有已知子智能体（从 prompt/registry 推断）未被委派，
             # 禁止直接收尾，强制补齐，避免弱模型「只委派部分子智能体就结束」（如漏派 Risk）。
             # 模型连续多次（≥3 次）或临近步数上限仍不补齐时，系统兜底直接代委派剩余子智能体，
@@ -1064,6 +1107,35 @@ class Agent:
                 _cont_choice = _cont_resp["choices"][0]["message"]
                 final += _cont_choice.get("content", "")
                 finish_reason = _cont_resp["choices"][0].get("finish_reason", "stop")
+            # 续写补全后再次兜底：防止续写段又把下载链接搪塞掉
+            if _turn_links:
+                final, _g2 = guard_download_links(final, _turn_links)
+                _guarded = _guarded or _g2
+            # 下载链接护栏（续二）：剥离模型泄漏的内部绝对路径 + 搪塞话术，
+            # 并尽量把真实文件重新发布为 /media 链接，确保「生成文件必有下载链接」。
+            try:
+                from ..tools.builtins import SANDBOX_ROOT as _SB_ROOT
+                _leaked = find_leaked_paths(final)
+                _recovered = []
+                if _leaked and getattr(self.ctx, "media", None) is not None:
+                    _sb = os.path.abspath(_SB_ROOT)
+                    for _lp in _leaked:
+                        _ap = os.path.abspath(_lp)
+                        if _ap.startswith(_sb + os.sep) and os.path.isfile(_ap):
+                            try:
+                                _url = self.ctx.media.save_file(
+                                    _ap, kind="file",
+                                    owner=getattr(self.ctx, "user", "anonymous") or "anonymous")
+                                _recovered.append((os.path.basename(_ap), _url))
+                            except Exception:
+                                pass
+                final = strip_evasion(final)
+                final = strip_leaked_paths(final)
+                if _recovered and not _guarded:
+                    final = (final + "\n\n---\n\n📎 **本次生成的可下载文件（点击即可下载）：**\n"
+                             + "\n".join(f"- [{n}]({u})" for n, u in _recovered)).strip()
+            except Exception:
+                pass
             # 直接流式输出最终回答：self.llm.chat()（非流式）已在 step 起始处拿到完整
             # content（final），无需再调一次 self.llm.stream() 重新生成。这样既省一次推理往返，
             # 也避免「最终回答生成期间长时间无 SSE 业务事件」导致前端空闲计时器误判断流

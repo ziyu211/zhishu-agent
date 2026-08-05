@@ -21,7 +21,7 @@ class VectorMemoryProvider(MemoryProvider):
         # 向量化完全委托给可插拔记忆后端（默认 builtin，可选 mem0 等）
         self.backend: MemoryBackend = create_memory_backend(cfg, data_dir)
 
-    def initialize(self) -> None:
+    async def initialize(self) -> None:
         try:
             self.backend.initialize()
         except Exception:

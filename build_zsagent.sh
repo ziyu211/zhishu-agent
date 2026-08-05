@@ -5,5 +5,5 @@
 set -e
 cd /d/data/hemers/zhishu-agent
 echo "build start: $(date)"
-docker build -t zsagent:1.0.0 -f deploy/Dockerfile.local . 2>&1
+docker build -t zsagent:1.0.5 -f deploy/Dockerfile.local . 2>&1
 echo "BUILD_EXIT=$?"

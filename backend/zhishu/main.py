@@ -10,15 +10,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from .core.config import ZhishuConfig
 from .context import init_ctx, get_ctx
+from .core.media import media_mime, content_disposition, resolve_media_fallback
 from . import api as api_pkg
 
 # 单一版本来源：登录页通过 /health 拉取此版本展示
@@ -181,21 +182,80 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
                 if not user:
                     return JSONResponse({"detail": "未登录或登录已过期，无法访问受保护资源"},
                                         status_code=401)
+                # 供 serve_media 回退查找使用（已在网关校验，无额外越权风险）
+                request.state.user = user
                 # 越权防护：所有媒体按 owner 段位隔离校验，非本人/非管理员拒绝。
                 #   /media/<owner>/...             → owner 段为 parts[1]
                 #   /media/attachments/<owner>/... → owner 段为 parts[2]
+                # 单段 /media/<name>（缺 owner 段，常见于模型省略 owner 的链接）不做段位校验，
+                # 交由 serve_media 在用户授权目录内回退查找（已按 user 限定范围，不越权）。
                 # 取消「附件目录仅鉴权、凭文件名不可猜测」的弱隔离（security by obscurity），
                 # 任何用户的附件均严格按归属校验，杜绝凭 UUID 猜测越权下载他人文件。
                 parts = [s for s in p.split("/") if s]
-                if len(parts) >= 2 and parts[0] == "media":
-                    seg = parts[2] if (len(parts) >= 3 and parts[1] == "attachments") else parts[1]
+                if len(parts) >= 2 and parts[0] == "media" and len(parts) >= 3:
+                    seg = parts[2] if (parts[1] == "attachments") else parts[1]
                     if seg != (user.get("u") or "") and (user.get("r") or "") != "admin":
                         return JSONResponse({"detail": "无权访问该资源"}, status_code=403)
         return await call_next(request)
 
     media_dir = os.path.join(cfg.server.data_dir, cfg.media.store_dir)
+    media_dir_real = os.path.realpath(media_dir)
     os.makedirs(media_dir, exist_ok=True)
-    app.mount("/media", StaticFiles(directory=media_dir), name="media")
+
+    # 自定义 /media 下载路由（替代原生 StaticFiles 挂载）。对比 Hermes Web UI 的
+    # /api/files/download，这里要做得更稳妥：
+    #   1) 显式 Content-Disposition: attachment —— 让浏览器「下载」而非内联（CSV/HTML 等
+    #      直接内联会破坏「生成文件→可点击下载」体验，Hermes 同样显式设 attachment）；
+    #   2) filename=ASCII 兜底 + filename*=UTF-8'' 真名 —— 中文/特殊字符文件名不乱码；
+    #   3) Content-Type 取自媒体 MIME 单一真源（media.MEDIA_MIME），不再依赖 mimetypes 漂移；
+    #   4) realpath 越权防护 —— 即便上层 slug 已防穿越，仍做纵深防御；
+    #   5) 单次下载大小上限 —— 防超大文件拖垮服务。
+    # 多租户归属隔离与鉴权由上方 media_auth_gate 中间件统一把关，此处只负责安全落地文件流。
+    _MEDIA_SERVE_MAX_BYTES = 200 * 1024 * 1024  # 200MB
+
+    @app.get("/media/{file_path:path}")
+    async def serve_media(file_path: str, request: Request):
+        from .core.media import media_mime, content_disposition
+        # 归一化并对齐媒体根目录，杜绝路径穿越（media/owner 之外一律拒绝）
+        candidate = os.path.normpath(os.path.join(media_dir_real, file_path))
+        if candidate != media_dir_real and not candidate.startswith(media_dir_real + os.sep):
+            return JSONResponse({"detail": "非法路径"}, status_code=400)
+        if not os.path.isfile(candidate):
+            # 容错回退：链接格式偏差（缺 owner 段 / 缺扩展名 / 历史偏差）但文件仍在授权
+            # 目录时，按文件名找回真实文件，避免用户看到「文件不存在或已被清理」而文件其实可下载。
+            fb = resolve_media_fallback(
+                file_path, getattr(request.state, "user", None),
+                media_dir_real, _MEDIA_SERVE_MAX_BYTES,
+            )
+            if not fb:
+                return JSONResponse({"detail": "文件不存在或已被清理"}, status_code=404)
+            # 纵深防御：回退命中的文件必须仍在媒体根内
+            fb = os.path.realpath(fb)
+            if fb != media_dir_real and not fb.startswith(media_dir_real + os.sep):
+                return JSONResponse({"detail": "非法路径"}, status_code=400)
+            candidate = fb
+        try:
+            size = os.path.getsize(candidate)
+        except OSError:
+            return JSONResponse({"detail": "无法读取文件"}, status_code=500)
+        if size > _MEDIA_SERVE_MAX_BYTES:
+            return JSONResponse({"detail": "文件过大，已超过下载上限"}, status_code=413)
+        name = os.path.basename(candidate)
+        # ASCII 兜底名 + RFC 5987 UTF-8 真名，保证各类浏览器下文件名均正确
+        try:
+            disp = content_disposition(name)
+            mime = media_mime(name)
+        except Exception:
+            disp = "attachment"
+            mime = "application/octet-stream"
+        return FileResponse(
+            candidate,
+            media_type=mime,
+            headers={
+                "Content-Disposition": disp,
+                "Cache-Control": "private, no-store",
+            },
+        )
 
     # ---- 静态前端（SPA fallback，同源）----
     static_dir = cfg.server.static_dir

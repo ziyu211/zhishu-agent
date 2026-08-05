@@ -44,7 +44,9 @@ function inline(s: string): string {
     const safe = sanitizeUrl(u)
     if (safe === '#') return _m
     if (u.startsWith('/media/')) {
-      return `<a href="${safe}" class="media-link" data-media="1" target="_blank" rel="noopener noreferrer">${a}</a>`
+      // download 属性：让浏览器以媒体库中的真实文件名（保留扩展名）保存，而非 "download"
+      const dname = u.split('/').pop() || 'file'
+      return `<a href="${safe}" class="media-link" data-media="1" target="_blank" rel="noopener noreferrer" download="${dname}">${a}</a>`
     }
     return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${a}</a>`
   })
@@ -169,6 +171,7 @@ async function handleClick(e: MouseEvent) {
     e.preventDefault()
     const href = mediaLink.getAttribute('href') || ''
     const name = mediaLink.getAttribute('download') || href.split('/').pop() || 'file'
+    message.info('正在下载…')
     try {
       await downloadFile(href, name)
     } catch (err: any) {

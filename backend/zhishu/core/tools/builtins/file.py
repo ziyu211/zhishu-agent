@@ -1,4 +1,4 @@
-"""沙箱文件系统工具（读 / 写 / 列目录，路径越界校验）。"""
+"""文件系统工具（读 / 写 / 列目录，路径越界校验）。"""
 from __future__ import annotations
 
 import os
@@ -17,7 +17,7 @@ def _safe_path(p: str) -> str:
 
 @tool(
     "file_read",
-    "读取沙箱内文件内容。",
+    "读取文件内容。",
     {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
     toolset="files",
 )
@@ -92,7 +92,7 @@ def _resolve_read_path(path: str, owner: str | None = None,
     "而非一次性全量解析。请勿使用 parse_docx/parse_xlsx/parse_pdf（已废弃）。图片请作为视觉参考传入模型，"
     "系统不内置 OCR，无法提取图片内文字。",
     {"type": "object", "properties": {
-        "path": {"type": "string", "description": "文件路径：附件 stored_path、/media/ URL、sandbox 相对路径或 data_dir 内绝对路径"},
+        "path": {"type": "string", "description": "文件路径：附件 stored_path、/media/ URL 或相对文件名"},
         "page": {"type": "integer", "description": "页码，从 1 开始，默认 1"},
         "page_size": {"type": "integer", "description": "每页行数，默认 800"},
         "max_chars": {"type": "integer", "description": "返回字符预算上限，默认 24000"},
@@ -181,14 +181,12 @@ async def read_file(args: dict, ctx) -> str:
 
 @tool(
     "file_write",
-    "向沙箱内写入文件。若需让生成文件可被用户下载，请设 downloadable=true："
-    "文件会同时落盘到媒体库并返回 /media/... 可下载链接（而非沙箱路径）。",
+    "写入文件并【自动】返回 /media/... 可下载链接。保存任何需要交付给用户的文件都必须使用本工具；"
+    "它会把文件落盘到媒体库并直接返回下载链接，你只需把链接原样透传给用户。"
+    "无需、也不得使用 downloadable 等选项关闭下载。",
     {"type": "object", "properties": {
-        "path": {"type": "string"},
-        "content": {"type": "string"},
-        "downloadable": {"type": "boolean",
-                         "description": "为 true 时把文件作为可下载产物落盘到媒体库，"
-                                        "返回 /media/... 下载链接（而非沙箱路径）"}},
+        "path": {"type": "string", "description": "文件名（可含子目录，如 reports/工资表.txt）"},
+        "content": {"type": "string"}},
      "required": ["path", "content"]},
     toolset="files",
 )
@@ -198,21 +196,58 @@ async def file_write(args: dict, ctx) -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
-    if args.get("downloadable"):
-        media = getattr(ctx, "media", None)
-        if media is not None:
-            ext = os.path.splitext(path)[1].lstrip(".") or "txt"
-            name = os.path.basename(path)
-            owner = getattr(ctx, "user", "anonymous") or "anonymous"
-            url = media.save_bytes(content.encode("utf-8"), kind="file", ext=ext, owner=owner)
-            return (f"已写入 {len(content)} 字符到沙箱 {path}，并已生成可下载文件："
-                    f"[{name}]({url})")
-    return f"已写入 {len(content)} 字符到 {path}"
+    # 默认发布为可下载文件（核心修复：不再因模型不传参数而只给路径）
+    media = getattr(ctx, "media", None)
+    if media is not None:
+        name = os.path.basename(path)
+        owner = getattr(ctx, "user", "anonymous") or "anonymous"
+        try:
+            url = media.save_file(path, kind="file", owner=owner)
+        except Exception:
+            return f"已保存 {len(content)} 字符为文件（下载链接生成失败，请使用 make_downloadable 补救）"
+        return (f"已保存 {len(content)} 字符为可下载文件：\n"
+                f"[{name}]({url})\n\n"
+                f"（该链接真实有效、点击即可下载，你必须原样完整展示给用户，"
+                f"禁止改写为『无法生成链接』『联系管理员』或『只给路径』等说法）")
+    return f"已保存 {len(content)} 字符为文件：{os.path.basename(path)}"
+
+
+@tool(
+    "make_downloadable",
+    "补救工具：把已存在的文件显式转换为可下载链接。传入 /media URL 或相对文件名，"
+    "返回 [/media/... 下载链接]；若已是 /media 链接则原样返回。"
+    "当某次产物未自动生成下载链接时，可用此工具兜底。",
+    {"type": "object", "properties": {
+        "path": {"type": "string", "description": "相对文件名、附件 stored_path 或 /media/ URL"}},
+     "required": ["path"]},
+    toolset="files",
+)
+async def make_downloadable(args: dict, ctx) -> str:
+    p = (args.get("path") or "").strip()
+    if not p:
+        return "[make_downloadable] 缺少 path 参数"
+    media = getattr(ctx, "media", None)
+    if media is None:
+        return "[make_downloadable] 当前环境不支持（无媒体存储）"
+    if p.startswith("/media/"):
+        return f"该文件已是下载链接：[{os.path.basename(p)}]({p})"
+    owner = getattr(ctx, "user", None)
+    is_admin = getattr(ctx, "is_admin", False)
+    abs_path = _resolve_read_path(p, owner, is_admin)
+    if not abs_path or not os.path.isfile(abs_path):
+        return f"[make_downloadable] 文件不存在或越权: {p}"
+    owner_str = getattr(ctx, "user", "anonymous") or "anonymous"
+    try:
+        url = media.save_file(abs_path, kind="file", owner=owner_str)
+    except Exception as e:  # noqa: BLE001
+        return f"[make_downloadable] 发布失败: {e}"
+    name = os.path.basename(abs_path)
+    return f"已生成可下载链接（点击即可下载，请原样展示给用户）：[{name}]({url})"
 
 
 @tool(
     "file_list",
-    "列出沙箱目录内容。",
+    "列出工作区文件。",
     {"type": "object", "properties": {"path": {"type": "string"}}, "required": []},
     toolset="files",
 )

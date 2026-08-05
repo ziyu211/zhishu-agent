@@ -20,7 +20,7 @@ TOOLSETS: dict[str, Toolset] = {
     ),
     "files": Toolset(
         name="files",
-        description="沙箱文件系统工具",
+        description="文件读写工具",
         tools=["file_read", "file_write", "file_list"],
     ),
     "web": Toolset(

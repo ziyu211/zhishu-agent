@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import httpx
+import re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from .auth import require_auth
 from ..core.config import ZhishuConfig
+from ..core.ssrf import guard_url
 from ..context import get_ctx
 
 router = APIRouter(prefix="/api/v1", tags=["models"])
@@ -189,29 +191,13 @@ async def fetch_models(req: FetchModelsReq, user=require_auth("models:write")):
     ctx = get_ctx()
     base = req.base_url.rstrip("/")
     # 对齐 hermes-web-ui：base 以 /v数字 结尾则取 {base}/models，否则 {base}/v1/models
-    import re
-    from urllib.parse import urlparse
-    import socket, ipaddress
     url = base + "/models" if re.search(r"/v\d+/*$", base) else base + "/v1/models"
-    # 安全：SSRF 防护——默认禁止向内网/私有/回环地址拉取；如需内网 Provider 列表，
-    # 在部署配置 security.allow_private_fetch=true 显式放开。
-    host = (urlparse(url).hostname or "").strip()
-    if host:
-        is_private = False
-        try:
-            for info in socket.getaddrinfo(host, None):
-                ip = info[4][0]
-                if ipaddress.ip_address(ip).is_private or \
-                        ipaddress.ip_address(ip).is_loopback or \
-                        ipaddress.ip_address(ip).is_link_local:
-                    is_private = True
-                    break
-        except Exception:
-            is_private = True  # 解析失败按不可信处理
-        if is_private and not ctx.cfg.security.allow_private_fetch:
-            raise HTTPException(
-                status_code=403,
-                detail="禁止向内网/私有地址拉取模型列表（如需放开请配置 security.allow_private_fetch=true）")
+    # 安全：SSRF 防护（复用统一 guard_url）——默认禁止向内网/私有/回环地址拉取；
+    # 如需内网 Provider 列表，在部署配置 security.allow_private_fetch=true 显式放开。
+    if not guard_url(url, allow_private=ctx.cfg.security.allow_private_fetch):
+        raise HTTPException(
+            status_code=403,
+            detail="禁止向内网/私有地址拉取模型列表（如需放开请配置 security.allow_private_fetch=true）")
     headers = {}
     if req.api_key.strip():
         headers["Authorization"] = f"Bearer {req.api_key.strip()}"

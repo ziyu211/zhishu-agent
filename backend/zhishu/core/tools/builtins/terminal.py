@@ -1,4 +1,4 @@
-"""沙箱终端工具（本地内网执行，禁止出网）。
+"""本地终端工具（本地内网执行，禁止出网）。
 
 安全闸门与定时任务 shell 动作**共用** `core/shellguard`：
   1. 角色门：operator 及以上；
@@ -13,12 +13,13 @@ from __future__ import annotations
 
 from ..base import tool
 from . import SANDBOX_ROOT
+from .artifacts import snapshot, publish_diff
 from ...shellguard import check_command, run_guarded
 
 
 @tool(
     "terminal_run",
-    "在隔离沙箱中执行本地 shell 命令（仅内网本机，命令受白名单与高危拦截约束）。",
+    "执行本地 shell 命令（仅内网本机，命令受白名单与高危拦截约束）。",
     {
         "type": "object",
         "properties": {
@@ -55,7 +56,14 @@ async def terminal_run(args: dict, ctx) -> str:
     if reason:
         return f"[已拦截] {reason}"
 
-    return await run_guarded(
+    media = getattr(ctx, "media", None)
+    owner = getattr(ctx, "user", "anonymous") or "anonymous"
+    # 执行前快照工作区，自动发布本次新增/修改的文件为下载链接
+    before = snapshot(SANDBOX_ROOT) if media is not None else {}
+    result = await run_guarded(
         cmd, cwd=SANDBOX_ROOT, timeout=timeout, max_output=8000,
         mem_mb=int(getattr(sec, "shell_mem_limit_mb", 1024) or 0) if sec else 1024,
     )
+    if media is not None:
+        result += publish_diff(SANDBOX_ROOT, before, media, owner)
+    return result

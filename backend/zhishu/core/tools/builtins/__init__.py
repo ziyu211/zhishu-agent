@@ -1,12 +1,13 @@
 """智枢智能体 —— 内置工具实现集合（对标 Hermes `tools/*.py` 每工具一文件）。
 
-  导入本包即触发各工具模块的 @tool 自注册。沙箱根目录在此统一建立。
+  导入本包即触发各工具模块的 @tool 自注册。受限工作区根目录在此统一建立。
 """
 from __future__ import annotations
 
 import os
 
-# 沙箱根目录（工具只能在此范围内操作，防止越权读内网其它文件）
+# 受限工作区根目录（工具只能在此范围内写文件，防止越权读内网其它文件）。
+# 该目录仅作内部执行 cwd 使用，绝不暴露给模型，模型拿到的永远是 /media/... 下载链接。
 SANDBOX_ROOT = os.environ.get("ZHISHU_SANDBOX", "data/sandbox")
 os.makedirs(SANDBOX_ROOT, exist_ok=True)
 

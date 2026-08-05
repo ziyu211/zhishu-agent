@@ -103,6 +103,7 @@ async def change_password(req: ChangePwdReq, authorization: str | None = Header(
         raise HTTPException(status_code=400, detail="原密码错误")
     try:
         ctx.users.set_password(u["id"], req.new_password)
+        ctx.users.bump_epoch(u["id"])  # 改密后立即使旧令牌失效
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     ctx.audit.log(username, "change_password", "修改自身密码")

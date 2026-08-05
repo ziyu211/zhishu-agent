@@ -29,6 +29,7 @@ from typing import Optional
 
 from ..base import tool, Tool, ToolContext
 from .. import registry as _registry
+from .artifacts import snapshot, publish_diff
 
 # 全局动态工具登记（进程级）。键为工具名，值为 (描述, 代码, 参数schema, 会话)
 CREATED_TOOLS: dict[str, tuple[str, str, dict, str]] = {}
@@ -206,13 +207,13 @@ def _register_dynamic(tname: str, desc: str, code: str, params: dict,
 
 @tool(
     "code_exec",
-    "在受控沙箱中运行 Python 代码（对标 Hermes 自创工具/自愈能力）。"
+    "运行 Python 代码（对标 Hermes 自创工具/自愈能力）。"
     "当 read_file 或解析器遇到不支持的文件格式、或需要标准工具没有的处理逻辑时，"
     "可编写 Python 打印结果来解决。可选 path 参数会把文件绝对路径注入环境变量 "
     "TARGET_FILE，代码内用 os.environ['TARGET_FILE'] 读取。代码须把结果 print 到 stdout。"
-    "若需让生成的文件可被用户下载，请设 save_output=true：代码应把输出写到环境变量 "
-    "ZHISHU_OUTPUT_DIR 指向的目录（或任意新建文件），执行结束后这些文件会被落盘到媒体库，"
-    "并以 [/media/... 可下载链接] 形式回传。注意：这是模型自生成的代码，仅在内网可信部署下使用。",
+    "代码产生的新文件会【自动】落盘到媒体库并回传 /media/... 下载链接，无需额外参数；"
+    "save_output=true 时额外收集 ZHISHU_OUTPUT_DIR 目录内的文件再发布一次。"
+    "注意：这是模型自生成的代码，仅在内网可信部署下使用。",
     {
         "type": "object",
         "properties": {
@@ -242,26 +243,29 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
             return f"[code_exec] 路径越权或不存在: {path}"
         extra_env["TARGET_FILE"] = rp
     cwd = os.path.abspath(os.environ.get("ZHISHU_SANDBOX", "data/sandbox"))
-    save_output = bool(args.get("save_output"))
+    media = getattr(ctx, "media", None)
+    owner = getattr(ctx, "user", "anonymous") or "anonymous"
+    # save_output=true 时额外收集 ZHISHU_OUTPUT_DIR（工作区的新文件始终自动发布）
+    explicit_save = bool(args.get("save_output"))
     out_dir = None
-    if save_output:
-        media = getattr(ctx, "media", None)
-        if media is None:
-            return "[code_exec] 当前环境不支持 save_output（无媒体存储）"
+    if explicit_save and media is not None:
         out_dir = tempfile.mkdtemp(prefix="zh_out_")
         extra_env["ZHISHU_OUTPUT_DIR"] = out_dir
+    # 执行前快照工作区，用于差分出本次新增/修改的文件
+    before = snapshot(cwd) if media is not None else {}
     result = await _run_python(
         code, args.get("timeout", default_to), extra_env, cwd,
         mem_limit_mb=mem, block_network=_block_network(ctx),
     )
-    if save_output and out_dir:
-        owner = getattr(ctx, "user", "anonymous") or "anonymous"
-        files = _collect_outputs(out_dir, media, owner)
-        shutil.rmtree(out_dir, ignore_errors=True)
-        if files:
-            lines = ["", "", "[生成的可下载文件]:"]
-            lines += [f"- [{n}]({u})" for n, u in files]
-            result += "\n".join(lines)
+    if media is not None:
+        # 自动发布工作区内本次新增/修改的文件（核心修复：不再依赖模型传参）
+        result += publish_diff(cwd, before, media, owner)
+        if out_dir:
+            files = _collect_outputs(out_dir, media, owner)
+            shutil.rmtree(out_dir, ignore_errors=True)
+            if files:
+                result += "\n\n[输出目录生成的可下载文件]:\n" + "\n".join(
+                    f"- [{n}]({u})" for n, u in files)
     return result
 
 

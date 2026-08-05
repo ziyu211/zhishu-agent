@@ -26,6 +26,7 @@ deploy/zhishu.yaml
 .env
 .env.*
 *.local
+*.bak
 
 # ===== Python 缓存 =====
 __pycache__/

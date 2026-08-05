@@ -154,6 +154,15 @@ class UserStore:
             )"""
         )
         self.conn.commit()
+        # 改密失效：password_epoch（改密后自增；令牌含 epoch 声明，校验不符即失效）。
+        # 旧库无此列时安全加列，默认值 0 与历史令牌（无 e 声明）兼容，不会误杀会话。
+        try:
+            self.conn.execute(
+                "ALTER TABLE users ADD COLUMN password_epoch INTEGER NOT NULL DEFAULT 0"
+            )
+            self.conn.commit()
+        except Exception:
+            pass  # 列已存在
 
     # --------------------- 内部工具 ---------------------
     def _hash(self, password: str, salt: str) -> str:
@@ -256,6 +265,17 @@ class UserStore:
         )
         self.conn.commit()
 
+    def bump_epoch(self, uid: int) -> None:
+        """改密后使该用户所有历史令牌失效：epoch 自增，verify 校验不符即拒绝。"""
+        row = self.conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+        if not row:
+            raise ValueError("用户不存在")
+        self.conn.execute(
+            "UPDATE users SET password_epoch = password_epoch + 1, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (uid,),
+        )
+        self.conn.commit()
+
     def delete(self, uid: int):
         row = self.conn.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
         if not row:
@@ -299,16 +319,17 @@ class AuthService:
             if u:
                 full = self.users.get(u["id"]) or {}
                 return self._session(u["username"], u["role"],
-                                     full.get("display_name", u["username"]))
+                                     full.get("display_name", u["username"]),
+                                     epoch=full.get("password_epoch", 0))
         # 2) 引导管理员（用户库为空时可用配置账号登录）
         if (not self.users or self.users.count() == 0) and \
                 username == self.cfg.admin_user and password == self.cfg.admin_password:
             return self._session(username, "admin", "系统管理员")
         return None
 
-    def _session(self, user: str, role: str, display_name: str) -> dict:
+    def _session(self, user: str, role: str, display_name: str, epoch: int = 0) -> dict:
         return {
-            "token": self._token(user, role),
+            "token": self._token(user, role, epoch=epoch),
             "user": user,
             "role": role,
             "role_label": ROLE_LABELS.get(role, role),
@@ -316,8 +337,8 @@ class AuthService:
             "perms": ROLES.get(role, []),
         }
 
-    def _token(self, user: str, role: str, ttl: int = 86400 * 7) -> str:
-        payload = json.dumps({"u": user, "r": role, "exp": int(time.time()) + ttl})
+    def _token(self, user: str, role: str, ttl: int = 86400 * 7, epoch: int = 0) -> str:
+        payload = json.dumps({"u": user, "r": role, "e": epoch, "exp": int(time.time()) + ttl})
         sig = self.crypto.sign(self.secret, payload)
         return f"{payload}.{sig}"
 
@@ -352,6 +373,12 @@ class AuthService:
                         if u.get("role") and u["role"] != data.get("r"):
                             data = dict(data)  # 角色降级/变更：以库中当前角色为准
                             data["r"] = u["role"]
+                        # 改密失效：令牌签发时的 epoch 与当前用户 epoch 不符即拒绝
+                        # （历史令牌无 e 声明 -> 0，用户未改密时同为 0，不会误杀）。
+                        tok_epoch = data.get("e", 0) or 0
+                        cur_epoch = u.get("password_epoch", 0) or 0
+                        if tok_epoch != cur_epoch:
+                            return None
                     else:
                         try:
                             if self.users.count() > 0:
