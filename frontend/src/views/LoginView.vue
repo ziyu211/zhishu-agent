@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { api, setToken } from '@/api/client'
+import { health } from '@/api/system'
 import { useAppStore } from '@/stores/app'
 import { clearActAs } from '@/api/actas'
 
@@ -13,10 +14,18 @@ const username = ref('')
 const password = ref('')
 const loading = ref(false)
 const errorMsg = ref('')
+const version = ref('')
 
-onMounted(() => {
+onMounted(async () => {
   // 平滑切入
   document.documentElement.classList.remove('theme-transitioning')
+  // 拉取后端真实版本号（/health 为公开端点，失败不影响登录）
+  try {
+    const res = await health()
+    if (res?.version) version.value = res.version
+  } catch {
+    /* 版本号仅作展示，拉取失败静默忽略 */
+  }
 })
 
 async function handleLogin() {
@@ -65,7 +74,9 @@ async function handleLogin() {
         </button>
       </form>
     </div>
-    <div class="login-footer">Zhishu Agent · 纯国产技术栈</div>
+    <div class="login-footer">
+      Zhishu Agent · 纯国产技术栈<span v-if="version"> · v{{ version }}</span>
+    </div>
   </div>
 </template>
 
