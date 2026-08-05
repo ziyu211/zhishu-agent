@@ -63,11 +63,14 @@ function handleFileChange(e: Event) {
 
 // 拖拽（用 dragCounter 解决子元素 dragleave 抖动）
 function handleDragOver(e: DragEvent) {
-  e.preventDefault()
+  // 仅对文件拖拽阻止默认行为，保留 textarea 内普通文本拖拽/选中的默认交互
+  if (e.dataTransfer?.types.includes('Files')) {
+    e.preventDefault()
+  }
 }
 function handleDragEnter(e: DragEvent) {
-  e.preventDefault()
   if (e.dataTransfer?.types.includes('Files')) {
+    e.preventDefault()
     dragCounter.value++
     isDragging.value = true
   }
@@ -172,7 +175,13 @@ onMounted(() => textareaRef.value?.focus())
 </script>
 
 <template>
-  <div class="chat-input-area">
+    <div
+      class="chat-input-area"
+      @dragover="handleDragOver"
+      @dragenter="handleDragEnter"
+      @dragleave="handleDragLeave"
+      @drop="handleDrop"
+    >
     <!-- 待发送附件托盘 -->
     <div v-if="pendingFiles.length > 0" class="attachment-previews">
       <div
@@ -200,10 +209,6 @@ onMounted(() => textareaRef.value?.focus())
     <div
       class="input-wrapper"
       :class="{ 'drag-over': isDragging }"
-      @dragover="handleDragOver"
-      @dragenter="handleDragEnter"
-      @dragleave="handleDragLeave"
-      @drop="handleDrop"
     >
       <button class="upload-btn" title="上传文件 / 图片（发到对话框并解析）" @click="triggerAttach">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
@@ -334,7 +339,7 @@ onMounted(() => textareaRef.value?.focus())
 
 .input-wrapper {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: 10px;
   background-color: $bg-input;
   border: 1px solid $border-color;
@@ -392,10 +397,11 @@ onMounted(() => textareaRef.value?.focus())
   color: $text-primary;
   font-family: $font-ui;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 22px;
   resize: none;
   max-height: 140px;
   min-height: 22px;
+  padding: 0;
   overflow-y: auto;
   &::placeholder {
     color: $text-muted;
