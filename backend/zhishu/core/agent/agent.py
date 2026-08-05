@@ -357,7 +357,7 @@ class Agent:
         self.llm = llm
         self.kb = kb
         self.memory = memory
-        self.ctx = ctx or ToolContext(kb=kb, security=cfg.security)
+        self.ctx = ctx or ToolContext(kb=kb, security=cfg.security, media=media)
         self.media = media
         self.context_engine = context_engine or NoOpContextEngine()
         # 外部长期记忆（向量 provider，opt-in）。为 None 时 prefetch/sync 全为 no-op，零回归。
@@ -1327,7 +1327,7 @@ class Agent:
         # 主管线程仅收到最终结论（delegate_end.result），主对话保持干净（P0-2 会话隔离）。
         scratch_session = f"{session}::delegate::{name}"
         sub_ctx = ToolContext(
-            kb=g.kb, security=g.cfg.security,
+            kb=g.kb, security=g.cfg.security, media=g.media,
             user=owner or "anonymous", session=scratch_session,
             is_admin=is_admin, user_role=user_role or "", agent_name=name,
         )

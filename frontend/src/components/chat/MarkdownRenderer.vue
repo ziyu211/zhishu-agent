@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, nextTick, onMounted, watch } from 'vue'
 import hljs from 'highlight.js/lib/common'
+import { downloadFile } from '@/api/http'
+import { useMessage } from 'naive-ui'
 
 const props = defineProps<{ content: string }>()
+const message = useMessage()
 
 function escapeHtml(s: string): string {
   return s
@@ -18,6 +21,11 @@ function escapeHtml(s: string): string {
  */
 function sanitizeUrl(u: string): string {
   const t = (u || '').trim()
+  // 同源内部媒体资源（受后端 /media 鉴权网关保护），允许作为可下载链接
+  if (/^\/media\//i.test(t)) {
+    if (/["'<>()\s]/.test(t)) return '#'
+    return t
+  }
   if (!/^(https?:\/\/|mailto:)/i.test(t)) return '#'
   if (/["'<>()\s]/.test(t)) return '#'
   return t
@@ -31,9 +39,13 @@ function inline(s: string): string {
   t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
   // 斜体
   t = t.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
-  // 链接（URL 经白名单清洗后写入属性）
-  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g, (_m, a, u) => {
+  // 链接（URL 经白名单清洗后写入属性）。支持 http(s)/mailto 与同源 /media/ 下载链接
+  t = t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|\/media\/)[^)\s]+)\)/g, (_m, a, u) => {
     const safe = sanitizeUrl(u)
+    if (safe === '#') return _m
+    if (u.startsWith('/media/')) {
+      return `<a href="${safe}" class="media-link" data-media="1" target="_blank" rel="noopener noreferrer">${a}</a>`
+    }
     return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${a}</a>`
   })
   return t
@@ -149,8 +161,23 @@ function render(src: string): string {
 const body = ref<HTMLElement | null>(null)
 const renderedHtml = computed(() => render(props.content || ''))
 
-async function handleCopy(e: MouseEvent) {
-  const btn = (e.target as HTMLElement).closest('.code-copy')
+async function handleClick(e: MouseEvent) {
+  const target = e.target as HTMLElement
+  // 媒体下载链接：拦截默认跳转，走鉴权下载（带 token 的 blob 下载，保证 /media 网关放行）
+  const mediaLink = target.closest('a.media-link') as HTMLAnchorElement | null
+  if (mediaLink) {
+    e.preventDefault()
+    const href = mediaLink.getAttribute('href') || ''
+    const name = mediaLink.getAttribute('download') || href.split('/').pop() || 'file'
+    try {
+      await downloadFile(href, name)
+    } catch (err: any) {
+      message.error(err?.message || '下载失败')
+    }
+    return
+  }
+  // 代码块复制按钮
+  const btn = target.closest('.code-copy')
   if (!btn) return
   const block = btn.closest('.hljs-code-block')
   const code = block?.querySelector('code')?.textContent || ''
@@ -168,7 +195,7 @@ watch(renderedHtml, () => void nextTick())
 </script>
 
 <template>
-  <div ref="body" class="markdown-body" v-html="renderedHtml" @click="handleCopy"></div>
+  <div ref="body" class="markdown-body" v-html="renderedHtml" @click="handleClick"></div>
 </template>
 
 <style lang="scss">
@@ -188,6 +215,11 @@ watch(renderedHtml, () => void nextTick())
   em { color: $text-secondary; }
   a { color: $accent-primary; text-decoration: underline; text-underline-offset: 2px;
     &:hover { color: $accent-hover; } }
+  a.media-link { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px;
+    border: 1px solid $border-color; border-radius: 6px; background: rgba(var(--accent-primary-rgb), 0.06);
+    text-decoration: none; font-size: 13px; font-weight: 500; cursor: pointer;
+    &::before { content: "⤓"; font-weight: 700; }
+    &:hover { background: rgba(var(--accent-primary-rgb), 0.12); } }
   blockquote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid $border-color; color: $text-secondary; }
   code:not(.hljs) { background: $code-bg; padding: 2px 6px; border-radius: 4px; font-family: $font-code; font-size: 13px; color: $accent-primary; }
   table { width: 100%; border-collapse: collapse; margin: 8px 0; display: block; overflow-x: auto;

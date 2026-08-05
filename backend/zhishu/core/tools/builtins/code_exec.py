@@ -22,6 +22,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from typing import Optional
@@ -148,6 +149,28 @@ async def _run_python(code: str, timeout: int, extra_env: dict, cwd: str,
             pass
 
 
+def _collect_outputs(out_dir: str, media, owner: str) -> list[tuple[str, str]]:
+    """收集临时输出目录内的新文件，逐个落盘到媒体库并返回 (文件名, /media/... URL)。"""
+    results: list[tuple[str, str]] = []
+    for root, _dirs, files in os.walk(out_dir):
+        for fn in files:
+            fp = os.path.join(root, fn)
+            try:
+                with open(fp, "rb") as f:
+                    data = f.read()
+            except Exception:
+                continue
+            if not data:
+                continue
+            ext = os.path.splitext(fn)[1].lstrip(".") or "bin"
+            try:
+                url = media.save_bytes(data, kind="file", ext=ext, owner=owner)
+                results.append((fn, url))
+            except Exception:
+                continue
+    return results
+
+
 def _make_handler(code: str, mem_limit_mb: int, timeout: int, block_network: bool):
     async def handler(args: dict, ctx: ToolContext) -> str:
         if not _code_exec_allowed(ctx):
@@ -187,13 +210,16 @@ def _register_dynamic(tname: str, desc: str, code: str, params: dict,
     "当 read_file 或解析器遇到不支持的文件格式、或需要标准工具没有的处理逻辑时，"
     "可编写 Python 打印结果来解决。可选 path 参数会把文件绝对路径注入环境变量 "
     "TARGET_FILE，代码内用 os.environ['TARGET_FILE'] 读取。代码须把结果 print 到 stdout。"
-    "注意：这是模型自生成的代码，仅在内网可信部署下使用。",
+    "若需让生成的文件可被用户下载，请设 save_output=true：代码应把输出写到环境变量 "
+    "ZHISHU_OUTPUT_DIR 指向的目录（或任意新建文件），执行结束后这些文件会被落盘到媒体库，"
+    "并以 [/media/... 可下载链接] 形式回传。注意：这是模型自生成的代码，仅在内网可信部署下使用。",
     {
         "type": "object",
         "properties": {
             "code": {"type": "string", "description": "要执行的 Python 代码（结果请 print 到 stdout）"},
             "path": {"type": "string", "description": "可选：目标文件 stored_path / /media/ URL，将作为 TARGET_FILE 环境变量供代码读取"},
             "timeout": {"type": "integer", "description": "超时秒数，默认取 security.code_exec_timeout，上限 120"},
+            "save_output": {"type": "boolean", "description": "为 true 时收集代码生成的文件并落盘到媒体库，回传 /media/... 可下载链接"},
         },
         "required": ["code"],
     },
@@ -216,10 +242,27 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
             return f"[code_exec] 路径越权或不存在: {path}"
         extra_env["TARGET_FILE"] = rp
     cwd = os.path.abspath(os.environ.get("ZHISHU_SANDBOX", "data/sandbox"))
-    return await _run_python(
+    save_output = bool(args.get("save_output"))
+    out_dir = None
+    if save_output:
+        media = getattr(ctx, "media", None)
+        if media is None:
+            return "[code_exec] 当前环境不支持 save_output（无媒体存储）"
+        out_dir = tempfile.mkdtemp(prefix="zh_out_")
+        extra_env["ZHISHU_OUTPUT_DIR"] = out_dir
+    result = await _run_python(
         code, args.get("timeout", default_to), extra_env, cwd,
         mem_limit_mb=mem, block_network=_block_network(ctx),
     )
+    if save_output and out_dir:
+        owner = getattr(ctx, "user", "anonymous") or "anonymous"
+        files = _collect_outputs(out_dir, media, owner)
+        shutil.rmtree(out_dir, ignore_errors=True)
+        if files:
+            lines = ["", "", "[生成的可下载文件]:"]
+            lines += [f"- [{n}]({u})" for n, u in files]
+            result += "\n".join(lines)
+    return result
 
 
 @tool(

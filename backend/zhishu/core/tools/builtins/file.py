@@ -181,17 +181,33 @@ async def read_file(args: dict, ctx) -> str:
 
 @tool(
     "file_write",
-    "向沙箱内写入文件。",
+    "向沙箱内写入文件。若需让生成文件可被用户下载，请设 downloadable=true："
+    "文件会同时落盘到媒体库并返回 /media/... 可下载链接（而非沙箱路径）。",
     {"type": "object", "properties": {
-        "path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
+        "path": {"type": "string"},
+        "content": {"type": "string"},
+        "downloadable": {"type": "boolean",
+                         "description": "为 true 时把文件作为可下载产物落盘到媒体库，"
+                                        "返回 /media/... 下载链接（而非沙箱路径）"}},
+     "required": ["path", "content"]},
     toolset="files",
 )
 async def file_write(args: dict, ctx) -> str:
     path = _safe_path(args.get("path", ""))
+    content = args.get("content", "")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        f.write(args.get("content", ""))
-    return f"已写入 {len(args.get('content',''))} 字符到 {path}"
+        f.write(content)
+    if args.get("downloadable"):
+        media = getattr(ctx, "media", None)
+        if media is not None:
+            ext = os.path.splitext(path)[1].lstrip(".") or "txt"
+            name = os.path.basename(path)
+            owner = getattr(ctx, "user", "anonymous") or "anonymous"
+            url = media.save_bytes(content.encode("utf-8"), kind="file", ext=ext, owner=owner)
+            return (f"已写入 {len(content)} 字符到沙箱 {path}，并已生成可下载文件："
+                    f"[{name}]({url})")
+    return f"已写入 {len(content)} 字符到 {path}"
 
 
 @tool(

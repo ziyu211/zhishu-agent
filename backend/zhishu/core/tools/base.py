@@ -64,6 +64,10 @@ class ToolContext:
     is_admin: bool = False
     user_role: str = ""
     agent_name: str = ""        # 当前运行所属智能体名；空字符串=主管（supervisor）
+    # 多模态产物存储（MediaStore）：工具可用它把生成文件落盘到媒体库并返回
+    # /media/... 可下载 URL（file_write/code_exec 的 downloadable/save_output 用）。
+    # 默认 None，由 Agent 在构造 ToolContext 时注入；for_run 浅拷贝会一并保留。
+    media: Optional[Any] = None
 
     def for_run(
         self,
