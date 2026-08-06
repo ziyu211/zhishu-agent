@@ -86,6 +86,26 @@ class FailingLLM:
         raise RuntimeError("所有已配置的 LLM Provider 均缺少 API Key 或不可达：agnes（https://x）。")
 
 
+class NoContentLLM:
+    """模拟只回 reasoning、缺 content 字段的 reasoning 模型（如 sensenova-6.7-flash-lite）。"""
+    def __init__(self, cfg, api_mode=None):
+        self.cfg = cfg
+        self.api_mode = api_mode
+
+    async def chat(self, messages, model=None, tools=None, max_tokens=None,
+                   tool_choice=None, **_kw):
+        return {
+            "choices": [{
+                "message": {"role": "assistant", "reasoning": "Thinking...",
+                            "finish_reason": "length"},
+                "finish_reason": "length",
+            }]
+        }
+
+    async def stream(self, *a, **k):
+        yield "正常流式正文"
+
+
 def _build_cfg(tmp: str) -> ZhishuConfig:
     cfg = ZhishuConfig()
     cfg.server.data_dir = tmp
@@ -254,6 +274,7 @@ def main():
         test_gateway_toolcall_translation()
         test_gateway_upstream_429_mapped()
         test_gateway_upstream_auth_mapped()
+        test_gateway_missing_content_guaranteed()
     except AssertionError as e:
         print("FAILED:", e)
         sys.exit(1)
@@ -297,6 +318,26 @@ def test_gateway_upstream_auth_mapped():
             assert resp.status_code == 401, f"缺 Key 应映射为 401，实际 {resp.status_code}: {resp.text[:200]}"
             assert resp.json()["error"]["type"] == "authentication_error"
     print("  [G] 上游缺 Key/鉴权 → 网关 401 authentication_error  ✓")
+
+
+def test_gateway_missing_content_guaranteed():
+    with _tmpdir() as tmp:
+        cfg = _build_cfg(tmp)
+        gw_mod.LLMClient = NoContentLLM
+        app = create_app(cfg)
+        token = _mint_token(cfg.security.secret)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/v1/chat/completions",
+                json={"model": "demo/demo-model", "messages": [{"role": "user", "content": "hi"}],
+                      "stream": False},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200, f"期望 200，实际 {resp.status_code}: {resp.text[:200]}"
+            msg = resp.json()["choices"][0]["message"]
+            assert "content" in msg, f"message 必须含 content 键: {msg}"
+            assert msg["content"] == "", f"缺 content 应补空串: {msg}"
+    print("  [H] 上游只回 reasoning 缺 content → 网关补空串 content（避免客户端 KeyError）  ✓")
 
 
 if __name__ == "__main__":

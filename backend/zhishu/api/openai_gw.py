@@ -182,6 +182,13 @@ async def chat_completions(request: Request, user=require_auth("chat")):
             out["created"] = created
             out["model"] = model_out
             out.setdefault("object", "chat.completion")
+            # OpenAI 兼容兜底：保证每条 choice 的 message 必有 content 键，
+            # 否则部分 reasoning 模型（如 sensenova-6.7-flash-lite）在非流式下只回
+            # reasoning 字段、缺 content，会让 Open WebUI / LobeChat 读到空消息。
+            for _ch in out.get("choices", []) or []:
+                _msg = _ch.get("message") if isinstance(_ch, dict) else None
+                if isinstance(_msg, dict) and "content" not in _msg:
+                    _msg["content"] = ""
         ctx.audit.log(user.get("real_u", owner), "openai_chat",
                       str(raw_messages[-1].get("content", ""))[:200],
                       f"model={model_out}")
