@@ -261,8 +261,16 @@ class LLMClient:
         headers = {"Content-Type": "application/json"}
         if pc.api_key:
             headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
-        resp = await self._http.post(url, json=kw, headers=headers)
-        resp.raise_for_status()
+        try:
+            resp = await self._http.post(url, json=kw, headers=headers)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            sc = e.response.status_code if e.response is not None else "?"
+            detail = _extract_upstream_detail(e.response) if e.response is not None else ""
+            raise RuntimeError(
+                f"Provider「{pc.name}」返回 HTTP {sc}"
+                + (f"：{detail}" if detail else f"：{e}")
+            ) from e
         out = transport.normalize_response(resp.json())
         # 若上游网关 / 代理返回「200 + 错误 JSON」（而非 4xx/5xx），
         # normalize_response 后依旧不含 choices —— 视为调用失败并抛出，
@@ -307,7 +315,20 @@ class LLMClient:
         if pc.api_key:
             headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
         async with self._http.stream("POST", url, json=kw, headers=headers) as r:
-            r.raise_for_status()
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                sc = r.status_code
+                detail = ""
+                try:
+                    await r.aread()
+                    detail = _extract_upstream_detail(r)
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"Provider「{pc.name}」返回 HTTP {sc}"
+                    + (f"：{detail}" if detail else f"：{e}")
+                ) from e
             async for line in r.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
