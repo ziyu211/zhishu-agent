@@ -197,8 +197,25 @@ export interface MemorySettings {
   vector_enabled: boolean
   vector_top_k: number
 }
+export interface SecuritySettings {
+  /** 允许从内网/私有地址拉取模型列表（/models/fetch） */
+  allow_private_fetch: boolean
+  /** 工具是否允许出网 */
+  outbound_allow: boolean
+  /** 是否允许代码执行 */
+  allow_code_exec: boolean
+  /** Shell 执行总闸 */
+  allow_shell: boolean
+  /** 是否强制 Shell 白名单 */
+  shell_enforce_allowlist: boolean
+  /** 审计日志 */
+  enable_audit: boolean
+  /** 数据脱敏 */
+  enable_redact: boolean
+}
 export interface SettingsResp {
   memory: MemorySettings
+  security: SecuritySettings
 }
 export interface AuditItem {
   ts: string

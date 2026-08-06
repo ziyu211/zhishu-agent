@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { NButton, NInput, NSelect, NCard, NSwitch, NInputNumber, useMessage } from 'naive-ui'
 import { api } from '@/api/client'
 import { useTheme } from '@/composables/useTheme'
@@ -18,6 +18,27 @@ const selectedDefault = ref('')
 const vectorEnabled = ref(false)
 const vectorTopK = ref(5)
 const memoryLoading = ref(false)
+
+// 安全与网络（admin 自助开关，运行时即时生效）
+const security = reactive({
+  allow_private_fetch: false,
+  outbound_allow: false,
+  allow_code_exec: true,
+  allow_shell: true,
+  shell_enforce_allowlist: true,
+  enable_audit: true,
+  enable_redact: true,
+})
+const securityLoading = ref(false)
+const securityFields: { key: keyof typeof security; label: string; desc: string }[] = [
+  { key: 'allow_private_fetch', label: '内网模型探测', desc: '允许从内网/私有地址（如本地 Ollama/vLLM）拉取模型列表' },
+  { key: 'outbound_allow', label: '工具出网', desc: '允许联网工具（网页搜索、外部 API 调用）访问公网' },
+  { key: 'allow_code_exec', label: '代码执行', desc: '允许智能体生成并执行 Python 代码片段（沙箱隔离）' },
+  { key: 'allow_shell', label: 'Shell 执行', desc: '允许定时任务与 terminal_run 工具执行 Shell 命令' },
+  { key: 'shell_enforce_allowlist', label: 'Shell 白名单', desc: '强制 Shell 命令可执行文件白名单（关闭仅保留高危拒绝清单）' },
+  { key: 'enable_audit', label: '审计日志', desc: '记录关键操作审计日志（落库 zhishu_audit.db）' },
+  { key: 'enable_redact', label: '数据脱敏', desc: '对落库/输出中的 PII（手机号、身份证等）自动遮蔽' },
+]
 
 async function loadModels() {
   try {
@@ -76,9 +97,29 @@ function saveMemorySettings() {
     .finally(() => { memoryLoading.value = false })
 }
 
+async function loadSecuritySettings() {
+  try {
+    const r = await api.getSettings()
+    if (r.security) Object.assign(security, r.security)
+  } catch { /* 静默 */ }
+}
+function saveSecuritySettings() {
+  securityLoading.value = true
+  api.updateSettings({ security: { ...security } })
+    .then((r) => {
+      if (r.security) Object.assign(security, r.security)
+      message.success('安全与网络设置已保存并即时生效')
+    })
+    .catch((e: any) => message.error(e?.message || '保存失败'))
+    .finally(() => { securityLoading.value = false })
+}
+
 onMounted(() => {
   loadModels()
-  if (app.isAdmin) loadMemorySettings()
+  if (app.isAdmin) {
+    loadMemorySettings()
+    loadSecuritySettings()
+  }
 })
 </script>
 
@@ -134,6 +175,23 @@ onMounted(() => {
           <div class="inline-form">
             <NInputNumber v-model:value="vectorTopK" :min="1" :max="20" size="small" style="width: 110px" />
             <NButton size="small" :loading="memoryLoading" @click="saveMemorySettings">保存</NButton>
+          </div>
+        </div>
+      </section>
+
+      <section class="card-block" v-if="app.isAdmin">
+        <h3 class="block-title">安全与网络</h3>
+        <div class="form-row" v-for="f in securityFields" :key="f.key">
+          <label>{{ f.label }}</label>
+          <div class="inline-form">
+            <NSwitch v-model:value="security[f.key]" />
+            <span class="val">{{ f.desc }}</span>
+          </div>
+        </div>
+        <div class="form-row">
+          <label></label>
+          <div class="inline-form">
+            <NButton size="small" :loading="securityLoading" @click="saveSecuritySettings">保存安全设置</NButton>
           </div>
         </div>
       </section>

@@ -80,55 +80,108 @@ class AppContext:
     # ------------------------------------------------------------------
     # 运行时设置（用户自助开关，持久化于 config.override.json，重启后自动复现）
     # ------------------------------------------------------------------
+    # 可经前台自助切换、且每次调用实时读 ctx.cfg.security.* 的运行时安全开关。
+    # 这些字段不重建 AuthService/Crypto（secret/enable_auth/enable_sm 不在此列），
+    # 因此可在不重启进程的情况下即时生效。
+    _SECURITY_OVERRIDE_FIELDS: dict[str, type] = {
+        "allow_private_fetch": bool,
+        "outbound_allow": bool,
+        "allow_code_exec": bool,
+        "allow_shell": bool,
+        "shell_enforce_allowlist": bool,
+        "enable_audit": bool,
+        "enable_redact": bool,
+    }
+
     def _apply_override(self) -> None:
-        """启动时把 data_dir/config.override.json 中的设置并入 cfg。"""
+        """启动时把 data_dir/config.override.json 中的设置并入 cfg。
+
+        注意：本方法在 __init__ 早期调用，此时 self.audit / self.redactor 尚未构建，
+        因此仅把数值并入 cfg（二者随后会从 cfg 初始化）；即时生效逻辑仅用于
+        apply_settings 运行期路径。
+        """
         try:
             if not os.path.exists(self._override_path):
                 return
             with open(self._override_path, "r", encoding="utf-8") as f:
                 ov = json.load(f) or {}
-            mem = ov.get("memory") or {}
-            if isinstance(mem.get("vector_enabled"), bool):
-                self.cfg.memory.vector_enabled = mem["vector_enabled"]
-            if isinstance(mem.get("vector_top_k"), int) and mem["vector_top_k"] > 0:
-                self.cfg.memory.vector_top_k = mem["vector_top_k"]
+            self._apply_memory_cfg(ov.get("memory") or {})
+            self._apply_security_cfg(ov.get("security") or {})
         except Exception:
             pass
 
-    async def apply_settings(self, patch: dict) -> dict:
-        """应用设置补丁、持久化覆盖、并重建记忆管理器使开关立即生效。"""
-        mem = patch.get("memory") or {}
+    def _apply_memory_cfg(self, mem: dict) -> None:
         if isinstance(mem.get("vector_enabled"), bool):
             self.cfg.memory.vector_enabled = mem["vector_enabled"]
         if isinstance(mem.get("vector_top_k"), int) and mem["vector_top_k"] > 0:
             self.cfg.memory.vector_top_k = mem["vector_top_k"]
-        # 持久化覆盖（重启后由 _apply_override 复现）
+
+    def _apply_security_cfg(self, sec: dict) -> None:
+        for k, typ in self._SECURITY_OVERRIDE_FIELDS.items():
+            v = sec.get(k)
+            if isinstance(v, typ):
+                setattr(self.cfg.security, k, v)
+
+    def _apply_security_live(self) -> None:
+        """让启动后已构建的审计/脱敏器跟随 cfg 当前值（仅运行期 apply_settings 可用）。"""
+        if getattr(self, "audit", None) is not None:
+            self.audit.enable = self.cfg.security.enable_audit
+        if getattr(self, "redactor", None) is not None:
+            self.redactor.enabled = self.cfg.security.enable_redact
+            set_default_redactor(self.redactor)
+
+    async def apply_settings(self, patch: dict) -> dict:
+        """应用设置补丁、持久化覆盖、并使开关立即生效。
+
+        支持 "memory"（长期记忆）与 "security"（运行时安全开关）两组；
+        仅持久化本请求涉及的组，避免互相覆盖。security 组的 enable_audit /
+        enable_redact 会同步到已构建的审计/脱敏器，做到免重启生效。
+        """
+        if "memory" in patch:
+            self._apply_memory_cfg(patch["memory"] or {})
+        if "security" in patch:
+            self._apply_security_cfg(patch["security"] or {})
+            self._apply_security_live()
+        # 持久化覆盖（合并已有 override，仅更新被本请求涉及的组；重启后由 _apply_override 复现）
         try:
+            ov: dict = {}
+            if os.path.exists(self._override_path):
+                with open(self._override_path, "r", encoding="utf-8") as f:
+                    ov = json.load(f) or {}
+            if "memory" in patch:
+                ov["memory"] = {
+                    "vector_enabled": self.cfg.memory.vector_enabled,
+                    "vector_top_k": self.cfg.memory.vector_top_k,
+                }
+            if "security" in patch:
+                ov["security"] = {
+                    k: getattr(self.cfg.security, k)
+                    for k in self._SECURITY_OVERRIDE_FIELDS
+                }
             os.makedirs(os.path.dirname(self._override_path), exist_ok=True)
             with open(self._override_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "memory": {
-                            "vector_enabled": self.cfg.memory.vector_enabled,
-                            "vector_top_k": self.cfg.memory.vector_top_k,
-                        }
-                    },
-                    f, ensure_ascii=False, indent=2,
+                json.dump(ov, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        # 重建记忆管理器（仅 memory 变更时；向量开关立即生效，无 embedding 后端时优雅降级为 None）
+        if "memory" in patch:
+            try:
+                new_mm = MemoryManager(
+                    self.cfg, self.cfg.server.data_dir, builtin_store=self.memory
                 )
-        except Exception:
-            pass
-        # 重建记忆管理器（切换向量长期记忆开关立即生效；无 embedding 后端时优雅降级为 None）
-        try:
-            new_mm = MemoryManager(
-                self.cfg, self.cfg.server.data_dir, builtin_store=self.memory
-            )
-            await new_mm.initialize()
-            self.memory_manager = new_mm
-        except Exception:
-            pass
+                await new_mm.initialize()
+                self.memory_manager = new_mm
+            except Exception:
+                pass
         return {
-            "vector_enabled": self.cfg.memory.vector_enabled,
-            "vector_top_k": self.cfg.memory.vector_top_k,
+            "memory": {
+                "vector_enabled": self.cfg.memory.vector_enabled,
+                "vector_top_k": self.cfg.memory.vector_top_k,
+            },
+            "security": {
+                k: getattr(self.cfg.security, k)
+                for k in self._SECURITY_OVERRIDE_FIELDS
+            },
         }
 
     def build_agent(self, owner: str | None = None) -> "Agent":
