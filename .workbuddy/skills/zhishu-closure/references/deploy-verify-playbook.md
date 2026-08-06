@@ -11,6 +11,16 @@ C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2/node.exe ./node
 
 ## 二、热更新容器 zsagent（防目录嵌套陷阱）
 
+> ⚠️ **先确认部署形态 —— 这一步决定用哪种热更方式！**
+> 运行 `docker inspect zsagent --format '{{json .Mounts}}'` 查看 `/app/backend/zhishu` 是否为 bind-mount：
+> - **是 bind-mount（如本地 zsagent）**：容器的 `/app/backend/zhishu` 就是宿主机的
+>   `D:\data\hemers\zhishu-agent\backend\zhishu`。**严禁** `docker exec rm -rf /app/backend/zhishu/api` ——
+>   那会直接删掉**宿主源码**！正确做法：**直接编辑宿主文件 → `docker restart zsagent`**（bind 实时可见，重启重载 Python）。
+>   前端 static 改动：`vite build` 重新生成宿主 `backend/zhishu/static` 即可，无需 docker cp。
+> - **非 bind-mount（镜像层，如远程 152.136.33.55）**：才用下面的 `docker exec rm` + `docker cp` 流程。
+
+### 非 bind-mount 容器的热更流程（远程实例）
+
 ```bash
 # 1. 清旧 static（避免哈希残留）
 docker exec zsagent rm -rf /app/backend/zhishu/static
