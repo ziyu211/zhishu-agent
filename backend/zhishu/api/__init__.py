@@ -10,7 +10,8 @@ from .modules import router as modules_router
 from .agents import router as agents_router
 from .cron import router as cron_router
 from .settings import router as settings_router
+from .openai_gw import router as openai_router
 
 __all__ = ["chat_router", "models_router", "knowledge_router", "auth_router",
            "users_router", "admin_router", "conversations_router", "modules_router",
-           "agents_router", "cron_router", "settings_router"]
+           "agents_router", "cron_router", "settings_router", "openai_router"]

@@ -3,7 +3,7 @@
 > 一个面向**内网离线、安全合规、自主可控**场景的多用户本地智能体系统。
 > 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端；配置驱动多模型接入，内置 RBAC 多租户、知识库、记忆、工具、插件/技能/MCP、定时任务与技能自进化闭环。
 >
-> 最近更新：2026-08-06 — 新增第九节 9.8「国产信创部署（离线 / ARM64 / 麒麟 / UOS / openEuler）」；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。
+> 最近更新：2026-08-06 — 新增第九节 9.8 国产信创部署、9.9 OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models，复用 RBAC，可对接 Open WebUI / LobeChat）；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。
 
 ---
 
@@ -432,6 +432,42 @@ bash install-offline.sh        # 自动建 venv、pip --no-index 装 wheels、�
 - **ARM64 启动报 `exec format error`**：镜像与 CPU 架构不符（x86 镜像跑在 ARM 机），按 9.8.1 构建对应平台镜像。
 - **进程启动即 exit 2**：`security.secret` 仍为默认值，改强随机后重启。
 - **离线安装 `pip` 报包找不到**：`wheels/` 与目标架构不符；重新在同架构联网机生成离线包。
+
+#### 9.9 OpenAI 兼容服务端网关（对接开源前端生态）
+
+智枢内置一个 **OpenAI 兼容网关**，可让 Open WebUI / LobeChat / 任意兼容 OpenAI 协议的开源前端与 SDK 直接把智枢当作「模型后端」使用，且**复用现有 RBAC**——无需为网关另建账号体系。
+
+> 设计取舍：网关走「直连 LLM 流式」（`/v1/chat/completions` + SSE），给出标准 OpenAI 语义：客户端自管历史（`messages` 数组），服务端只透传模型 token。智枢自身的 RAG / 工具 / 系统提示等 agent 能力由原生 Web UI 提供；网关层保持纯粹，避免与客户端自带的 system prompt / 工具系统冲突。
+
+**端点**
+
+| 方法 | 路径 | 说明 | 所需权限 |
+|---|---|---|---|
+| `GET` | `/v1/models` | 返回当前用户可见的模型列表（OpenAI 标准 `object=list` 格式，`id` 形如 `provider/model`） | `models:read` |
+| `POST` | `/v1/chat/completions` | 对话补全，支持 `stream=true`（SSE，标准 `chat.completion.chunk` + `data: [DONE]`）与非流式；`tools` 会被透传并规范化为 OpenAI `delta.tool_calls` | `chat` |
+
+**鉴权**：与对话页一致，请求头 `Authorization: Bearer <token>`，`<token>` 即 Web UI 登录后拿到的会话令牌（管理后台「用户」页可创建/吊销）。未带或失效令牌一律 `401`。普通用户仅能调用其**可见**（本人 + 共享 + 角色命中）的 Provider/模型，越权调用被拒。
+
+**在 Open WebUI / LobeChat 中接入**
+
+1. 打开客户端「设置 → 模型 / 外部连接」，选择「OpenAI 兼容」类型；
+2. API Base URL 填智枢地址，例如 `http://<智枢服务器>:8080/v1`；
+3. API Key 填你的智枢会话令牌（即 `Authorization` 里的 `<token>` 部分，不含 `Bearer `）；
+4. 保存后在模型下拉里即可看到 `/v1/models` 返回的 `provider/model`，选定即可对话。
+
+**请求示例（curl）**
+
+```bash
+# 列出可见模型
+curl -H "Authorization: Bearer $ZS_TOKEN" http://localhost:8080/v1/models
+
+# 流式对话
+curl -N -X POST http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $ZS_TOKEN" -H "Content-Type: application/json" \
+  -d '{"model":"<provider>/<model>","messages":[{"role":"user","content":"你好"}],"stream":true}'
+```
+
+**合规提示**：网关与 Web UI 共用同一套 RBAC 与审计日志（每次调用记入审计），适合在需要「统一账号、统一审计、统一模型出口」的内网/信创环境内，把智枢作为团队共享的 OpenAI 兼容底座。
 
 ---
 

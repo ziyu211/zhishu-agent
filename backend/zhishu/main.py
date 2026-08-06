@@ -152,6 +152,8 @@ def create_app(cfg: ZhishuConfig) -> FastAPI:
     app.include_router(api_pkg.agents_router)
     app.include_router(api_pkg.cron_router)
     app.include_router(api_pkg.settings_router)
+    # OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models），须在 SPA catch-all 之前注册
+    app.include_router(api_pkg.openai_router)
 
     @app.get("/health")
     async def health():
