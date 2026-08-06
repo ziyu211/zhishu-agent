@@ -3,7 +3,7 @@
 > 一个面向**内网离线、安全合规、自主可控**场景的多用户本地智能体系统。
 > 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端；配置驱动多模型接入，内置 RBAC 多租户、知识库、记忆、工具、插件/技能/MCP、定时任务与技能自进化闭环。
 >
-> 最近更新：2026-08-03 — 全量代码审计与架构加固（目录清理 · 业务流程梳理 · 漏洞修复 · 多用户架构评估，详见第十一节「安全审计与多用户架构」）。
+> 最近更新：2026-08-06 — 新增第九节 9.8「国产信创部署（离线 / ARM64 / 麒麟 / UOS / openEuler）」；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。
 
 ---
 
@@ -366,6 +366,72 @@ curl -X POST http://127.0.0.1:8090/api/v1/models/default -H "Authorization: Bear
 - **Provider Key 不可随卷迁移**：`data/providers.json` 中的 Key 以 `security.secret` 派生密钥混淆落盘。新实例 secret 不同，直接搬运密文会解密失败。正确做法是用明文经 `POST/PUT /api/v1/providers` 回填，由目标实例用自己的 secret 重新加密。
 - **端口不通先分清是谁在拦**：宿主 `firewall-cmd --list-ports` 已放行、`ss -lntp` 也在监听，但公网仍超时，基本可判定是**云厂商安全组**未放行，需到云控制台开端口。
 - **未知 `/api/v1/*` 路径会被 SPA 兜底返回 200 + `index.html`**，排障时别把 HTML 响应误判成接口连通。
+
+---
+
+### 9.8 国产信创部署（离线 / ARM64 / 麒麟 / UOS / openEuler）
+
+信创（信息技术应用创新）环境普遍具备三个特征，智枢的架构对此**天然友好**：
+
+- **离线**：构建机常无 `docker.io` / 公网直连。智枢全部 Python 依赖均为**预编译 wheel**（见仓库根 `requirements.txt`：`numpy` / `PyMuPDF` / `openpyxl` / `Pillow` / `jieba` 等均提供 manylinux / aarch64 / musllinux 预编译包，安装无需 gcc 源码编译），前端也已预构建，离线机可直接 `--no-index` 安装；且**不依赖任何境外厂商 SDK**，国产模型统一经 OpenAI 兼容协议调用。
+- **异构 CPU**：鲲鹏 920 / 飞腾 FT-2000+ / D2000 为 `linux/arm64`，龙芯为 `loongarch64`，海光 / 兆芯为 `x86_64`。
+- **合规**：数据不出内网、国密（`security.enable_sm`，SM2/SM3/SM4，缺 gmssl 自动降级）、弱密钥启动硬闸门、SSRF 出网闸门（`security.outbound_allow` / `allow_private_fetch`）、审计日志与脱敏——均已在代码中落地。
+
+#### 9.8.1 镜像架构适配
+
+```bash
+# x86_64 信创（海光 / 兆芯）—— 沿用现有镜像
+docker build -t zsagent:1.0.5 -f deploy/Dockerfile.local .
+
+# ARM64（鲲鹏 920 / 飞腾）—— 指定平台交叉构建
+docker build --platform linux/arm64 -t zsagent:1.0.5-arm64 -f deploy/Dockerfile.local .
+```
+
+- 纯 wheel 依赖意味着在 ARM64 / LoongArch 下 `pip install` 不会触发本地编译；**但生产务必在「目标架构的同源机器」上原生构建**（鲲鹏机上直接 `docker build`），避免 qemu 仿真带来的性能与稳定性损耗。
+- 基础镜像必须走华为云 SWR 镜像源（`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/<image>`），因信创 / 内网构建环境 `docker.io` 不可达（见项目 `deploy/Dockerfile` / `deploy/Dockerfile.local` 注释）。
+
+#### 9.8.2 离线分发包（无外网环境）
+
+在**可联网的同架构机器**上生成离线包，再经光盘 / 内网摆渡机拷到信创主机：
+
+```bash
+# 在同源架构联网机执行：产物为 zhishu-offline-<date>.tar.gz（含 wheels / 预构建前端 / 配置 / install-offline.sh）
+bash deploy/offline-build.sh
+
+# 拷到信创主机后：解压 → 安装 → 启动
+tar xzf zhishu-offline-<date>.tar.gz
+cd zhishu-offline-<date>
+bash install-offline.sh        # 自动建 venv、pip --no-index 装 wheels、启动服务
+```
+
+- 离线包内**不含任何密钥**：运行前按 9.1 / 9.4 准备 `zhishu.yaml`，`security.secret` 必为强随机。
+- 国密开关 `security.enable_sm=true` 默认开启（Provider Key 以 SM4 混淆、摘要以 SM3），满足信创测评项；仅在无国密合规诉求时可关。
+- ⚠️ **`wheels/` 必须与目标 CPU 架构一致**：x86 机生成的 wheels 无法在 ARM64 信创机上 `--no-index` 安装，反之亦然。务必在同架构联网机跑 `offline-build.sh`。
+
+#### 9.8.3 适配国产操作系统
+
+| 操作系统 | 基础镜像 / 注意事项 |
+|---------|------------------|
+| 银河麒麟 V10 / 中标麒麟 | CentOS 系 glibc；`python:3.11-slim` 经 SWR 源可跑，留意 glibc 版本匹配 |
+| 统信 UOS | Debian 系；`python:3.11-slim` 直接可用，确认 `libgomp` 等运行时库存在 |
+| openEuler / 麒麟 V10 SP3 | 原生支持 ARM64；建议在鲲鹏机上原生 `docker build` 直接产出 arm64 镜像 |
+| 鲲鹏 / 飞腾整机 | 见 9.8.1 的 `--platform linux/arm64` 构建 |
+
+#### 9.8.4 信创合规加固清单（上线前核对）
+
+- [ ] `security.enable_sm=true`：Provider Key 以 SM4 混淆、摘要以 SM3，满足国密算法合规项。
+- [ ] `security.secret` 为 64 位强随机，且容器**未**注入 `ZHISHU_ALLOW_INSECURE_DEFAULTS=1`——否则进程应拒绝启动（硬闸门）。
+- [ ] `security.outbound_allow=false`（默认）且 `allow_private_fetch=false`（默认）：工具出网关闭、模型列表拉取禁止私有地址，构成 SSRF 出网闸门，满足「数据不出域」。
+- [ ] 数据落 `zsagent_data` 卷且不随容器销毁丢失；审计日志可归档。
+- [ ] 替换默认 `admin` 口令，并按 RBAC 收敛 operator / user / viewer 权限。
+- [ ] 如需接入国产关系库（达梦 `dmPython` / 人大金仓 `kingbase8`，`requirements.txt` 已预留注释）：当前默认 SQLite（零依赖、可离线），替换属二次开发项，需在 `core/db.py` 抽象层增加方言适配，不在本镜像范围。
+
+#### 9.8.5 信创部署常见排查
+
+- **镜像拉取 / 构建超时**：确认 `Dockerfile.local` 基础镜像走 SWR 源；`docker.io` 在信创内网不可达。
+- **ARM64 启动报 `exec format error`**：镜像与 CPU 架构不符（x86 镜像跑在 ARM 机），按 9.8.1 构建对应平台镜像。
+- **进程启动即 exit 2**：`security.secret` 仍为默认值，改强随机后重启。
+- **离线安装 `pip` 报包找不到**：`wheels/` 与目标架构不符；重新在同架构联网机生成离线包。
 
 ---
 

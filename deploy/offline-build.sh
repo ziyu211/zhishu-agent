@@ -16,7 +16,7 @@ mkdir -p "$OUT"
 echo "[1/5] 收集源码与配置"
 mkdir -p "$OUT/backend" "$OUT/frontend" "$OUT/deploy"
 cp -r backend/zhishu "$OUT/backend/"
-cp backend/requirements.txt "$OUT/backend/"
+cp requirements.txt "$OUT/backend/"
 cp -r deploy/* "$OUT/deploy/"
 
 echo "[2/5] 构建前端（国内 npm 源）"
@@ -29,7 +29,7 @@ cp -r backend/zhishu/static "$OUT/backend/zhishu/"
 
 echo "[3/5] 下载 Python 依赖离线 wheels（国内 pip 源）"
 mkdir -p "$OUT/wheels"
-pip download -r backend/requirements.txt \
+pip download -r requirements.txt \
   -i https://mirrors.aliyun.com/pypi/simple \
   -d "$OUT/wheels"
 # 可选：把本地模型（如 Ollama 的 qwen2.5:7b）导出一并打包
