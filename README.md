@@ -448,6 +448,8 @@ bash install-offline.sh        # 自动建 venv、pip --no-index 装 wheels、�
 
 **鉴权**：与对话页一致，请求头 `Authorization: Bearer <token>`，`<token>` 即 Web UI 登录后拿到的会话令牌（管理后台「用户」页可创建/吊销）。未带或失效令牌一律 `401`。普通用户仅能调用其**可见**（本人 + 共享 + 角色命中）的 Provider/模型，越权调用被拒。
 
+**错误映射**（OpenAI 兼容，便于客户端自动退避）：上游 Provider 限流（`HTTP 429`）→ 网关返回 `429 rate_limit_error`；Provider 鉴权失败/缺 API Key → `401 authentication_error`；参数错误 → `400 invalid_request_error`；其余上游异常 → `500 server_error`。并发与单用户每日配额由智枢既有三重限流器统一管控，超额同样以 `429 rate_limit_error` 返回。
+
 **在 Open WebUI / LobeChat 中接入**
 
 1. 打开客户端「设置 → 模型 / 外部连接」，选择「OpenAI 兼容」类型；

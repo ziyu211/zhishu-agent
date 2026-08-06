@@ -44,6 +44,25 @@ def _resolve_model_out(ctx, cfg_user, requested: str | None) -> str:
         return requested or "unknown"
 
 
+def _upstream_error_shape(exc: Exception) -> tuple[int, str, str]:
+    """把上游异常规范化为 OpenAI 兼容的错误形态。
+
+    重点：上游 Provider 限流(429) / 鉴权失败(401) 应当映射为对应的 OpenAI
+    error type，使 Open WebUI / LobeChat 等客户端能正确退避或提示，而不是
+    把限流当成 500 服务端错误。"""
+    msg = str(exc) or "未知上游错误"
+    m = msg
+    low = m.lower()
+    if "429" in m or "too many" in low or "rate limit" in low or "限流" in m:
+        return 429, "rate_limit_error", m
+    if ("401" in m or "403" in m or "unauthorized" in low or "api key" in low
+            or "未配置" in m or "鉴权" in m):
+        return 401, "authentication_error", m
+    if "400" in m or "bad request" in low or "参数" in m:
+        return 400, "invalid_request_error", m
+    return 500, "server_error", m
+
+
 def _convert_messages(raw: list) -> list[dict]:
     """把 OpenAI 格式 messages 透传给上游（各 Provider 均为 OpenAI 兼容）。
 
@@ -152,8 +171,9 @@ async def chat_completions(request: Request, user=require_auth("chat")):
                     max_tokens=max_tokens, tools=tools,
                 )
         except Exception as e:  # noqa: BLE001
-            return JSONResponse(status_code=500, content={
-                "error": {"message": str(e), "type": "server_error"}})
+            status, etype, msg = _upstream_error_shape(e)
+            return JSONResponse(status_code=status, content={
+                "error": {"message": msg, "type": etype}})
         finally:
             await limiter.release(owner)
         # out 已是 OpenAI 原生字典（含 choices）；规整回显字段
@@ -216,7 +236,8 @@ async def chat_completions(request: Request, user=require_auth("chat")):
                         }
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             except Exception as e:  # noqa: BLE001
-                err = {"error": {"message": str(e), "type": "server_error"}}
+                status, etype, msg = _upstream_error_shape(e)
+                err = {"error": {"message": msg, "type": etype}}
                 yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
             # 结束包
             end = {

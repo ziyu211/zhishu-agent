@@ -68,6 +68,24 @@ class FakeLLM:
             yield f"\u0000TOOLCALL\u0000{json.dumps(tc, ensure_ascii=False)}\u0000"
 
 
+class FailingLLM:
+    """模拟上游异常：rate_limit 抛含 429 的 RuntimeError；auth 抛含 API Key 的异常。"""
+    def __init__(self, cfg, api_mode=None, kind: str = "rate"):
+        self.cfg = cfg
+        self.api_mode = api_mode
+        self.kind = kind
+
+    async def chat(self, *a, **k):
+        if self.kind == "rate":
+            raise RuntimeError("模型服务持续限流（HTTP 429），已重试 3 次仍失败。")
+        raise RuntimeError("所有已配置的 LLM Provider 均缺少 API Key 或不可达：agnes（https://x）。")
+
+    async def stream(self, *a, **k):
+        if self.kind == "rate":
+            raise RuntimeError("模型服务持续限流（HTTP 429），已重试 3 次仍失败。")
+        raise RuntimeError("所有已配置的 LLM Provider 均缺少 API Key 或不可达：agnes（https://x）。")
+
+
 def _build_cfg(tmp: str) -> ZhishuConfig:
     cfg = ZhishuConfig()
     cfg.server.data_dir = tmp
@@ -234,6 +252,8 @@ def main():
         test_gateway_chat_nonstream()
         test_gateway_chat_stream()
         test_gateway_toolcall_translation()
+        test_gateway_upstream_429_mapped()
+        test_gateway_upstream_auth_mapped()
     except AssertionError as e:
         print("FAILED:", e)
         sys.exit(1)
@@ -241,6 +261,42 @@ def main():
         print("ERROR:", repr(e))
         sys.exit(2)
     print("\nALL OPENAI GATEWAY TESTS PASSED")
+
+
+def test_gateway_upstream_429_mapped():
+    with _tmpdir() as tmp:
+        cfg = _build_cfg(tmp)
+        gw_mod.LLMClient = lambda c, m: FailingLLM(c, m, kind="rate")
+        app = create_app(cfg)
+        token = _mint_token(cfg.security.secret)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/v1/chat/completions",
+                json={"model": "demo/demo-model", "messages": [{"role": "user", "content": "hi"}],
+                      "stream": False},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 429, f"上游 429 应映射为 429，实际 {resp.status_code}: {resp.text[:200]}"
+            assert resp.json()["error"]["type"] == "rate_limit_error"
+    print("  [F] 上游限流(429) → 网关 429 rate_limit_error（客户端可正确退避）  ✓")
+
+
+def test_gateway_upstream_auth_mapped():
+    with _tmpdir() as tmp:
+        cfg = _build_cfg(tmp)
+        gw_mod.LLMClient = lambda c, m: FailingLLM(c, m, kind="auth")
+        app = create_app(cfg)
+        token = _mint_token(cfg.security.secret)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/v1/chat/completions",
+                json={"model": "demo/demo-model", "messages": [{"role": "user", "content": "hi"}],
+                      "stream": False},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 401, f"缺 Key 应映射为 401，实际 {resp.status_code}: {resp.text[:200]}"
+            assert resp.json()["error"]["type"] == "authentication_error"
+    print("  [G] 上游缺 Key/鉴权 → 网关 401 authentication_error  ✓")
 
 
 if __name__ == "__main__":
