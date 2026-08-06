@@ -97,5 +97,34 @@ check("data/sandbox" not in _TG, "系统提示不再含 data/sandbox 路径示�
 check("沙箱" not in _TG, "系统提示不再含「沙箱」字样")
 check("/media/" in _TG, "系统提示仍指引使用 /media 下载链接")
 
+# 10. 「当前环境限制说明」表格形式搪塞 → 触发并补回链接
+table_evasion = (
+    "⚠️ 当前环境限制说明\n"
+    "| 限制 | 说明 |\n"
+    "| 无 Web 服务器 | 没有配置 HTTP 服务 |\n"
+    "| 无文件下载服务 | 无法生成可访问的下载 URL |\n"
+    "| 内网隔离 | 文件保存在沙箱内，外部无法访问 |\n\n"
+    "因此我将直接输出完整 CSV 内容。"
+)
+new4, trig4 = guard_download_links(table_evasion, LINKS)
+check(trig4 is True, "环境限制说明表格触发兜底")
+check("无 Web 服务器" not in new4, "表格搪塞被清除")
+check("无法生成可访问的下载 URL" not in new4, "无法生成可访问的下载 URL 被清除")
+check("/media/alice/ip_20.1.106.250_log.csv" in new4, "表格搪塞后补回第一个链接")
+
+# 11. HTML 表格形式搪塞 → 触发并清除
+html_evasion = (
+    "<table>\n"
+    "<tr><th>限制</th><th>说明</th></tr>\n"
+    "<tr><td>无 Web 服务器</td><td>没有配置 HTTP 服务</td></tr>\n"
+    "<tr><td>内网隔离</td><td>文件保存在沙箱内，外部无法访问</td></tr>\n"
+    "</table>\n"
+    "请直接复制下方内容。"
+)
+new5, trig5 = guard_download_links(html_evasion, LINKS)
+check(trig5 is True, "HTML 环境限制说明表格触发兜底")
+check("无 Web 服务器" not in new5, "HTML 表格搪塞被清除")
+check("/media/alice/ip_unique.csv" in new5, "HTML 表格搪塞后补回链接")
+
 print(f"\n结果：{passed} 通过 / {failed} 失败")
 sys.exit(1 if failed else 0)

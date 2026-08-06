@@ -24,6 +24,15 @@ _MEDIA_RE = re.compile(r"/media/[^\s)\]\"'<>]+", re.IGNORECASE)
 # 注意：这些模式使用普通字符串拼接（非 f-string / .format），因为模式内部含
 # 正则量词 {0,14} 等花括号，不能被当作占位符解析。
 _EVASION_PATTERNS = [
+    # 模型以「环境限制说明」表格/列表形式搪塞（新变体）
+    r"当前环境限制说明",
+    r"无\s*Web\s*服务器",
+    r"无\s*文件下载服务",
+    r"没有配置\s*HTTP\s*服务",
+    r"无法生成.{0,16}可访问的下载\s*URL",
+    r"内网隔离",
+    r"文件保存在沙箱内.{0,16}外部无法访问",
+    # 原有搪塞话术
     r"内网.{0,14}(沙箱|环境).{0,14}(无法|不能|不支持|无法生成|不能生成).{0,10}(下载|链接)",
     r"沙箱.{0,14}(环境|内网).{0,14}(无法|不能|不支持).{0,10}(下载|链接)",
     r"无法生成.{0,10}下载链接",
@@ -77,6 +86,78 @@ def _clean_evasion_sentences(text: str) -> str:
     return out
 
 
+def _is_md_table_line(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") or re.match(r"^[\|\-\:\s]+$", s) is not None
+
+
+def _is_html_table_line(line: str) -> bool:
+    s = line.strip().lower()
+    return (
+        s.startswith("<table")
+        or s.startswith("</table>")
+        or s.startswith("<thead")
+        or s.startswith("</thead>")
+        or s.startswith("<tbody")
+        or s.startswith("</tbody>")
+        or s.startswith("<tr")
+        or s == "</tr>"
+        or s.startswith("<td")
+        or s.startswith("</td>")
+        or s.startswith("<th")
+        or s.startswith("</th>")
+    )
+
+
+def _clean_evasion_blocks(text: str) -> str:
+    """删除含搪塞特征的段落 / 表格块。
+
+    比 _clean_evasion_sentences 更粗粒度：能处理模型生成的 Markdown / HTML
+    「环境限制说明」表格——只要表格内部任意行含搪塞特征，整段表格一起删除。
+    普通文本行仍按整行删除。
+    """
+    if not text:
+        return text
+    lines = text.splitlines()
+    out_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        # 空行直接保留，作为段落边界
+        if stripped == "":
+            out_lines.append(line)
+            i += 1
+            continue
+        # 表格行：收集连续表格区域，整体判断是否含搪塞
+        if _is_md_table_line(line) or _is_html_table_line(line):
+            table_lines: list[str] = [line]
+            j = i + 1
+            while j < len(lines):
+                next_line = lines[j]
+                if next_line.strip() == "":
+                    break
+                if not (_is_md_table_line(next_line) or _is_html_table_line(next_line)):
+                    break
+                table_lines.append(next_line)
+                j += 1
+            table_text = "\n".join(table_lines)
+            if not _EVASION_RE.search(table_text):
+                out_lines.extend(table_lines)
+            # 含搪塞则整段丢弃
+            i = j
+            continue
+        # 普通行：含搪塞即删除
+        if _EVASION_RE.search(line):
+            i += 1
+            continue
+        out_lines.append(line)
+        i += 1
+    out = "\n".join(out_lines)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
 def guard_download_links(final: str, media_links: List[str]) -> tuple[str, bool]:
     """若模型搪塞下载链接，则清除搪塞句并把真实 /media 链接强制补回。
 
@@ -84,7 +165,7 @@ def guard_download_links(final: str, media_links: List[str]) -> tuple[str, bool]
     """
     if not needs_guard(final, media_links):
         return final, False
-    cleaned = _clean_evasion_sentences(final)
+    cleaned = _clean_evasion_blocks(final)
     seen = set()
     uniq: List[str] = []
     for u in media_links:
