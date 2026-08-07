@@ -189,6 +189,12 @@ def test_diagnose_maps_errors():
     assert d(400, "conversation roles must alternate user/assistant") == compat.REPAIR_ALTERNATE
     assert d(500, "system message must be at the beginning") == compat.REPAIR_SYSTEM
     assert d(400, "max_new_tokens must be less than 8192") == compat.REPAIR_SHRINK_TOKENS
+    # Qwen3 / Qwen3.5 chat_template 缺陷：带 tools 时直接 400
+    # "No user query found in messages."（文本不含 "tool" 关键字，历史上被漏判
+    # → 直接掐断回退链让用户看到「所有 Provider 均不可用」）。必须识别为
+    # 「不支持 function calling」并去掉 tools 重试。
+    assert d(400, "No user query found in messages.") == compat.REPAIR_DROP_TOOLS
+    assert d(400, "No user query found in messages: [{'role': 'system', ...}]") == compat.REPAIR_DROP_TOOLS
     # 与兼容无关的错误 → 不自愈
     assert d(400, "model 'foo' not found") is None
     assert d(401, "invalid api key") is None
@@ -221,6 +227,44 @@ def test_chat_once_degrades_when_tools_unsupported():
     # 结论已记住：同端点下次直接不带 tools
     assert compat.runtime_caps.has(
         compat.RuntimeCaps.key("http://h:23333/v1", "m"), compat.CAP_NO_TOOLS)
+
+
+def test_chat_once_degrades_qwen35_template_error():
+    """Qwen3.5 chat_template 缺陷：带 tools 的请求直接 400 'No user query found
+    in messages.'（文本不含 tool 关键字）。必须识别为「不支持 function calling」并
+    去掉 tools 重试；历史里的 tool_calls / role=tool 也要摊平，且不死循环。"""
+    pc = _pc(base_url="http://qwen3:8000/v1", compat_val="vllm")
+    client = LLMClient(cfg=None, api_mode="openai")
+    err = _FakeResp(400, {"error": {"message": "No user query found in messages."}})
+    ok = _FakeResp(200, {"choices": [{"message": {"role": "assistant", "content": "done"}}]})
+    calls = []
+
+    async def fake_post(url, json=None, headers=None):
+        calls.append(json)
+        return err if len(calls) == 1 else ok
+
+    tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
+    # 含一段工具轮次历史：去掉 tools 重试时必须把 tool_calls / role=tool 摊平
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "1", "function": {"name": "f", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "1", "content": "r"},
+        {"role": "user", "content": "再问一次"},
+    ]
+    with mock.patch("zhishu.core.providers.client.get_shared_http",
+                    return_value=types.SimpleNamespace(post=fake_post)):
+        out = asyncio.run(client._chat_once(pc, "m", msgs, tools, 0.7, 2048))
+    assert out["choices"][0]["message"]["content"] == "done"
+    assert len(calls) == 2
+    assert "tools" in calls[0]              # 首次带 tools
+    assert "tools" not in calls[1]          # 重试去掉 tools
+    assert all(not m.get("tool_calls") for m in calls[1]["messages"])
+    assert all(m["role"] != "tool" for m in calls[1]["messages"])
+    # 结论已记住：同端点下次直接不带 tools
+    assert compat.runtime_caps.has(
+        compat.RuntimeCaps.key("http://qwen3:8000/v1", "m"), compat.CAP_NO_TOOLS)
 
 
 def test_chat_once_no_infinite_loop_on_persistent_tools_error():

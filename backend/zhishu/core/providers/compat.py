@@ -498,6 +498,15 @@ def is_tools_unsupported(detail: str) -> bool:
     d = (detail or "").lower()
     if not d:
         return False
+    # Qwen3 / Qwen3.5 等模型的 chat_template.jinja 在 multi_step_tool 模式下
+    # （即请求里带了 tools 时）会直接 `raise_exception('No user query found in
+    # messages.')`，与「消息里到底有没有 user」无关。这是模型模板缺陷，而非
+    # 兼容画像问题；上游 vLLM 会原样把该异常透传为 HTTP 400。唯一可行的自愈动作
+    # 就是去掉 tools 后重发（详见 vllm-project/vllm#36432）。
+    # 注意：该错误文本不含 "tool" 关键字，必须单独识别，否则会被 diagnose 漏判为
+    # 永久错误而直接掐断回退链。
+    if "no user query found in messages" in d:
+        return True
     if not any(k in d for k in ("tool", "function call", "function_call",
                                 "工具", "函数调用")):
         return False
