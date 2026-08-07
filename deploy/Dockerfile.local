@@ -1,6 +1,6 @@
 # 智枢智能体 —— 本机专用镜像（零代理依赖，适配受限/离线网络）
 # 前端产物已预构建并提交到 backend/zhishu/static/，本镜像直接 COPY。
-# 构建：docker build -t zsagent:1.0.11 -f deploy/Dockerfile.local .
+# 构建：docker build -t zsagent:1.0.12 -f deploy/Dockerfile.local .
 
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim
 WORKDIR /app
