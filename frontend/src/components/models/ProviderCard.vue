@@ -18,6 +18,18 @@ const message = useMessage()
 const editable = computed(() => props.canEdit !== false)
 const enabled = computed(() => props.provider.enabled !== false)
 const masked = computed(() => props.provider.api_key_masked || (props.provider.has_key ? '••••' : '未配置'))
+
+// 推理框架标签：优先显示用户显式选择的 compat，否则显示后端自动探测结果（compat_effective）。
+// openai/generic 不额外显示（默认云端 / 通用，无需强调）。
+const _COMPAT_LABEL: Record<string, string> = {
+  vllm: 'vLLM', sglang: 'SGLang', lmdeploy: 'LMDeploy', mindie: 'MindIE',
+  ollama: 'Ollama', xinference: 'Xinference', tgi: 'TGI', llamacpp: 'llama.cpp',
+}
+const frameworkTag = computed(() => {
+  const key = props.provider.compat || props.provider.compat_effective || ''
+  return _COMPAT_LABEL[key] || ''
+})
+const frameworkAuto = computed(() => !props.provider.compat && !!frameworkTag.value)
 </script>
 
 <template>
@@ -33,6 +45,9 @@ const masked = computed(() => props.provider.api_key_masked || (props.provider.h
     <div class="pc-type">
       <span class="pc-key">{{ provider.provider }}</span>
       <NTag v-if="provider.local" size="tiny" :bordered="false" class="pc-tag">本地</NTag>
+      <NTag v-if="frameworkTag" size="tiny" type="success" :bordered="false" :title="frameworkAuto ? '自动探测' : '手动指定'">
+        {{ frameworkTag }}<span v-if="frameworkAuto">·自动</span>
+      </NTag>
       <NTag v-if="provider.builtin" size="tiny" :bordered="false" class="pc-tag">内置</NTag>
       <NTag v-if="provider.shared" size="tiny" type="info" :bordered="false">共享·全员</NTag>
       <NTag v-else-if="provider.share_with && provider.share_with.length" size="tiny" type="warning" :bordered="false">共享·按角色</NTag>

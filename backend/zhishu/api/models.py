@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from .auth import require_auth
 from ..core.config import ZhishuConfig
+from ..core.providers.compat import profile_options
 from ..core.ssrf import guard_url
 from ..context import get_ctx
 
@@ -41,6 +42,7 @@ class AddProviderReq(BaseModel):
     local: bool = False
     priority: int = 50
     context_length: int | None = None
+    compat: str = ""                  # 推理框架兼容画像；空=自动探测（见 core/providers/compat.py）
     shared: bool = False              # 显式共享：对他人可见可用（共享后他人可用其密钥，密钥对其脱敏）
     share_with: list[str] = []        # 角色级共享：仅这些角色可见可用（shared=False 时生效）
 
@@ -54,6 +56,7 @@ class UpdateProviderReq(BaseModel):
     shared: bool | None = None
     share_with: list[str] | None = None
     context_length: int | None = None   # 上下文窗口 token；传 0 表示清空为「未知」
+    compat: str | None = None           # 推理框架：""=自动探测；vllm/sglang/lmdeploy/mindie/...
 
 
 class DefaultModelReq(BaseModel):
@@ -86,8 +89,9 @@ async def list_models(user=require_auth("models:read")):
 
 @router.get("/models/presets")
 async def presets(user=require_auth("models:read")):
-    """内置国产/本地 Provider 预设，供添加表单选择。"""
-    return {"presets": ZhishuConfig.presets()}
+    """内置国产/本地 Provider 预设 + 推理框架兼容画像选项，供添加表单选择。"""
+    return {"presets": ZhishuConfig.presets(),
+            "compat_options": profile_options()}
 
 
 @router.get("/providers")
@@ -131,6 +135,7 @@ async def add_provider(req: AddProviderReq, user=require_auth("models:write")):
             name=name, label=label or name, base_url=req.base_url,
             api_key=req.api_key, models=models, local=local,
             priority=req.priority, context_length=req.context_length,
+            compat=req.compat,
             owner=_username(user), shared=req.shared, share_with=req.share_with,
         )
     except ValueError as e:
@@ -147,7 +152,7 @@ async def update_provider(name: str, req: UpdateProviderReq, user=require_auth("
             name, api_key=req.api_key, enabled=req.enabled,
             priority=req.priority, base_url=req.base_url, models=req.models,
             shared=req.shared, share_with=req.share_with,
-            context_length=req.context_length,
+            context_length=req.context_length, compat=req.compat,
             username=_username(user), is_admin=_is_admin(user),
         )
     except PermissionError as e:

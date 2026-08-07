@@ -14,6 +14,7 @@ const canWrite = computed(() => app.can('models:write'))
 
 const providers = ref<any[]>([])
 const presets = ref<any[]>([])
+const compatOptions = ref<any[]>([])
 const defaultModel = ref('')
 const loading = ref(false)
 
@@ -30,6 +31,7 @@ async function load() {
     providers.value = p.providers || []
     defaultModel.value = p.default_model || ''
     presets.value = pr.presets || []
+    compatOptions.value = pr.compat_options || []
   } catch (e: any) {
     message.error(e?.message || '加载失败')
   } finally {
@@ -156,6 +158,7 @@ watch(actAs, () => load())
       v-model:show="showModal"
       :mode="modalMode"
       :presets="presets"
+      :compat-options="compatOptions"
       :provider="editing"
       @save="handleSave"
     />

@@ -59,6 +59,8 @@ export interface Provider {
   shared?: boolean
   share_with?: string[]
   context_length?: number | null   // 上下文窗口 token；null=未知
+  compat?: string                  // 推理框架兼容画像（用户显式选择；""=自动探测）
+  compat_effective?: string        // 本次实际生效的画像 key（后端自动探测结果，展示用）
 }
 export interface RemoteModelsResp {
   models: string[]

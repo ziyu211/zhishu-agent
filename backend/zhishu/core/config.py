@@ -137,6 +137,12 @@ class ProviderConfig:
     enabled: bool = True
     priority: int = 100  # 越小越优先（回退链顺序）
     mode: str = ""        # 扩展模式：空=普通 LLM；"moa"=多智能体 facade（并行聚合）
+    # 推理框架兼容画像（见 core/providers/compat.py）：
+    #   ""=自动探测（按 base_url / 端口推断）；openai / vllm / sglang / lmdeploy /
+    #   mindie / ollama / xinference / tgi / llamacpp / generic
+    # 各框架对「OpenAI 兼容」的实现差异很大（system 位置、content:null、tools 支持、
+    # 未知字段容忍度），这里显式声明后可在请求前规避，避免先吃一次 4xx 再自愈。
+    compat: str = ""
     # 上下文窗口（token）。用户在「模型管理」中填写，为空表示未知（按全局默认预算处理）。
     # 生效点：ContextEngine 按此预算裁剪/压缩历史，避免请求超出模型窗口被服务端 400 拒绝。
     context_length: Optional[int] = None

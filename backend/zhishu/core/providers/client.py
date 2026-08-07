@@ -18,6 +18,7 @@ from typing import Any, AsyncIterator, Optional
 import httpx
 
 from ..config import ZhishuConfig, ProviderConfig
+from . import compat
 from .registry import get_transport
 
 
@@ -161,37 +162,19 @@ def _truncate_messages(messages: list, level: int) -> list:
     return sys_msgs + flat
 
 
-def _normalize_system_messages(messages: list) -> list:
-    """vLLM 等严格后端要求 system 消息必须位于消息数组最开头、且通常仅一条。
+#: system 归一化已下沉到 compat 层（多框架共用）。此别名保留旧调用点 / 回归用例。
+_normalize_system_messages = compat.merge_system_messages
 
-    agent 在工具调用 / 多智能体循环里会向对话**中途**追加 system 提示
-    （如「已为你创建多智能体团队」协调者提醒，见 agent.py 多处 messages.append
-    {"role": "system", ...}），直接把这种数组发给 vLLM 会被上游以
-    HTTP 500 'system message must be at the beginning' 拒绝。
 
-    这里把所有 system 内容合并为**一条**并置于数组首位，其余消息相对顺序不变，
-    既不破坏 assistant(tool_calls) 与 tool 结果的配对，也满足上游约束。
-    """
-    if not messages:
-        return messages
-    sys_idx = [i for i, m in enumerate(messages) if m.get("role") == "system"]
-    if not sys_idx:
-        return messages
-    if len(sys_idx) == 1 and sys_idx[0] == 0:
-        return messages  # 已经合规（唯一且位于开头），原样返回
-    sys_parts: list = []
-    rest: list = []
-    for m in messages:
-        if m.get("role") == "system":
-            c = m.get("content")
-            if c:
-                sys_parts.append(c)
-        else:
-            rest.append(m)
-    merged = "\n\n".join(sys_parts)
-    if merged:
-        rest.insert(0, {"role": "system", "content": merged})
-    return rest
+# ---------------------------------------------------------------------------
+# 多推理框架自愈：单次请求内最多尝试的「修复动作」次数
+#
+#   vLLM / SGLang / LMDeploy / MindIE / Ollama 对 OpenAI 协议的实现差异较大
+#   （详见 ./compat.py）。请求失败时先由 compat.diagnose 判定是否属于可自愈的
+#   兼容问题（不支持 tools / 拒绝未知字段 / content 结构非法 / 角色需交替 ...），
+#   是则就地放宽画像重试；成功后把结论写进端点能力缓存，后续请求不再重复试错。
+# ---------------------------------------------------------------------------
+_COMPAT_MAX_REPAIRS = 5
 
 
 
@@ -359,36 +342,71 @@ class LLMClient:
             )
         return chain
 
+    def _prepare(self, transport, pc, model, messages, tools, temperature,
+                 max_tokens, tool_choice, profile, stream: bool):
+        """按兼容画像组装一次请求体（消息规整 + 参数裁剪）。
+
+        `endpoint_tools_ok` 与 `send_tools` 必须分开：
+          * 端点**支持**工具但本轮不传 tools（如 MoA 的收尾调用）时，历史中的
+            tool_calls / role=tool 仍然合法，不能摊平；
+          * 端点**不支持**工具时，历史里的工具轮次也必须摊平成文本，否则即便
+            不传 tools 参数，未知 role 依旧会被 400 拒绝。
+        """
+        endpoint_tools_ok = profile.supports_tools is not False
+        send_tools = bool(tools) and endpoint_tools_ok
+        msgs = compat.sanitize_messages(messages, profile,
+                                        tools_enabled=endpoint_tools_ok)
+        kw = transport.build_kwargs(
+            msgs, tools if send_tools else None,
+            temperature=temperature, max_tokens=max_tokens,
+            stream=stream, model=model, tool_choice=tool_choice,
+        )
+        return compat.sanitize_kwargs(kw, profile, tools_enabled=send_tools)
+
     async def _chat_once(self, pc, model, messages, tools, temperature, max_tokens,
                          tool_choice: Any = "auto") -> dict:
         transport = get_transport(self.api_mode)
-        msgs = _normalize_system_messages(list(messages))
+        profile = compat.effective_profile(pc, model)
+        base_msgs = list(messages)
         mt = max_tokens
+        ctx_level = 0
+        applied: list[str] = []
         last_detail = ""
-        for _lvl in range(_CTX_TRUNCATE_RETRIES + 1):
-            kw = transport.build_kwargs(
-                msgs, tools, temperature=temperature, max_tokens=mt,
-                stream=False, model=model, tool_choice=tool_choice,
-            )
-            url = pc.base_url.rstrip("/") + "/chat/completions"
-            headers = {"Content-Type": "application/json"}
-            if pc.api_key:
-                headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
+        url = pc.base_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json"}
+        if pc.api_key:
+            headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
+
+        # 单次调用的总尝试次数 = 上下文裁剪次数 + 兼容修复次数 + 首次
+        for _ in range(_CTX_TRUNCATE_RETRIES + _COMPAT_MAX_REPAIRS + 1):
+            kw = self._prepare(transport, pc, model, base_msgs, tools, temperature,
+                               mt, tool_choice, profile, stream=False)
             try:
                 resp = await self._http.post(url, json=kw, headers=headers)
                 resp.raise_for_status()
             except httpx.HTTPStatusError as e:
-                sc = e.response.status_code if e.response is not None else "?"
+                sc = e.response.status_code if e.response is not None else 0
                 detail = _extract_upstream_detail(e.response) if e.response is not None else ""
-                # 上下文超长：自动裁剪历史 + 缩短 max_tokens 后重试（最多 _CTX_TRUNCATE_RETRIES 次）
-                if sc == 400 and _lvl < _CTX_TRUNCATE_RETRIES and _is_context_overflow(detail):
-                    last_detail = detail
-                    msgs = _truncate_messages(msgs, _lvl + 1)
+                last_detail = detail or last_detail
+                # 1) 上下文超长：裁剪历史 + 缩短 max_tokens 后重试
+                if sc == 400 and ctx_level < _CTX_TRUNCATE_RETRIES and _is_context_overflow(detail):
+                    ctx_level += 1
+                    base_msgs = _truncate_messages(base_msgs, ctx_level)
                     mt = max(512, int(mt * 0.6))
+                    continue
+                # 2) 推理框架兼容问题：放宽画像后重试（每种修复动作只尝试一次，不会死循环）
+                repair = compat.diagnose(sc, detail)
+                if repair and repair not in applied and len(applied) < _COMPAT_MAX_REPAIRS:
+                    applied.append(repair)
+                    if repair == compat.REPAIR_SHRINK_TOKENS:
+                        mt = max(256, min(mt, 1024))
+                    else:
+                        profile = compat.apply_repair(repair, profile)
                     continue
                 raise RuntimeError(
                     f"Provider「{pc.name}」返回 HTTP {sc}"
                     + (f"：{detail}" if detail else f"：{e}")
+                    + self._compat_hint(pc, profile, detail)
                 ) from e
             out = transport.normalize_response(resp.json())
             # 若上游网关 / 代理返回「200 + 错误 JSON」（而非 4xx/5xx），
@@ -397,11 +415,24 @@ class LLMClient:
             # 否则错误体会被当成功结果原样返回，导致上层 resp["choices"] 直接 KeyError。
             if not isinstance(out, dict) or "choices" not in out:
                 raise RuntimeError(f"Provider「{pc.name}」未返回有效补全：{str(out)[:200]}")
+            for r in applied:   # 修复奏效 → 记住该端点能力，后续请求免去试错成本
+                compat.remember(pc, model, r)
             return out
         raise RuntimeError(
-            f"Provider「{pc.name}」返回 HTTP 400（上下文超长），已自动裁剪 {_CTX_TRUNCATE_RETRIES} "
-            f"次仍超出窗口：{last_detail}"
+            f"Provider「{pc.name}」重试 {_CTX_TRUNCATE_RETRIES + _COMPAT_MAX_REPAIRS} "
+            f"次后仍失败（已尝试裁剪上下文与兼容降级）：{last_detail}"
         )
+
+    @staticmethod
+    def _compat_hint(pc, profile, detail: str) -> str:
+        """错误信息尾部追加「兼容画像」提示，方便用户定位是不是框架差异导致的。"""
+        if not detail:
+            return ""
+        if compat.diagnose(400, detail) is None:
+            return ""
+        return (f"（当前按「{profile.describe()}」兼容画像调用，若后端为 SGLang / "
+                f"LMDeploy / MindIE 等，请在「模型管理」中把 Provider「{pc.name}」"
+                f"的推理框架显式选对）")
 
     # --------------------------- 流式对话 ---------------------------
     async def stream(self, messages, model=None, tools=None,
@@ -429,18 +460,19 @@ class LLMClient:
 
     async def _stream_once(self, pc, model, messages, tools, temperature, max_tokens):
         transport = get_transport(self.api_mode)
-        msgs = _normalize_system_messages(list(messages))
+        profile = compat.effective_profile(pc, model)
+        base_msgs = list(messages)
         mt = max_tokens
+        ctx_level = 0
+        applied: list[str] = []
         last_detail = ""
-        for _lvl in range(_CTX_TRUNCATE_RETRIES + 1):
-            kw = transport.build_kwargs(
-                msgs, tools, temperature=temperature, max_tokens=mt,
-                stream=True, model=model,
-            )
-            url = pc.base_url.rstrip("/") + "/chat/completions"
-            headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-            if pc.api_key:
-                headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
+        url = pc.base_url.rstrip("/") + "/chat/completions"
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if pc.api_key:
+            headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
+        for _ in range(_CTX_TRUNCATE_RETRIES + _COMPAT_MAX_REPAIRS + 1):
+            kw = self._prepare(transport, pc, model, base_msgs, tools, temperature,
+                               mt, "auto", profile, stream=True)
             try:
                 async with self._http.stream("POST", url, json=kw, headers=headers) as r:
                     try:
@@ -453,18 +485,31 @@ class LLMClient:
                             detail = _extract_upstream_detail(r)
                         except Exception:
                             pass
+                        last_detail = detail or last_detail
                         # 上下文超长：自动裁剪历史 + 缩短 max_tokens 后重试（最多 _CTX_TRUNCATE_RETRIES 次）。
                         # continue 会先退出 async with（关闭流），再进入下一轮裁剪重试；重试发生在首个 yield 之前，
                         # 因此流式输出不会因中途重试而出现错位 / 重复。
-                        if sc == 400 and _lvl < _CTX_TRUNCATE_RETRIES and _is_context_overflow(detail):
-                            last_detail = detail
-                            msgs = _truncate_messages(msgs, _lvl + 1)
+                        if sc == 400 and ctx_level < _CTX_TRUNCATE_RETRIES and _is_context_overflow(detail):
+                            ctx_level += 1
+                            base_msgs = _truncate_messages(base_msgs, ctx_level)
                             mt = max(512, int(mt * 0.6))
+                            continue
+                        # 推理框架兼容问题：放宽画像后重试（同样发生在首个 yield 之前）
+                        repair = compat.diagnose(sc, detail)
+                        if repair and repair not in applied and len(applied) < _COMPAT_MAX_REPAIRS:
+                            applied.append(repair)
+                            if repair == compat.REPAIR_SHRINK_TOKENS:
+                                mt = max(256, min(mt, 1024))
+                            else:
+                                profile = compat.apply_repair(repair, profile)
                             continue
                         raise RuntimeError(
                             f"Provider「{pc.name}」返回 HTTP {sc}"
                             + (f"：{detail}" if detail else f"：{e}")
+                            + self._compat_hint(pc, profile, detail)
                         ) from e
+                    for _r in applied:
+                        compat.remember(pc, model, _r)
                     async for line in r.aiter_lines():
                         if not line or not line.startswith("data:"):
                             continue
@@ -487,8 +532,8 @@ class LLMClient:
             except RuntimeError:
                 raise
         raise RuntimeError(
-            f"Provider「{pc.name}」返回 HTTP 400（上下文超长），已自动裁剪 {_CTX_TRUNCATE_RETRIES} "
-            f"次仍超出窗口：{last_detail}"
+            f"Provider「{pc.name}」重试 {_CTX_TRUNCATE_RETRIES + _COMPAT_MAX_REPAIRS} "
+            f"次后仍失败（已尝试裁剪上下文与兼容降级）：{last_detail}"
         )
 
     # --------------------------- 上游重试 ---------------------------

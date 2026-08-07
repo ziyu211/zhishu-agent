@@ -18,6 +18,33 @@ from typing import Optional
 
 from .config import ZhishuConfig, ProviderConfig, DEFAULT_PROVIDERS
 from .security import Crypto
+from .providers import compat as _compat
+
+
+def _norm_compat(value) -> str:
+    """把用户输入的 compat 值规整为标准 key（空 / 别名 / 大小写混写皆可）。"""
+    key = (value or "").strip().lower().replace(" ", "")
+    key = _compat.ALIASES.get(key, key)
+    if not key:
+        return ""   # 空 = 自动探测，交给运行期解析
+    return key if key in _compat.PROFILES else ""
+
+
+def _compat_profile(pc) -> "_compat.CompatProfile":
+    return _compat.profile_for(pc)
+
+
+def _forget_caps(base_url: str) -> None:
+    """清空某端点已学到的运行期能力结论（切换框架 / 改地址后调用）。"""
+    prefix = (base_url or "").rstrip("/")
+    if not prefix:
+        return
+    try:
+        for k in list(_compat.runtime_caps.snapshot().keys()):
+            if k.split("|", 1)[0] == prefix:
+                _compat.runtime_caps._d.pop(k, None)  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +141,10 @@ class ProviderStore:
                 "shared": p.shared,
                 "share_with": list(p.share_with or []),
                 "context_length": p.context_length,
+                # 推理框架兼容画像：compat 为用户显式选择（""=自动），
+                # compat_effective 为本次实际生效的画像 key（自动探测结果），前端展示用。
+                "compat": getattr(p, "compat", "") or "",
+                "compat_effective": _compat_profile(p).key,
             })
         return out
 
@@ -126,7 +157,7 @@ class ProviderStore:
         return key[:4] + "****" + key[-4:]
 
     def add(self, *, name, label, base_url, api_key="", models=None, local=False,
-            priority=50, context_length=None, owner="", shared=False,
+            priority=50, context_length=None, compat="", owner="", shared=False,
             share_with=None) -> dict:
         name = (name or "").strip()
         if not name:
@@ -147,6 +178,7 @@ class ProviderStore:
             owner=owner or "", shared=bool(shared),
             share_with=list(share_with or []),
             context_length=_ctxlen if (_ctxlen and _ctxlen > 0) else None,
+            compat=_norm_compat(compat),
         )
         self.cfg.providers[name] = pc
         self._save()
@@ -154,7 +186,7 @@ class ProviderStore:
 
     def update(self, name, *, api_key=None, enabled=None, priority=None,
                base_url=None, models=None, shared=None, share_with=None,
-               context_length=None,
+               context_length=None, compat=None,
                username: Optional[str] = None, is_admin: bool = False) -> dict:
         pc = self.cfg.providers.get(name)
         if not pc:
@@ -183,6 +215,12 @@ class ProviderStore:
             except (TypeError, ValueError):
                 n = 0
             pc.context_length = n if n > 0 else None
+        if compat is not None:
+            # 切换推理框架后，此前学到的端点能力结论（如「不支持 tools」）失效，需清空重学
+            pc.compat = _norm_compat(compat)
+            _forget_caps(pc.base_url)
+        if base_url is not None and base_url.strip():
+            _forget_caps(pc.base_url)
         self._save()
         return {"ok": True, "provider": name}
 

@@ -10,6 +10,7 @@ const props = defineProps<{
   show: boolean
   mode: 'add' | 'edit'
   presets: any[]
+  compatOptions?: any[]
   provider?: any | null
 }>()
 const emit = defineEmits<{
@@ -31,9 +32,33 @@ const priority = ref(50)
 // 上下文窗口（token）。留空=未知，后端按全局默认预算处理；填写后用于历史裁剪，
 // 避免长对话超出模型窗口被服务端 400 拒绝。
 const contextLength = ref<number | null>(null)
+// 推理框架兼容画像：""=自动探测（后端按 base_url/端口推断）；否则显式指定框架。
+// 各推理框架对「OpenAI 兼容」实现差异较大（system 位置 / content:null / tools 支持
+// / 未知字段容忍度），显式选对可避免先吃一次 4xx 再自愈。
+const compat = ref('')
 const enabled = ref(true)
 const shared = ref(false)
 const share_with = ref<string[]>([])
+
+// 兼容画像选项：优先用后端 /models/presets 返回的 compat_options（经 props 传入）；
+// 后端未返回时用内置兜底（与后端 profile_options 保持一致）。
+const compatOptions = computed(() => {
+  const fromApi = (props.compatOptions || [])
+  if (fromApi.length) return fromApi.map((o: any) => ({ label: o.label, value: o.value }))
+  return [
+    { label: '自动探测（推荐）', value: '' },
+    { label: 'OpenAI 标准 / 云端网关', value: 'openai' },
+    { label: 'vLLM', value: 'vllm' },
+    { label: 'SGLang', value: 'sglang' },
+    { label: 'LMDeploy', value: 'lmdeploy' },
+    { label: 'MindIE（昇腾）', value: 'mindie' },
+    { label: 'Ollama', value: 'ollama' },
+    { label: 'Xinference', value: 'xinference' },
+    { label: 'TGI（Text Generation Inference）', value: 'tgi' },
+    { label: 'llama.cpp server', value: 'llamacpp' },
+    { label: '通用 / 自动探测', value: 'generic' },
+  ]
+})
 
 // 探测模型得到的候选（与 hermes-web-ui 对齐：下拉可搜索、可手输）
 const modelOptions = computed(() => props.presets
@@ -108,6 +133,7 @@ watch(
       local.value = !!p.local
       priority.value = p.priority ?? 50
       contextLength.value = p.context_length ?? null
+      compat.value = p.compat || ''
       enabled.value = p.enabled !== false
       shared.value = !!p.shared
       share_with.value = p.share_with || []
@@ -122,6 +148,7 @@ watch(
       local.value = false
       priority.value = 50
       contextLength.value = null
+      compat.value = ''
       enabled.value = true
       shared.value = false
       share_with.value = []
@@ -147,6 +174,7 @@ function handleSave() {
     priority: priority.value,
     shared: shared.value,
     share_with: share_with.value,
+    compat: compat.value || '',
     // 编辑态传 0 表示「清空为未知」；新增态留空则不传
     context_length: contextLength.value ?? (props.mode === 'edit' ? 0 : null),
   }
@@ -230,16 +258,31 @@ function handleSave() {
           </div>
         </NFormItem>
       </div>
-      <NFormItem label="上下文窗口（token，可留空）">
-        <NInputNumber
-          v-model:value="contextLength"
-          :min="0"
-          :step="1024"
-          clearable
-          placeholder="如 32768；留空表示未知，按全局默认预算"
-          style="width: 100%"
-        />
-      </NFormItem>
+      <div class="row2">
+        <NFormItem label="上下文窗口（token，可留空）">
+          <NInputNumber
+            v-model:value="contextLength"
+            :min="0"
+            :step="1024"
+            clearable
+            placeholder="如 32768；留空表示未知"
+            style="width: 100%"
+          />
+        </NFormItem>
+        <NFormItem label="推理框架">
+          <NSelect
+            v-model:value="compat"
+            :options="compatOptions"
+            placeholder="自动探测"
+            style="width: 100%"
+          />
+        </NFormItem>
+      </div>
+      <div class="compat-hint">
+        本地/私有部署请选对推理框架（vLLM / SGLang / LMDeploy / MindIE / Ollama），
+        以规避各框架对 system 位置、content:null、function calling、未知参数的差异；
+        云端网关保持「自动探测」即可。
+      </div>
       <NFormItem label="共享范围">
         <ShareScopeSelector v-model:shared="shared" v-model:share-with="share_with" />
       </NFormItem>
@@ -263,5 +306,6 @@ function handleSave() {
 .model-row { display: flex; gap: 8px; width: 100%; }
 .switch-cell { display: flex; align-items: center; gap: 8px; height: 100%; font-size: 13px; color: $text-secondary; }
 .form-foot { display: flex; align-items: center; gap: 8px; font-size: 13px; color: $text-secondary; margin-top: 4px; }
+.compat-hint { font-size: 12px; line-height: 1.6; color: $text-secondary; margin: -4px 0 8px; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; }
 </style>
