@@ -87,6 +87,82 @@ def _is_transient(exc: Exception) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 上下文超长（HTTP 400）自动裁剪重试
+#
+#   本地/内网模型（vLLM / Ollama 等）上下文窗口有限，把长文件、长工具结果整体
+#   塞进对话时，会被服务端以 400 context_length_exceeded 拒绝。智枢虽有
+#   `context_engine.enforce_window` 守护，但仅在「模型配置了 context_length」时
+#   才生效；这里再补一层**调用级兜底**：检测到超长 400 时自动裁剪历史并重试，
+#   不依赖任何配置，避免用户一来就 400 无能为力。
+# ---------------------------------------------------------------------------
+_CTX_TRUNCATE_RETRIES = 3
+_CTX_OVERFLOW_HINTS = (
+    "maximum context length", "context length", "too many tokens",
+    "max_model_len", "prompt is too long", "token limit",
+    "exceeds the context", "exceeds the maximum", "请求长度过长",
+    "上下文长度", "超出上下文", "超出最大", "token 数量",
+)
+
+
+def _is_context_overflow(detail: str) -> bool:
+    """根据上游 400 响应体判断是否「上下文 / 输入超长」。
+
+    只匹配与长度相关的关键字，避免把「模型不存在 / 参数非法」等其它 400 误判为可裁剪。
+    """
+    if not detail:
+        return False
+    d = detail.lower()
+    return any(h in d for h in _CTX_OVERFLOW_HINTS)
+
+
+def _truncate_messages(messages: list, level: int) -> list:
+    """上下文超长时裁剪消息：保留 system 提示词，丢弃最早的若干轮对话，
+    并对剩余超长单条消息做截断。level 越大裁剪越激进（1,2,3...）。
+
+    关键：按「完整轮次」丢弃 —— assistant 的 tool_calls 必须与其后的 tool 结果
+    成对删除，否则会破坏 OpenAI 工具调用配对，导致服务端二次报错（依旧 400）。
+    """
+    level = max(1, int(level))
+    sys_msgs = [m for m in messages if m.get("role") == "system"]
+    body = [m for m in messages if m.get("role") != "system"]
+
+    # 1) 按完整轮次分组（assistant + tool_calls 与其后的 tool 结果视为一个单元）
+    units: list = []
+    i = 0
+    while i < len(body):
+        m = body[i]
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            j = i + 1
+            while j < len(body) and body[j].get("role") == "tool":
+                j += 1
+            units.append(body[i:j])
+            i = j
+        else:
+            units.append([m])
+            i += 1
+
+    # 2) 丢弃最早的若干单元（至少保留最后一个，确保仍有用户输入）
+    drop = int(len(units) * 0.35 * level)
+    drop = min(drop, max(0, len(units) - 1))
+    units = units[drop:]
+
+    # 3) 对剩余超长单条消息截断（即便删轮次仍可能单条过长）
+    cap = max(1500, 24000 // level)
+    flat: list = []
+    for unit in units:
+        for m in unit:
+            c = m.get("content")
+            if isinstance(c, str) and len(c) > cap:
+                nm = dict(m)
+                nm["content"] = c[:cap] + "\n...[上下文超长已自动截断]"
+                flat.append(nm)
+            else:
+                flat.append(m)
+    return sys_msgs + flat
+
+
+
+# ---------------------------------------------------------------------------
 # 进程级共享连接池
 #
 #   历史缺陷：LLMClient 在 __init__ 里各自新建 httpx.AsyncClient，而 agent.run()
@@ -253,32 +329,46 @@ class LLMClient:
     async def _chat_once(self, pc, model, messages, tools, temperature, max_tokens,
                          tool_choice: Any = "auto") -> dict:
         transport = get_transport(self.api_mode)
-        kw = transport.build_kwargs(
-            messages, tools, temperature=temperature, max_tokens=max_tokens,
-            stream=False, model=model, tool_choice=tool_choice,
+        msgs = list(messages)
+        mt = max_tokens
+        last_detail = ""
+        for _lvl in range(_CTX_TRUNCATE_RETRIES + 1):
+            kw = transport.build_kwargs(
+                msgs, tools, temperature=temperature, max_tokens=mt,
+                stream=False, model=model, tool_choice=tool_choice,
+            )
+            url = pc.base_url.rstrip("/") + "/chat/completions"
+            headers = {"Content-Type": "application/json"}
+            if pc.api_key:
+                headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
+            try:
+                resp = await self._http.post(url, json=kw, headers=headers)
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                sc = e.response.status_code if e.response is not None else "?"
+                detail = _extract_upstream_detail(e.response) if e.response is not None else ""
+                # 上下文超长：自动裁剪历史 + 缩短 max_tokens 后重试（最多 _CTX_TRUNCATE_RETRIES 次）
+                if sc == 400 and _lvl < _CTX_TRUNCATE_RETRIES and _is_context_overflow(detail):
+                    last_detail = detail
+                    msgs = _truncate_messages(msgs, _lvl + 1)
+                    mt = max(512, int(mt * 0.6))
+                    continue
+                raise RuntimeError(
+                    f"Provider「{pc.name}」返回 HTTP {sc}"
+                    + (f"：{detail}" if detail else f"：{e}")
+                ) from e
+            out = transport.normalize_response(resp.json())
+            # 若上游网关 / 代理返回「200 + 错误 JSON」（而非 4xx/5xx），
+            # normalize_response 后依旧不含 choices —— 视为调用失败并抛出，
+            # 以触发回退链，最终在没有可用 Provider 时统一抛 RuntimeError。
+            # 否则错误体会被当成功结果原样返回，导致上层 resp["choices"] 直接 KeyError。
+            if not isinstance(out, dict) or "choices" not in out:
+                raise RuntimeError(f"Provider「{pc.name}」未返回有效补全：{str(out)[:200]}")
+            return out
+        raise RuntimeError(
+            f"Provider「{pc.name}」返回 HTTP 400（上下文超长），已自动裁剪 {_CTX_TRUNCATE_RETRIES} "
+            f"次仍超出窗口：{last_detail}"
         )
-        url = pc.base_url.rstrip("/") + "/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        if pc.api_key:
-            headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
-        try:
-            resp = await self._http.post(url, json=kw, headers=headers)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            sc = e.response.status_code if e.response is not None else "?"
-            detail = _extract_upstream_detail(e.response) if e.response is not None else ""
-            raise RuntimeError(
-                f"Provider「{pc.name}」返回 HTTP {sc}"
-                + (f"：{detail}" if detail else f"：{e}")
-            ) from e
-        out = transport.normalize_response(resp.json())
-        # 若上游网关 / 代理返回「200 + 错误 JSON」（而非 4xx/5xx），
-        # normalize_response 后依旧不含 choices —— 视为调用失败并抛出，
-        # 以触发回退链，最终在没有可用 Provider 时统一抛 RuntimeError。
-        # 否则错误体会被当成功结果原样返回，导致上层 resp["choices"] 直接 KeyError。
-        if not isinstance(out, dict) or "choices" not in out:
-            raise RuntimeError(f"Provider「{pc.name}」未返回有效补全：{str(out)[:200]}")
-        return out
 
     # --------------------------- 流式对话 ---------------------------
     async def stream(self, messages, model=None, tools=None,
@@ -306,47 +396,67 @@ class LLMClient:
 
     async def _stream_once(self, pc, model, messages, tools, temperature, max_tokens):
         transport = get_transport(self.api_mode)
-        kw = transport.build_kwargs(
-            messages, tools, temperature=temperature, max_tokens=max_tokens,
-            stream=True, model=model,
-        )
-        url = pc.base_url.rstrip("/") + "/chat/completions"
-        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-        if pc.api_key:
-            headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
-        async with self._http.stream("POST", url, json=kw, headers=headers) as r:
+        msgs = list(messages)
+        mt = max_tokens
+        last_detail = ""
+        for _lvl in range(_CTX_TRUNCATE_RETRIES + 1):
+            kw = transport.build_kwargs(
+                msgs, tools, temperature=temperature, max_tokens=mt,
+                stream=True, model=model,
+            )
+            url = pc.base_url.rstrip("/") + "/chat/completions"
+            headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+            if pc.api_key:
+                headers[pc.auth_header] = f"{pc.auth_prefix} {pc.api_key}".strip()
             try:
-                r.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                sc = r.status_code
-                detail = ""
-                try:
-                    await r.aread()
-                    detail = _extract_upstream_detail(r)
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    f"Provider「{pc.name}」返回 HTTP {sc}"
-                    + (f"：{detail}" if detail else f"：{e}")
-                ) from e
-            async for line in r.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line[len("data:"):].strip()
-                if data == "[DONE]":
-                    return
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta", {})
-                if "content" in delta and delta["content"]:
-                    yield delta["content"]
-                if "tool_calls" in delta:
-                    yield f"\u0000TOOLCALL\u0000{json.dumps(delta['tool_calls'])}\u0000"
+                async with self._http.stream("POST", url, json=kw, headers=headers) as r:
+                    try:
+                        r.raise_for_status()
+                    except httpx.HTTPStatusError as e:
+                        sc = r.status_code
+                        detail = ""
+                        try:
+                            await r.aread()
+                            detail = _extract_upstream_detail(r)
+                        except Exception:
+                            pass
+                        # 上下文超长：自动裁剪历史 + 缩短 max_tokens 后重试（最多 _CTX_TRUNCATE_RETRIES 次）。
+                        # continue 会先退出 async with（关闭流），再进入下一轮裁剪重试；重试发生在首个 yield 之前，
+                        # 因此流式输出不会因中途重试而出现错位 / 重复。
+                        if sc == 400 and _lvl < _CTX_TRUNCATE_RETRIES and _is_context_overflow(detail):
+                            last_detail = detail
+                            msgs = _truncate_messages(msgs, _lvl + 1)
+                            mt = max(512, int(mt * 0.6))
+                            continue
+                        raise RuntimeError(
+                            f"Provider「{pc.name}」返回 HTTP {sc}"
+                            + (f"：{detail}" if detail else f"：{e}")
+                        ) from e
+                    async for line in r.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[len("data:"):].strip()
+                        if data == "[DONE]":
+                            return
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = chunk.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        if "content" in delta and delta["content"]:
+                            yield delta["content"]
+                        if "tool_calls" in delta:
+                            yield f"\u0000TOOLCALL\u0000{json.dumps(delta['tool_calls'])}\u0000"
+                return
+            except RuntimeError:
+                raise
+        raise RuntimeError(
+            f"Provider「{pc.name}」返回 HTTP 400（上下文超长），已自动裁剪 {_CTX_TRUNCATE_RETRIES} "
+            f"次仍超出窗口：{last_detail}"
+        )
 
     # --------------------------- 上游重试 ---------------------------
     async def _request_with_retry(self, method, url, *, headers=None, json=None,
