@@ -540,6 +540,44 @@ def test_vector_store_follows_data_dir():
         kb.store._conn.close()
 
 
+# ---------------------------------------------------------------- 级联修复
+def test_delete_user_cascades_agents():
+    print("\n[级联] 删除用户应级联清理其拥有的子智能体（含 agents_state 残留）")
+    import types
+    import zhishu.context as _ctxmod
+    from zhishu.core.config import ZhishuConfig
+    from zhishu.core import agents_runtime as ar
+
+    with _tmpdir() as d:
+        cfg = ZhishuConfig()
+        cfg.server.data_dir = d
+        # 用最小 fake ctx 满足 get_ctx().cfg.server.data_dir（避免拉起全量 AppContext）
+        fake = types.SimpleNamespace(
+            cfg=types.SimpleNamespace(
+                server=types.SimpleNamespace(data_dir=d)))
+        orig = _ctxmod.get_ctx
+        _ctxmod.get_ctx = lambda: fake
+        try:
+            ar.write_agent_meta("alice_a1", {"owner": "alice", "description": "a1"})
+            ar.write_agent_meta("alice_a2", {"owner": "alice", "description": "a2"})
+            ar.write_agent_meta("bob_b1", {"owner": "bob", "description": "b1"})
+            ar.write_agent_meta("shared_s1", {"owner": "", "description": "shared", "shared": True})
+
+            ar.set_enabled("alice_a1", False)  # 制造禁用残留
+            check("alice_a1" in ar.disabled_set(), "前置：alice_a1 处于禁用态")
+
+            n = ar.delete_agents_by_owner("alice")
+            check(n == 2, f"删除 alice 拥有的 2 个子智能体（实删 {n}）")
+            check(not os.path.isdir(ar.agent_dir("alice_a1")), "alice_a1 目录已删")
+            check(not os.path.isdir(ar.agent_dir("alice_a2")), "alice_a2 目录已删")
+            check(os.path.isdir(ar.agent_dir("bob_b1")), "bob 的目录保留（不误删他人）")
+            check(os.path.isdir(ar.agent_dir("shared_s1")), "共享(owner 空)目录保留")
+            check("alice_a1" not in ar.disabled_set(),
+                  "agents_state.json 禁用残留已随级联清理")
+        finally:
+            _ctxmod.get_ctx = orig
+
+
 def main() -> int:
     print("=" * 64)
     print(" 智枢 · 闭环审计修复回归测试")
@@ -552,7 +590,7 @@ def main() -> int:
                test_shell_guard, test_embedding_signature_isolation,
                test_provider_context_length,
                test_cron_stop_no_cancelled_error, test_lifespan_teardown_isolated,
-               test_vector_store_follows_data_dir):
+               test_vector_store_follows_data_dir, test_delete_user_cascades_agents):
         try:
             fn()
         except Exception as e:

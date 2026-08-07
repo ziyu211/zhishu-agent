@@ -124,6 +124,12 @@ async def delete_user(uid: int, user=require_auth("users:write")):
                 ctx.cron.delete_job(j["id"])
     except Exception:
         pass
+    # 级联清理：被删用户拥有的子智能体（目录 + agents_state.json 禁用残留）
+    try:
+        from ..core.agents_runtime import delete_agents_by_owner
+        delete_agents_by_owner(username)
+    except Exception:
+        pass
     try:
         docs = ctx.kb.list_documents(owner=username, limit=10000)
         for d in docs:

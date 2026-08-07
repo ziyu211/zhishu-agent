@@ -21,7 +21,7 @@ const routes = [
       { path: 'memory', name: 'memory', component: () => import('@/views/MemoryView.vue'), meta: { title: '记忆', icon: 'memory', perm: 'modules:read' } },
       { path: 'agents', name: 'agents', component: () => import('@/views/AgentsView.vue'), meta: { title: '智能体', icon: 'agents', perm: 'agents:read' } },
       { path: 'cron', name: 'cron', component: () => import('@/views/CronView.vue'), meta: { title: '定时任务', icon: 'cron', perm: 'cron:read' } },
-      { path: 'settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { title: '设置', icon: 'settings' } },
+      { path: 'settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { title: '设置', icon: 'settings', perm: 'admin' } },
       { path: 'system', name: 'system', component: () => import('@/views/SystemView.vue'), meta: { title: '系统', icon: 'system', perm: 'system:read' } },
     ],
   },

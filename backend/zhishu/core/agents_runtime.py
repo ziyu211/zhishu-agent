@@ -124,6 +124,42 @@ def delete_agent(name: str) -> None:
         shutil.rmtree(d)
 
 
+def delete_agents_by_owner(username: str) -> int:
+    """级联清理：删除归属于某用户的所有子智能体（含目录与禁用态残留）。
+
+    仅删除 owner 严格等于该用户名的智能体；共享/系统级（owner 为空或他人）不受影响。
+    同步清理 agents_state.json 中遗留的禁用条目，避免重启后 list_agents 仍展示孤儿。
+    返回实际删除的数量。"""
+    from ..context import get_ctx
+    base = os.path.join(get_ctx().cfg.server.data_dir, AGENT_SUB)
+    if not os.path.isdir(base):
+        return 0
+    removed = 0
+    disabled = disabled_set()
+    changed = False
+    for name in sorted(os.listdir(base)):
+        d = os.path.join(base, name)
+        if not os.path.isdir(d):
+            continue
+        meta = read_agent_meta(name)
+        owner_val = meta.get("owner")
+        if owner_val is None:
+            continue
+        if str(owner_val) != str(username):
+            continue
+        if os.path.isdir(d):
+            shutil.rmtree(d, ignore_errors=True)
+        if name in disabled:
+            disabled.discard(name)
+            changed = True
+        removed += 1
+    if changed:
+        state = load_state()
+        state["agents_disabled"] = sorted(disabled)
+        save_state(state)
+    return removed
+
+
 def agent_owner(name: str) -> "str | None":
     """返回子智能体归属用户名；None 表示系统级共享（全员可用，仅 admin 可管理）。"""
     owner = (read_agent_meta(name) or {}).get("owner")
