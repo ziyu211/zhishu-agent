@@ -151,10 +151,38 @@ def main():
     _show("[3] POST /v1/chat/completions  (带 tools+tool_choice)", "POST",
           base + "/v1/chat/completions", tools_body, api_key)
 
+    # 4) 流式 + tools（复现智枢真实对话路径：agent 默认走 stream=true）
+    #    [2][3] 都是 stream=false，若它们 200 但真实对话仍 400，多半是流式分支的差异。
+    stream_tools = [{
+        "type": "function",
+        "function": {
+            "name": "lookup_person",
+            "description": "按姓名查询人员信息",
+            "parameters": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}},
+                "required": ["name"],
+            },
+        },
+    }]
+    stream_body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": "查一下李龙的积分"}],
+        "tools": stream_tools,
+        "tool_choice": "auto",
+        "max_tokens": 256,
+        "stream": True,
+    })
+    _show("[4] POST /v1/chat/completions  (stream=true + tools，复现真实对话路径)", "POST",
+          base + "/v1/chat/completions", stream_body, api_key)
+
     print("=" * 60)
     print("判读提示：")
-    print("  - 若 [2] 200 但 [3] 400 -> 服务端不支持 tools/函数调用，需换支持 function calling 的模型")
-    print("  - 若 [2] 也 400 且提示 model 不存在 -> MODEL 名不对，用 [1] 列出的真实 model 名")
+    print("  - 若 [1] 列出 model 名 != 你在智枢「模型管理」里填的模型名 -> 必 400 (model not found)")
+    print("    请让智枢的 Provider 模型名与 [1] 的 id 完全一致（含大小写，如 qwen3.5-122b-a10b）")
+    print("  - 若 [2][3] 200 但 [4] 400 -> 服务端对流式+tools 组合有怪癖，需关掉流式或排查 vLLM 版本")
+    print("  - 若 [4] 也 200 但真实对话仍 400 -> 真实请求带了更长上下文/更多 tools，极可能是上下文超长")
+    print("    （在智枢「模型管理」给该 Provider 配置 context_length=131072 即可启用窗口守护兜底）")
     print("  - 若 [1] 也失败 -> base_url / 网络 / 鉴权问题")
 
 
