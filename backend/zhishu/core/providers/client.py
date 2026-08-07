@@ -161,6 +161,39 @@ def _truncate_messages(messages: list, level: int) -> list:
     return sys_msgs + flat
 
 
+def _normalize_system_messages(messages: list) -> list:
+    """vLLM 等严格后端要求 system 消息必须位于消息数组最开头、且通常仅一条。
+
+    agent 在工具调用 / 多智能体循环里会向对话**中途**追加 system 提示
+    （如「已为你创建多智能体团队」协调者提醒，见 agent.py 多处 messages.append
+    {"role": "system", ...}），直接把这种数组发给 vLLM 会被上游以
+    HTTP 500 'system message must be at the beginning' 拒绝。
+
+    这里把所有 system 内容合并为**一条**并置于数组首位，其余消息相对顺序不变，
+    既不破坏 assistant(tool_calls) 与 tool 结果的配对，也满足上游约束。
+    """
+    if not messages:
+        return messages
+    sys_idx = [i for i, m in enumerate(messages) if m.get("role") == "system"]
+    if not sys_idx:
+        return messages
+    if len(sys_idx) == 1 and sys_idx[0] == 0:
+        return messages  # 已经合规（唯一且位于开头），原样返回
+    sys_parts: list = []
+    rest: list = []
+    for m in messages:
+        if m.get("role") == "system":
+            c = m.get("content")
+            if c:
+                sys_parts.append(c)
+        else:
+            rest.append(m)
+    merged = "\n\n".join(sys_parts)
+    if merged:
+        rest.insert(0, {"role": "system", "content": merged})
+    return rest
+
+
 
 # ---------------------------------------------------------------------------
 # 进程级共享连接池
@@ -329,7 +362,7 @@ class LLMClient:
     async def _chat_once(self, pc, model, messages, tools, temperature, max_tokens,
                          tool_choice: Any = "auto") -> dict:
         transport = get_transport(self.api_mode)
-        msgs = list(messages)
+        msgs = _normalize_system_messages(list(messages))
         mt = max_tokens
         last_detail = ""
         for _lvl in range(_CTX_TRUNCATE_RETRIES + 1):
@@ -396,7 +429,7 @@ class LLMClient:
 
     async def _stream_once(self, pc, model, messages, tools, temperature, max_tokens):
         transport = get_transport(self.api_mode)
-        msgs = list(messages)
+        msgs = _normalize_system_messages(list(messages))
         mt = max_tokens
         last_detail = ""
         for _lvl in range(_CTX_TRUNCATE_RETRIES + 1):

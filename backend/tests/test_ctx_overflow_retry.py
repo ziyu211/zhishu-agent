@@ -25,6 +25,7 @@ from zhishu.core.providers.client import (
     LLMClient,
     _is_context_overflow,
     _truncate_messages,
+    _normalize_system_messages,
     _CTX_TRUNCATE_RETRIES,
 )
 
@@ -133,6 +134,72 @@ def test_chat_once_no_retry_on_non_overflow_400():
                                          None, 0.7, 2048))
     assert state["n"] == 1  # 非超长 400 不重试，直接失败
     assert "model 'foo' not found" in str(ei.value)
+
+
+# --------------------------- system 消息规范化 ---------------------------
+def test_normalize_system_keeps_single_at_beginning():
+    msgs = [{"role": "system", "content": "你是助手"},
+            {"role": "user", "content": "hi"}]
+    out = _normalize_system_messages(msgs)
+    assert out == msgs  # 已合规，原样返回
+
+
+def test_normalize_system_merges_mid_conversation():
+    msgs = [
+        {"role": "system", "content": "你是助手"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "你好"},
+        {"role": "system", "content": "[系统] 已创建团队，委协调者处理"},
+        {"role": "user", "content": "开始分析"},
+    ]
+    out = _normalize_system_messages(msgs)
+    # 1 条 system 在开头，内容合并；其余消息相对顺序不变
+    assert out[0]["role"] == "system"
+    assert "你是助手" in out[0]["content"]
+    assert "[系统] 已创建团队" in out[0]["content"]
+    assert [m["role"] for m in out[1:]] == ["user", "assistant", "user"]
+    # 不破坏 tool_calls 配对：assistant(tool_calls) 紧随其后的 tool 结果保持相邻
+    paired = [
+        {"role": "system", "content": "base"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "content": "r1"},
+        {"role": "system", "content": "mid nudge"},
+        {"role": "user", "content": "go"},
+    ]
+    out2 = _normalize_system_messages(paired)
+    assert out2[0]["role"] == "system"
+    assert out2[1]["role"] == "assistant" and out2[1].get("tool_calls")
+    assert out2[2]["role"] == "tool"
+    # assistant(tool_calls) 与其 tool 结果仍相邻
+    assert out2.index(out2[1]) + 1 == out2.index(out2[2])
+
+
+def test_normalize_system_no_system_passthrough():
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]
+    assert _normalize_system_messages(msgs) == msgs
+
+
+def test_chat_once_sends_normalized_system_at_front():
+    pc = _make_pc()
+    client = LLMClient(cfg=None, api_mode="openai")
+    captured = {}
+
+    async def fake_post(url, json=None, headers=None):
+        captured["json"] = json
+        return _FakeResp(200, {"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+
+    fake_http = types.SimpleNamespace(post=fake_post)
+    mid_sys_msgs = [
+        {"role": "system", "content": "base"},
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": "mid nudge"},
+    ]
+    with mock.patch("zhishu.core.providers.client.get_shared_http", return_value=fake_http):
+        asyncio.run(client._chat_once(pc, "m", mid_sys_msgs, None, 0.7, 2048))
+    sent = captured["json"]["messages"]
+    assert sent[0]["role"] == "system"
+    assert "base" in sent[0]["content"] and "mid nudge" in sent[0]["content"]
+    assert len([m for m in sent if m["role"] == "system"]) == 1
 
 
 if __name__ == "__main__":
