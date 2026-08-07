@@ -3,7 +3,7 @@
 > 一个面向**内网离线、安全合规、自主可控**场景的多用户本地智能体系统。
 > 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端；配置驱动多模型接入，内置 RBAC 多租户、知识库、记忆、工具、插件/技能/MCP、定时任务与技能自进化闭环。
 >
-> 最近更新：2026-08-06 — 新增第九节 9.8 国产信创部署、9.9 OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models，复用 RBAC，可对接 Open WebUI / LobeChat）；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。
+> 最近更新：2026-08-06 — 新增第九节 9.8 国产信创部署、9.9 OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models，复用 RBAC，可对接 Open WebUI / LobeChat）；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。2026-08-07 — 版本统一至 1.0.13；新增第八节 8.1「内网 Embedding 模型接入」指南；新增多推理框架兼容画像（vLLM / SGLang / LMDeploy / MindIE / Ollama / Xinference / TGI / llama.cpp / generic）与 Qwen3.5 模板缺陷自愈（去 tools 重试并缓存结论）。
 
 ---
 
@@ -67,6 +67,7 @@
 - **多 Provider**：国产 OpenAI 兼容端点 + 本地推理（Ollama / vLLM）。
 - **运行时 Provider 管理**：前端「模型」页支持增删改 Provider、探测模型（`/models/fetch`，带 SSRF 防护）、设默认模型、按共享范围下发；持久化至 `data/providers.json`（API Key 以 SM4/XOR 混淆落盘，接口只回掩码）。
 - **故障回退链 + 负载均衡**：按可用性与密钥状态自动筛选，主用不可用时回退备用。
+- **多推理框架兼容**：内置 vLLM / SGLang / LMDeploy / MindIE / Ollama / Xinference / TGI / llama.cpp / generic 兼容画像（`compat`），按 `base_url`/端口自动探测或显式声明，规避各框架对 system 位置、content:null、function calling、未知参数的差异；4xx/5xx 触发自愈（历史裁剪、去 tools 重试等，如 Qwen3.5 模板缺陷导致的 `No user query found in messages.` 会自动去 tools 重试并缓存结论）。
 - **离线兜底**：未配置云端 Key 时可指向本地 Ollama。
 
 ### 2. 知识库与 RAG
@@ -252,6 +253,38 @@ cd backend && python start_backend.py
 完整字段见 `deploy/zhishu.yaml.example`；运行时覆盖项落盘 `data/config.override.json`（设置页）。
 
 > ⚠️ **密钥耦合提示**：`data/providers.json` 中的 API Key 用 `security.secret` 派生密钥加密。**轮换 secret 会使已存 Key 失效**（对话报「所有 Provider 均不可用」）——轮换后需在前端「模型」页重新填入各 Provider 的 Key。
+
+### 8.1 内网 / 私有 Embedding 模型接入
+
+智枢的 Embedding **不是独立模型类型**，而是复用 LLM Provider 的 OpenAI 兼容 `/embeddings` 接口（`core/embedding.py`）。内网 embedding 服务（vLLM / SGLang / Xinference / Ollama / 本地 bge 等）都按**一个 Provider** 接入：
+
+**步骤一：模型管理添加 Provider（UI）**
+- 名称（如 `emb-intranet`）、Base URL 填 `http://<内网IP>:<端口>/v1`、API Key 无鉴权则留空；
+- 默认模型 / 模型列表填该服务 `/embeddings` 实际接受的模型名（如 `bge-m3`）；
+- 优先级调大（避免抢默认聊天模型）；内网无密钥端点打开「本地模型」（不出网）开关；
+- 推理框架选对应项（vLLM / Xinference / MindIE …）以规避协议差异。
+
+**步骤二：在 `deploy/zhishu.yaml` 指定 embedding 指向（必须，重启生效）**
+> ⚠️ 前端「模型管理」**没有** `embedding.provider` / `embedding.embed_model` 的输入框，这两个开关只能写在 YAML 里（运行时 `/api/v1/settings` 也不管 embedding）。
+
+```yaml
+embedding:
+  backend: provider          # 走 Provider 的网络 /embeddings
+  provider: emb-intranet     # 须与步骤一的名称一致
+  embed_model: bge-m3        # 须与该端点 /embeddings 接受的 model 完全一致
+  fallback_hash: true        # 服务不可用时优雅降级为哈希向量，不中断流程
+```
+
+**步骤三：重启并验证**
+```bash
+docker restart zsagent
+```
+- 知识库解析文档后，`embedding_dim` 应变为真实维度（如 bge-m3=1024），不再是默认 512（哈希降级）。
+- 设置页「长期记忆」的跨会话语义召回开关应能开启（依赖可用 Embedding）。
+
+**其他 backend（纯内网免 Provider）**：`backend: ollama`（`ollama_base` / `ollama_model`）、`backend: local`（`model: bge-small-zh`，需容器装 torch）、`backend: hash`（默认降级，无语义能力）。
+
+**常见坑**：① `embed_model` 名须与服务端完全一致（vLLM `--served-model-name` 改名后此处也要改）；② 仅加 Provider 不写 YAML `embedding:` 段 = 仍走哈希降级；③ 改 YAML 必须重启；④ 向量空间签名隔离（`emb_sig`）保证降级哈希向量不会污染真实语义检索库。
 
 ---
 
