@@ -275,6 +275,16 @@ class AgentConfig:
     tool_cycle_break: int = 4
     # 工具步骤硬上限（独立于 16 步循环上限）：即便异常步/工具组合也保证终止，防止失控。
     max_tool_steps: int = 64
+    # ---- Prompt 缓存（对标 Hermes prompt_caching.py，Task #398，opt-in，默认 auto）----
+    # 把「稳定前缀（身份/指令/工具定义）」与「易变内容（检索结果、当前轮输入）」用
+    # cache_control 断点隔开，使 Provider 的 KV 前缀缓存命中，缩短多步推理的重复前缀耗时。
+    #   off   : 完全不注入（等价于旧行为，零风险）
+    #   auto  : 按 Provider 家族自动选策略——Anthropic/DeepSeek 注入 cache_control 断点、
+    #           Qwen 走 extra_body.prompt_cache、OpenAI/Azure/未知走服务端自动前缀缓存、
+    #           本地 Ollama/vLLM 跳过（不注入标记，避免 400）
+    #   force : 对所有 Provider 按 Anthropic 风格注入 cache_control（专家模式，适用于明确
+    #           支持该标记的网关；不熟悉的 Provider 可能 400，慎用）
+    prompt_cache: str = "auto"
 
 
 @dataclass

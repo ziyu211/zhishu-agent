@@ -20,6 +20,7 @@ import httpx
 from ..config import ZhishuConfig, ProviderConfig
 from . import compat
 from .registry import get_transport
+from .prompt_cache import apply_prompt_cache
 
 
 # OpenAI 兼容消息 / 工具结构（仅类型约定，运行时用 dict）
@@ -361,7 +362,15 @@ class LLMClient:
             temperature=temperature, max_tokens=max_tokens,
             stream=stream, model=model, tool_choice=tool_choice,
         )
-        return compat.sanitize_kwargs(kw, profile, tools_enabled=send_tools)
+        kw = compat.sanitize_kwargs(kw, profile, tools_enabled=send_tools)
+        # Prompt 缓存（对标 Hermes prompt_caching.py）：在稳定前缀（system 末块 + 末 tool）
+        # 挂 cache_control / 置 prompt_cache，使 Provider 的 KV 前缀缓存命中，缩短多步推理耗时。
+        # 注入发生在 sanitize 之后，不会被兼容层剥除；off 模式原样返回（零回归）。
+        try:
+            kw = apply_prompt_cache(kw, pc, self.cfg.agent.prompt_cache)
+        except Exception:  # noqa: BLE001 —— 缓存注入失败绝不应影响主链路
+            pass
+        return kw
 
     async def _chat_once(self, pc, model, messages, tools, temperature, max_tokens,
                          tool_choice: Any = "auto") -> dict:
