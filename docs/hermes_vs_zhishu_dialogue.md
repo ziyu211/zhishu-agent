@@ -19,8 +19,10 @@
 3. **没有失败熔断**：智枢只有「委派级」去重，对「普通工具反复失败重试」毫无拦截，于是出现
    「16 步 / 23 个工具步骤」的失控循环；Hermes 有 `IterationBudget` + `budget_grace_call` 兜底。
 
-本轮已为智枢补齐：**叶子工具并发执行**（对标 Hermes 分段并行）+ **三级反空转熔断**
-（连续失败 / 重复签名循环 / 工具步骤硬上限），并配套回归测试。
+本轮已为智枢补齐三大差距：**叶子工具并发执行**（对标 Hermes 分段并行）、
+**三级反空转熔断**（连续失败 / 重复签名循环 / 工具步骤硬上限）、以及**Provider 门控的
+Prompt 缓存**（对标 Hermes `prompt_caching.py`，在稳定前缀挂 `cache_control` 断点），
+均配套回归测试（提交 `eabf505` 反空转 + `a4538e6` Prompt 缓存）。
 
 ---
 
@@ -60,7 +62,8 @@
 - 模型服务商（Claude 等）对稳定前缀做缓存命中，后续每步只需发送「变化的尾部」，
   首字延迟与 token 成本显著下降。
 
-> 智枢没有等价机制：系统提示每步重新拼装并整体重发，前缀无法稳定命中缓存。
+> 智枢原无等价机制：系统提示每步重新拼装并整体重发，前缀无法稳定命中缓存。
+> 现已在 `providers/prompt_cache.py` 补齐 Provider 门控缓存（见 §4.3）。
 
 ---
 
@@ -159,6 +162,28 @@
 > 关键设计：签名累计**只对失败结果**进行，成功调用不计入 `_breaker_sig`，
 > 避免误伤正常任务中偶发的成功重复调用（如反复 `read_file` 同一文件）。
 
+### 4.3 Provider 门控的 Prompt 缓存（对标 Hermes `prompt_caching.py`）
+
+新增 `backend/zhishu/core/providers/prompt_cache.py`，在 `LLMClient._prepare` 完成 `sanitize`
+**之后**注入缓存标记（不会被兼容层剥除；注入异常静默兜底，绝不影响主链路）：
+
+- 核心做法：把「稳定前缀（身份 / 指令 / 工具定义）」与「易变内容（检索结果、当前轮输入）」
+  用 `cache_control` 断点隔开，使 Provider 的 KV 前缀缓存命中。
+- 各家族策略（`prompt_cache` 配置：`off` / `auto` / `force`，**默认 `auto`**）：
+  - `anthropic` / `claude`：system 末块 + 末 tool 挂 `cache_control: {type:"ephemeral"}`。
+  - `deepseek`：同上 + 置请求级 `prompt_cache=true`。
+  - `qwen` / `dashscope` / `aliyun`：走 `extra_body.prompt_cache=true`。
+  - `openai` / `azure` / `moonshot` / `kimi` / 未知：依赖服务端**自动前缀缓存**
+    （≥1024 tokens 的稳定前缀即命中），**不注入任何标记**以免严格端点 400。
+  - 本地 `ollama` / `vllm` / 回环地址：跳过注入（服务端自管 KV 缓存）。
+- 关键前提：智枢 `run()` 在**单轮内只构建一次 system 提示词**，且 RAG/长期记忆上下文
+  基于同轮恒定的 `user_message`，因此单轮多步推理的前缀天然稳定——缓存收益最大，
+  这正是智枢「比 Hermes 慢」的主因之一被消除。
+
+```python
+prompt_cache: str = "auto"   # off | auto | force
+```
+
 ---
 
 ## 5. 对比总表
@@ -167,7 +192,7 @@
 |------|--------|------------|----------------|
 | 最大步数 | 90（`max_iterations`）+ 预算 | 16（`MAX_STEPS`） | 16（不变） |
 | 工具执行 | 分段并行，8 线程池 + 路径冲突分析 | **严格串行** `await` | **叶子工具并发**（信号量，≥2 时） |
-| Prompt 缓存 | 4 断点，字节稳定前缀 | 无（每步全量重发） | 无（后续可加，见 §6） |
+| Prompt 缓存 | 4 断点，字节稳定前缀 | 无（每步全量重发） | Provider 门控 cache_control + 服务端自动前缀缓存（**已落地**，见 §4.3） |
 | 失败熔断 | `IterationBudget` + `budget_grace_call` | 仅委派级去重 | 连续失败 + 重复签名 + 硬上限（三级） |
 | 流式网关 | `POST /v1/runs`(202) + `GET /events`(SSE) | 同源 SSE（`agent.run` 直推） | 同源 SSE（不变） |
 | 前端渲染 | `message.delta` 增量 + 800ms 节流持久化 | 同源 SSE 渲染 | 同源 SSE 渲染（不变） |
@@ -176,10 +201,11 @@
 
 ## 6. 后续可选项（非本轮范围）
 
-1. **Prompt 缓存**：在智枢系统提示的稳定段（身份、工具清单、记忆骨架）注入 `cache_control`
-   等价标记，使每步只重发变化尾部。这是「单次对话变长后变慢」的最大杠杆。
+1. ~~**Prompt 缓存**：在智枢系统提示的稳定段（身份、工具清单、记忆骨架）注入 `cache_control`
+   等价标记，使每步只重发变化尾部。~~ **（已落地，详见 §4.3 / 提交 `a4538e6`）**
 2. **路径冲突感知并发**：把 Hermes 的「按路径重叠判定串行」移植到智枢
-   `asyncio.Semaphore` 调度，进一步避免隐性顺序破坏。
+   `asyncio.Semaphore` 调度，进一步避免隐性顺序破坏（当前采用「并发执行 + 串行回放副作用」，
+   对多数场景已够用，此项为进阶优化）。
 3. **步数预算对齐**：将 `MAX_STEPS=16` 提升为可配（如 32），配合熔断后整体更宽松但不失控。
 
 ---
@@ -191,4 +217,8 @@
   - 重复失败循环熔断（code_exec 成功 / terminal_run 被拦 交替）→ 第 7 步熔断。
   - 工具步骤硬上限（全成功但过多）→ 触发终止。
   - 并行叶子工具 + 正常收尾 → 不误触熔断，两工具均执行，最终回答正常。
+- 新增回归测试 `backend/tests/test_prompt_cache.py`（22 断言全绿）：
+  - Provider 家族识别（anthropic/deepseek/qwen/ollama/vllm/openai/未知/本地回环）。
+  - `off` 原样返回；`auto` 下 anthropic 注入 system 末块 + 末 tool 断点、deepseek 加 `prompt_cache`、
+    qwen 走 `extra_body.prompt_cache`、openai/未知不注入、本地跳过；`force` 对所有家族注入。
 - 既有 `test_agent_media_injection.py` 等保持通过；`config` 默认值校验通过。
