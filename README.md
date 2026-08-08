@@ -144,6 +144,24 @@
   > 多 Agent 协作——避免弱模型把普通问题丢进团队协作浪费资源。路径 A 下 `delegate_to_agent`/`create_team`
   > 会被**物理剥离**，模型无法自行越权委派。
 
+### 11. 推理循环优化（对标 Hermes）
+
+为消除「智枢比 Hermes 慢且易卡死」的工程差距，推理主循环（`core/agent/agent.py` `run()`）补齐三项优化（完整对比见 `docs/hermes_vs_zhishu_dialogue.md`）：
+
+- **叶子工具并发执行**：同一 LLM 响应返回 ≥2 个「非委派」叶子工具时，经 `asyncio.Semaphore` + `gather` 并发执行（I/O 密集，安全），副作用仍串行原序回放，行为等价于串行；委派类工具始终串行保序。
+- **三级反空转熔断**：
+  - 连续失败：连续 `tool_fail_break`（默认 6）次工具调用均失败/被拦截即终止；
+  - 重复签名循环：同一 `(工具名, 归一化参数)` 失败累计 `tool_cycle_break`（默认 4）次即终止，兜底「成功/失败交替」式死循环（如 `code_exec` 装依赖成功、`terminal_run` 装依赖被白名单拦截反复出现）；
+  - 工具步骤硬上限：`max_tool_steps`（默认 64）独立于 16 步循环上限，保证终止。
+  - 失败判定含 `[已拦截]`（白名单拦截 apt-get 等），终止时给出可读中文提示而非静默结束。
+- **Provider 门控的 Prompt 缓存**：在 `LLMClient._prepare` 完成 sanitize 后注入缓存标记，使 Provider KV 前缀缓存命中，缩短多步推理的重复前缀耗时：
+  - `anthropic`/`claude`：system 末块 + 末 tool 挂 `cache_control`；
+  - `deepseek`：同上 + 请求级 `prompt_cache=true`；
+  - `qwen`/`dashscope`：走 `extra_body.prompt_cache=true`；
+  - `openai`/`azure`/未知：依赖服务端自动前缀缓存（≥1024 tokens 稳定前缀即命中），不注入标记以免严格端点 400；
+  - 本地 `ollama`/`vllm`/回环地址：跳过注入。
+  - 配置 `prompt_cache`：`off` / `auto`（默认） / `force`。
+
 ---
 
 ## 五、目录结构
@@ -246,7 +264,7 @@ cd backend && python start_backend.py
 | `embedding` | `backend` / `embed_model` / `fallback_hash` | 网络端点或本地；未配置降级哈希向量 |
 | `security` | `secret` / `admin_password` / `enable_auth` / `outbound_allow` / `enable_sm` / `allow_private_fetch` | 签名密钥（**必改**）、出网开关、国密开关、SSRF 放行开关 |
 | `web_search` | `backend` | bing_cn / duckduckgo / tavily / bing |
-| `agent` | `nudge_interval` / `reflection_enabled` / `skills_auto_learn` | 自进化相关开关 |
+| `agent` | `nudge_interval` / `reflection_enabled` / `skills_auto_learn` / `parallel_tools` / `parallel_tool_workers` / `tool_fail_break` / `tool_cycle_break` / `max_tool_steps` / `prompt_cache` | 自进化开关 + 推理循环优化（叶子并发 / 三级熔断 / Prompt 缓存，均默认开启或 `auto`） |
 | `cron` | — | 定时任务调度配置 |
 | `memory` | `vector_enabled` 等 | 长期记忆（语义检索需配置 Embedding，无则优雅降级） |
 
