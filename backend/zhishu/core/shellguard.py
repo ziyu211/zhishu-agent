@@ -36,7 +36,7 @@ from typing import Iterable, Optional
 DEFAULT_SHELL_ALLOWLIST: tuple[str, ...] = (
     # 只读查看
     "ls", "dir", "cat", "type", "head", "tail", "wc", "sort", "uniq", "cut",
-    "grep", "findstr", "echo", "pwd", "date", "whoami", "df", "du", "stat",
+    "grep", "findstr", "echo", "pwd", "cd", "date", "whoami", "df", "du", "stat",
     "find", "tree", "diff", "md5sum", "sha256sum",
     # 文件操作（受 cwd=sandbox 约束）
     "cp", "mv", "mkdir", "touch", "tar", "zip", "unzip", "gzip", "gunzip",
