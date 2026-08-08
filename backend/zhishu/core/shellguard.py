@@ -37,6 +37,7 @@ DEFAULT_SHELL_ALLOWLIST: tuple[str, ...] = (
     # 只读查看
     "ls", "dir", "cat", "type", "head", "tail", "wc", "sort", "uniq", "cut",
     "grep", "findstr", "echo", "pwd", "cd", "date", "whoami", "df", "du", "stat",
+    "which", "readlink", "realpath",
     "find", "tree", "diff", "md5sum", "sha256sum",
     # 文件操作（受 cwd=sandbox 约束）
     "cp", "mv", "mkdir", "touch", "tar", "zip", "unzip", "gzip", "gunzip",
@@ -44,6 +45,8 @@ DEFAULT_SHELL_ALLOWLIST: tuple[str, ...] = (
     "python", "python3", "pip", "pip3", "node", "npm", "npx", "java", "go",
     # 版本管理 / 传输（出网另受 security.outbound_allow 约束）
     "git", "curl", "wget",
+    # 包管理 / 文本处理（内网可信部署常用；高危组合仍受拒绝清单约束）
+    "apt", "apt-get", "sed", "awk",
 )
 
 # --------------------------------------------------------------------------

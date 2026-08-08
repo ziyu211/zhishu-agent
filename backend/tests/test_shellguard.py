@@ -1,6 +1,6 @@
 """shellguard.check_command 回归测试：
 - enforce=false：放行除高危外的任意命令
-- enforce=true + 默认白名单：cd / pwd 等只读导航放行，apt-get 等仍拦截
+- enforce=true + 默认白名单：which / cd / apt-get 放行，gcc 等仍拦截
 - 高危清单始终拒绝（优先级高于 allowlist）
 """
 import sys, os
@@ -25,12 +25,16 @@ def test_enforce_false_allows_cd_and_apt():
 
 
 def test_enforce_true_default_allowlist():
-    print("[2] enforce=true + 默认白名单：cd 放行，apt-get 拦截")
+    print("[2] enforce=true + 默认白名单：which / cd / apt-get 放行，gcc 拦截")
+    _check(sg.check_command("which node", enforce_allowlist=True) is None,
+           "which 已加入默认白名单，放行")
     _check(sg.check_command("cd /workspace && pwd", enforce_allowlist=True) is None,
            "cd 已加入默认白名单，放行")
-    _check(sg.check_command("apt-get install -y nodejs", enforce_allowlist=True) is not None,
-           "apt-get 不在默认白名单，拦截")
-    _check("不在白名单内" in (sg.check_command("apt-get update", enforce_allowlist=True) or ""),
+    _check(sg.check_command("apt-get install -y nodejs", enforce_allowlist=True) is None,
+           "apt-get 已加入默认白名单，放行")
+    _check(sg.check_command("gcc -o a a.c", enforce_allowlist=True) is not None,
+           "gcc 不在默认白名单，拦截")
+    _check("不在白名单内" in (sg.check_command("gcc main.c", enforce_allowlist=True) or ""),
            "拦截原因含『不在白名单内』")
 
 
