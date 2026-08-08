@@ -620,6 +620,10 @@ class Agent:
         # 轨迹采集（供技能自进化闭环使用）：记录工具调用与累计步数/工具数。
         traj_tools: list[dict] = []
         tool_total = 0
+        # 反空转熔断状态（Task #395）：仅对「失败/被拦截」的工具按签名累计，
+        # 避免误伤正常任务中偶发的成功重复调用（如重复读取同一文件）。
+        _breaker_sig: dict = {}
+        _consec_fail = 0
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
         # 仅按子智能体名去重（忽略 task 文本差异）——弱模型常把同一子智能体换个说法反复
         # 重派，若按 task 前缀去重会把「换汤不换药」的重派误判为新委派，导致 stall 计数永不
@@ -682,6 +686,11 @@ class Agent:
             tool_calls = choice.get("tool_calls")
 
             if tool_calls:
+                # ---- 并行/串行预处理：先解析全部 tool_calls，分离委派与叶子工具 ----
+                # 同一响应若混有委派（delegate_to_agent）则整体串行（委派须保序且含复杂子
+                # 流程）；否则当叶子工具≥2 时并发执行以缩短多工具步耗时（对标 Hermes 分段并行）。
+                _parsed: list = []
+                _any_delegate = False
                 for tc in tool_calls:
                     fn = tc.get("function", {})
                     name = fn.get("name", "")
@@ -689,6 +698,27 @@ class Agent:
                         args = json.loads(fn.get("arguments", "{}") or "{}")
                     except json.JSONDecodeError:
                         args = {}
+                    if name == DELEGATE_TOOL_NAME and can_delegate:
+                        _any_delegate = True
+                    _parsed.append((tc, name, args))
+                _leaf_count = sum(
+                    1 for _, n, _ in _parsed if not (n == DELEGATE_TOOL_NAME and can_delegate))
+                _do_parallel = (self.cfg.agent.parallel_tools and not _any_delegate and _leaf_count >= 2)
+                if _do_parallel:
+                    # 并发执行所有叶子工具（I/O 密集，安全），结果按原序收集；
+                    # 其余副作用（落盘/消息回填/事件流）仍保持串行原序回放，保证行为等价。
+                    _sem = asyncio.Semaphore(max(1, self.cfg.agent.parallel_tool_workers))
+
+                    async def _exec_leaf(_i, _nm, _a):
+                        async with _sem:
+                            return await ToolRegistry.execute(_nm, _a, self.ctx)
+
+                    _leaf_results = await asyncio.gather(
+                        *[_exec_leaf(_i, _nm, _a) for _i, (_tc, _nm, _a) in enumerate(_parsed)]
+                    )
+                else:
+                    _leaf_results = None
+                for _li, (tc, name, args) in enumerate(_parsed):
                     # 委派调用去重：同一次运行内对同一子智能体重复委派直接跳过执行，
                     # 避免弱模型反复委派同一子智能体（如 Research×3）空转耗尽步数。
                     if name == DELEGATE_TOOL_NAME and can_delegate:
@@ -734,7 +764,25 @@ class Agent:
                             "content": result,
                         })
                         continue
-                    result = await ToolRegistry.execute(name, args, self.ctx)
+                    # ---- 获取工具结果：并行分支直接取预取值，否则串行执行 ----
+                    if _do_parallel:
+                        result = _leaf_results[_li]
+                    else:
+                        result = await ToolRegistry.execute(name, args, self.ctx)
+                    # ---- 反空转熔断计数（Task #395）：仅对失败/被拦截结果累计签名 ----
+                    # 成功调用会使连续失败计数清零，但签名累计仍保留，从而能捕获
+                    # 「成功/失败交替」的死循环（如 code_exec 装 Node 成功、terminal_run
+                    # 装 Node 被白名单拦截，交替往复）。
+                    _sig_args = json.dumps(args, sort_keys=True, ensure_ascii=False)
+                    if len(_sig_args) > 400:
+                        _sig_args = _sig_args[:400]
+                    _sig = f"{name}\u0001{_sig_args}"
+                    _is_fail = (result or "").startswith(("[工具错误]", "[工具执行异常]", "[已拦截]"))
+                    if _is_fail:
+                        _breaker_sig[_sig] = _breaker_sig.get(_sig, 0) + 1
+                        _consec_fail += 1
+                    else:
+                        _consec_fail = 0
                     # 收集本轮工具产出的 /media 下载链接，供最终回复护栏兜底
                     # （即使模型最终没透传链接，也能强制补回，见 guard_download_links）
                     if "/media/" in (result or ""):
@@ -807,6 +855,26 @@ class Agent:
                             pass
                     tool_total += 1
                     traj_tools.append({"name": name, "args": args, "result": result[:300]})
+                    # ---- 反空转熔断判定（Task #395）：尽早终止失控循环，给出可理解提示 ----
+                    if _consec_fail >= self.cfg.agent.tool_fail_break:
+                        _stop = (f"任务执行受阻：已连续 {_consec_fail} 次工具调用失败"
+                                 f"（如命令被白名单拦截、依赖缺失、权限不足），已自动终止以避免无效消耗。"
+                                 f"请修正工具/环境或调整指令后重试。")
+                    elif _is_fail and _breaker_sig.get(_sig, 0) >= self.cfg.agent.tool_cycle_break:
+                        _stop = (f"检测到重复失败循环：工具 `{name}` 以相同参数被反复调用且均失败"
+                                 f"（累计 {_breaker_sig[_sig]} 次），疑似陷入死循环，已自动终止。"
+                                 f"请检查任务目标或工具配置。")
+                    elif tool_total > self.cfg.agent.max_tool_steps:
+                        _stop = (f"已达到工具步骤硬上限（{self.cfg.agent.max_tool_steps}），"
+                                 f"已自动终止以避免资源耗尽。如需继续，可补充指令让任务延续。")
+                    else:
+                        _stop = ""
+                    if _stop:
+                        yield {"type": "token", "text": _stop}
+                        if self.memory:
+                            self.memory.append(session, "assistant", _stop)
+                        yield {"type": "done", "note": "anti-runaway breaker triggered"}
+                        return
                     yield {"type": "tool_result", "name": name, "result": result}
                     # 会话内 nudge（对标 Hermes nudge 机制）：每完成 nudge_interval 次工具
                     # 调用，注入一条内部系统提醒，提示模型把可复用工作流沉淀为长期记忆/技能。

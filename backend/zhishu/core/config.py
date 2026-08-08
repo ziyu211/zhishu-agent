@@ -261,6 +261,20 @@ class AgentConfig:
     # 设为 3 支持「主管→总监(Orchestrator)→研究员/因子/策略/风控」两级编排，同时以
     # depth>=3 为递归地板（任何子智能体最多再委派一层），从根上杜绝 A→B→A 递归风暴。
     delegate_max_depth: int = 3
+    # ---- 反空转熔断 + 工具并发（Task #395，均为 opt-in，默认开启）----
+    # 同一 LLM 响应返回多个「非委派」叶子工具时并发执行（I/O 密集，安全），
+    # 缩短多工具步的端到端耗时（对标 Hermes 分段并行）。关闭则回退串行。
+    parallel_tools: bool = True
+    parallel_tool_workers: int = 5            # 叶子工具并发上限（信号量）
+    # 连续失败熔断：连续 N 次工具调用均失败/被拦截（如 shell 白名单拦截 apt-get、
+    # 依赖缺失、权限不足）即终止，避免「失败→重试→再失败」反复耗尽 16 步。
+    tool_fail_break: int = 6
+    # 重复失败循环熔断：同一 (工具名, 归一化参数) 反复调用且均失败累计 N 次即终止，
+    # 兜底捕获「code_exec 装 Node → terminal_run 装 Node 被拦 → 再 code_exec…」式死循环
+    # （该循环成功/失败交替出现，连续失败计数会被成功调用清零，故需独立按签名累计）。
+    tool_cycle_break: int = 4
+    # 工具步骤硬上限（独立于 16 步循环上限）：即便异常步/工具组合也保证终止，防止失控。
+    max_tool_steps: int = 64
 
 
 @dataclass
