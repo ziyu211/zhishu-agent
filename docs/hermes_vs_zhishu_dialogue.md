@@ -4,7 +4,7 @@
 > 解释「为什么智枢处理起来比 Hermes 慢」，并说明本轮针对智枢的优化与反空转修复。
 >
 > 代码引用基于 `D:\data\hemers\hermes-agent` 与 `D:\data\hemers\hermes-web-ui`（`hermes-*`），
-> 以及 `D:\data\hemers\zhishu-agent`（智枢）截至 1.0.15 + 本轮反空转提交。
+> 以及 `D:\data\hemers\zhishu-agent`（智枢）截至 1.0.16 + 本轮反空转提交。
 
 ---
 
@@ -117,7 +117,7 @@ Prompt 缓存**（对标 Hermes `prompt_caching.py`，在稳定前缀挂 `cache_
 
 ---
 
-## 4. 本轮优化（智枢 1.0.15 + 反空转提交）
+## 4. 本轮优化（智枢 1.0.16 + 反空转提交）
 
 ### 4.1 叶子工具并发执行（对标 Hermes 分段并行）
 
