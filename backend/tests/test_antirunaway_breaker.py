@@ -238,6 +238,32 @@ async def test_parallel_normal():
     check("最终结论" in final_text, "最终回答正常产出")
 
 
+# ---------------------------------------------------------------------------
+# 用例 5：确定性拦截早停（Task #399）—— 同一命令被安全策略拦截，第 2 次即终止且回显原因
+# ---------------------------------------------------------------------------
+async def test_deterministic_block_early_stop():
+    print("\n[5] 确定性拦截早停：terminal_run 被白名单拦截，第 2 次即终止（不烧满 4 次）并回显原因")
+    cfg = ZhishuConfig()
+    cfg.agent.tool_fail_break = 100    # 排除连续失败路径干扰
+    cfg.agent.tool_cycle_break = 4
+    cfg.agent.max_tool_steps = 64
+    agent = _make_agent(cfg)
+
+    def rf(n):
+        # 每次参数完全相同 → 签名一致；被白名单拦截是确定性结果
+        return _tool_resp("terminal_run", {"command": "apt-get install -y nodejs"})
+
+    events = await _collect(agent, rf)
+    n_tool = _tool_result_count(events)
+    fired = _breaker_fired(events)
+    stop_text = " ".join(e.get("text", "") for e in events if e.get("type") == "token")
+    check(fired, "确定性拦截熔断被触发（done.note == anti-runaway breaker triggered）")
+    # 第 1 次被拦产出 tool_result；第 2 次被拦前即判定终止，不再产 tool_result
+    check(n_tool == 1, f"第 2 次被拦即终止（已产出工具步骤 {n_tool} == 1，而非烧满 4 次）")
+    check("确定性" in stop_text, "停止提示明确指出拦截为确定性结果")
+    check("安全策略" in stop_text and "原因" in stop_text, "停止提示回显拦截原因（白名单/开关/角色）")
+
+
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -245,6 +271,7 @@ def main():
     loop.run_until_complete(test_alternating_cycle())
     loop.run_until_complete(test_hard_cap())
     loop.run_until_complete(test_parallel_normal())
+    loop.run_until_complete(test_deterministic_block_early_stop())
     print(f"\n=== 通过 {PASS} / 失败 {len(FAIL)} ===")
     if FAIL:
         print("失败项:", FAIL)

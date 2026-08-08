@@ -624,6 +624,11 @@ class Agent:
         # 避免误伤正常任务中偶发的成功重复调用（如重复读取同一文件）。
         _breaker_sig: dict = {}
         _consec_fail = 0
+        # 确定性拦截（[已拦截]）独立按签名累计，阈值更低（2 次即终止）：
+        # 拦截是安全策略决定的确定性结果，重复相同调用必然再次被拦，无需烧满 tool_cycle_break。
+        _breaker_blocked: dict = {}
+        # 每个被拦签名仅注入一次「勿重试」系统提醒，引导模型改用其他命令/工具。
+        _blocked_nudged: set = set()
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
         # 仅按子智能体名去重（忽略 task 文本差异）——弱模型常把同一子智能体换个说法反复
         # 重派，若按 task 前缀去重会把「换汤不换药」的重派误判为新委派，导致 stall 计数永不
@@ -778,9 +783,14 @@ class Agent:
                         _sig_args = _sig_args[:400]
                     _sig = f"{name}\u0001{_sig_args}"
                     _is_fail = (result or "").startswith(("[工具错误]", "[工具执行异常]", "[已拦截]"))
+                    # 确定性拦截：安全策略（白名单 / allow_shell / 角色）拒绝，重复相同调用必再被拦
+                    _is_block = (result or "").startswith("[已拦截]")
+                    _block_reason = (result or "")[len("[已拦截]"):].strip() if _is_block else ""
                     if _is_fail:
                         _breaker_sig[_sig] = _breaker_sig.get(_sig, 0) + 1
                         _consec_fail += 1
+                        if _is_block:
+                            _breaker_blocked[_sig] = _breaker_blocked.get(_sig, 0) + 1
                     else:
                         _consec_fail = 0
                     # 收集本轮工具产出的 /media 下载链接，供最终回复护栏兜底
@@ -855,15 +865,27 @@ class Agent:
                             pass
                     tool_total += 1
                     traj_tools.append({"name": name, "args": args, "result": result[:300]})
-                    # ---- 反空转熔断判定（Task #395）：尽早终止失控循环，给出可理解提示 ----
-                    if _consec_fail >= self.cfg.agent.tool_fail_break:
+                    # ---- 反空转熔断判定（Task #395 / #399）：尽早终止失控循环，给出可理解提示 ----
+                    # 确定性拦截优先：同一命令重复被安全策略拦截，第 2 次即终止（不烧满
+                    # tool_cycle_break），并精确回显拦截原因，便于定位白名单/开关/角色问题。
+                    _block_cycle = min(2, self.cfg.agent.tool_cycle_break)
+                    if _is_block and _breaker_blocked.get(_sig, 0) >= _block_cycle:
+                        _stop = (f"检测到重复拦截循环：工具 `{name}` 因安全策略拦截"
+                                 f"（原因：{_block_reason or '未知'}）被反复调用，该拦截为"
+                                 f"**确定性**结果，重复调用必然再次被拦，已自动终止。"
+                                 f"请检查工具配置（security.allow_shell / "
+                                 f"shell_enforce_allowlist / shell_allowlist / 角色权限）"
+                                 f"或改用被允许的命令，必要时向用户说明该限制。")
+                    elif _consec_fail >= self.cfg.agent.tool_fail_break:
                         _stop = (f"任务执行受阻：已连续 {_consec_fail} 次工具调用失败"
                                  f"（如命令被白名单拦截、依赖缺失、权限不足），已自动终止以避免无效消耗。"
                                  f"请修正工具/环境或调整指令后重试。")
                     elif _is_fail and _breaker_sig.get(_sig, 0) >= self.cfg.agent.tool_cycle_break:
+                        _reason = _block_reason if (_is_block and _block_reason) else ""
                         _stop = (f"检测到重复失败循环：工具 `{name}` 以相同参数被反复调用且均失败"
-                                 f"（累计 {_breaker_sig[_sig]} 次），疑似陷入死循环，已自动终止。"
-                                 f"请检查任务目标或工具配置。")
+                                 f"（累计 {_breaker_sig[_sig]} 次）"
+                                 f"{('，原因：' + _reason) if _reason else ''}，"
+                                 f"疑似陷入死循环，已自动终止。请检查任务目标或工具配置。")
                     elif tool_total > self.cfg.agent.max_tool_steps:
                         _stop = (f"已达到工具步骤硬上限（{self.cfg.agent.max_tool_steps}），"
                                  f"已自动终止以避免资源耗尽。如需继续，可补充指令让任务延续。")
@@ -902,6 +924,21 @@ class Agent:
                         "tool_call_id": tc.get("id"),
                         "content": result,
                     })
+                    # 确定性拦截首触提醒：引导模型停止重试被拦命令，改用其他命令/工具，
+                    # 从源头消解「重复拦截循环」（与上方 2 次硬终止形成双保险）。
+                    if _is_block and _sig not in _blocked_nudged:
+                        _blocked_nudged.add(_sig)
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                f"[系统] 工具 `{name}` 的本次调用已被安全策略拦截"
+                                f"（原因：{_block_reason or '未知'}）。该拦截为**确定性**结果："
+                                f"以相同参数重复调用必然再次被拦，纯属浪费。请勿重试相同参数。"
+                                f"若必须完成目标，请改用其他被允许的命令/工具，或向用户说明该限制"
+                                f"并建议管理员调整 security.allow_shell / shell_enforce_allowlist /"
+                                f" shell_allowlist 或赋予相应角色权限。"
+                            ),
+                        })
                 continue
 
             # ---- 文本委派兜底（弱模型兼容）：模型没发 function call，而是把
