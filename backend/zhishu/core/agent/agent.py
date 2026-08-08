@@ -630,6 +630,9 @@ class Agent:
         # 重复成功循环（Task #399）：同一 (工具名, 归一化参数) 被反复调用且均成功返回，
         # 与失败计数解耦——正常任务偶发重读不触发，但反复 read_file 同一文档会在阈值内早停。
         _breaker_repeat: dict = {}
+        # 重复成功循环「停止重复」提醒去重：同一签名仅注入一次系统提醒，
+        # 后续命中只把工具结果替换为跳过提示，避免刷屏；运行不终止。
+        _repeat_nudged: set = set()
         # 每个被拦签名仅注入一次「勿重试」系统提醒，引导模型改用其他命令/工具。
         _blocked_nudged: set = set()
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
@@ -892,19 +895,34 @@ class Agent:
                                  f"（累计 {_breaker_sig[_sig]} 次）"
                                  f"{('，原因：' + _reason) if _reason else ''}，"
                                  f"疑似陷入死循环，已自动终止。请检查任务目标或工具配置。")
-                    elif (not _is_fail
-                          and _breaker_repeat.get(_sig, 0) >= self.cfg.agent.tool_repeat_break):
-                        # 纯成功重复循环（Task #399）：如反复 read_file 同一文档。无失败信号，
-                        # 原 tool_cycle_break 仅统计失败故漏判，直到 max_tool_steps 才停（代价过高）。
-                        # 按完整签名累计，读取不同文件/不同行范围不会误触发；阈值低，失控即止。
-                        _stop = (f"检测到重复读取/调用循环：工具 `{name}` 以完全相同参数被反复调用"
-                                 f"（累计 {_breaker_repeat[_sig]} 次，且均为成功返回），"
-                                 f"疑似在重复处理同一文件/数据而停滞，已自动终止。"
-                                 f"请改用以增量处理（分页/检索）替代整篇重读，或明确下一步目标"
-                                 f"（如「基于已读内容写结论」），避免无意义重复。")
                     elif tool_total > self.cfg.agent.max_tool_steps:
+                        # 工具步骤硬上限（最终兜底，置于重复循环判定之前，确保即便陷入重复循环
+                        # 也不会绕过此上限无限消耗资源）：达到即终止。
                         _stop = (f"已达到工具步骤硬上限（{self.cfg.agent.max_tool_steps}），"
                                  f"已自动终止以避免资源耗尽。如需继续，可补充指令让任务延续。")
+                    elif (not _is_fail
+                          and _breaker_repeat.get(_sig, 0) >= self.cfg.agent.tool_repeat_break):
+                        # 纯成功重复循环（Task #399）：如反复 read_file 同一文档 / 反复 todo 同一清单。
+                        # 不再整体终止运行——终止会把整个正常任务一并搞挂（用户实测 todo×8 即被掐断）。
+                        # 改为：跳过本次冗余结果、注入「停止重复 / 进入下一步」系统提醒，让智能体改用
+                        # 增量处理或直接给结论，运行继续；最终由 max_tool_steps 兜底，避免资源无限消耗。
+                        _redirect = (
+                            f"检测到重复读取/调用循环：工具 `{name}` 以完全相同参数被反复调用"
+                            f"（累计 {_breaker_repeat[_sig]} 次，且均为成功返回），结果无变化。\n"
+                            f"请停止重复调用：改用增量处理（分页/检索）替代整篇重读，或直接基于已得结果"
+                            f"给出下一步 / 结论，不要无意义重复同一调用。"
+                        )
+                        if _sig not in _repeat_nudged:
+                            _repeat_nudged.add(_sig)
+                            messages.append({
+                                "role": "system",
+                                "content": f"[系统] {_redirect}",
+                            })
+                        # 用「跳过重复执行」提示替换本次工具结果，阻断无意义重读/重列；
+                        # 不终止运行，模型可据此进入下一步。
+                        result = (f"[系统] 该调用与上一次结果完全相同，已为你跳过重复执行。"
+                                  f"请停止重复，按上述提示进入下一步或直接给出结论。")
+                        _stop = ""
                     else:
                         _stop = ""
                     if _stop:

@@ -271,12 +271,16 @@ async def test_deterministic_block_early_stop():
 #   阈值 8，使失控在 8 次内即止，且不误伤「读取不同文件/不同行范围」。
 # ---------------------------------------------------------------------------
 async def test_success_repeat_loop():
-    print("\n[6] 重复成功循环熔断：read_file 同一文档反复全成功调用，第 8 次即止（不止烧到 64）")
+    print("\n[6] 重复成功循环不再整体终止：read_file 同一文档反复全成功，第 8 次起转为「跳过+提醒」并继续运行")
     cfg = ZhishuConfig()
     cfg.agent.tool_fail_break = 100    # 排除连续失败/失败循环路径干扰
     cfg.agent.tool_cycle_break = 100
     cfg.agent.max_tool_steps = 64
+    cfg.agent.max_steps = 80           # 高于 max_tool_steps，确保终止器是工具步骤硬上限而非推理步上限
     cfg.agent.tool_repeat_break = 8
+    # 推理步上限来自模块常量 MAX_STEPS，临时抬高以便让工具步骤硬上限（max_tool_steps）成为实际终止器
+    _orig_max_steps = agent_mod.MAX_STEPS
+    agent_mod.MAX_STEPS = 80
     agent = _make_agent(cfg)
 
     def rf(n):
@@ -286,12 +290,15 @@ async def test_success_repeat_loop():
     events = await _collect(agent, rf)
     n_tool = _tool_result_count(events)
     fired = _breaker_fired(events)
-    stop_text = " ".join(e.get("text", "") for e in events if e.get("type") == "token")
-    check(fired, "重复成功循环熔断被触发（done.note == anti-runaway breaker triggered）")
-    # 调用 1..7 各产出 1 个 tool_result；第 8 次签名累计达阈值即终止，不再产出 tool_result
-    check(n_tool == 7, f"第 8 次重复即终止（已产出工具步骤 {n_tool} == 7，而非烧满 64）")
-    check("重复读取" in stop_text or "重复" in stop_text, "停止提示点明「重复读取/调用」式停滞")
-    check("停滞" in stop_text, "停止提示建议改用以增量处理替代整篇重读")
+    tool_texts = [e.get("result", "") for e in events if e.get("type") == "tool_result"]
+    final_text = " ".join(e.get("text", "") for e in events if e.get("type") == "token")
+    # 前 7 次为正常执行结果；第 8 次起被替换为「跳过重复执行」提示，循环被打破而不终止整轮
+    check(tool_texts[:7] == ["ok"] * 7, "前 7 次重复调用仍正常执行并返回结果")
+    check(any("已为你跳过重复执行" in t for t in tool_texts), "达阈值后转为「跳过重复执行」提示，重复循环被打破")
+    # 关键回归：纯成功重复不再在 8 步就把整个任务掐断——运行继续，直到工具步骤硬上限兜底
+    check(n_tool == 64, f"运行未被重复熔断提前掐断（产出 {n_tool} 个工具步骤，直至 max_tool_steps 兜底，而非 7）")
+    check(fired, "最终仍由工具步骤硬上限兜底终止（防止资源无限消耗）")
+    check("已达到工具步骤硬上限" in final_text, "终止原因为硬上限（而非重复循环整体终止）")
 
     # 反向用例：读取不同文件 / 不同行范围不应误触发重复熔断
     print("\n[6b] 反向：read_file 读取不同文件不应误触重复熔断")
