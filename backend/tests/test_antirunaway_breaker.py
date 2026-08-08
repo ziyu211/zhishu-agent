@@ -264,6 +264,59 @@ async def test_deterministic_block_early_stop():
     check("安全策略" in stop_text and "原因" in stop_text, "停止提示回显拦截原因（白名单/开关/角色）")
 
 
+# ---------------------------------------------------------------------------
+# 用例 6：重复成功循环熔断（Task #399）—— 反复 read_file 同一文档（全成功，无失败信号）
+#   这是用户实测踩到的「65 次 read_file 同一文档」失控：原熔断仅统计失败，故一路烧到
+#   max_tool_steps(64) 才停；新增 tool_repeat_break 按完整签名(含参数)累计成功重复调用，
+#   阈值 8，使失控在 8 次内即止，且不误伤「读取不同文件/不同行范围」。
+# ---------------------------------------------------------------------------
+async def test_success_repeat_loop():
+    print("\n[6] 重复成功循环熔断：read_file 同一文档反复全成功调用，第 8 次即止（不止烧到 64）")
+    cfg = ZhishuConfig()
+    cfg.agent.tool_fail_break = 100    # 排除连续失败/失败循环路径干扰
+    cfg.agent.tool_cycle_break = 100
+    cfg.agent.max_tool_steps = 64
+    cfg.agent.tool_repeat_break = 8
+    agent = _make_agent(cfg)
+
+    def rf(n):
+        # 每次参数完全相同 → 签名一致；结果恒为成功（"ok"），无任何失败信号
+        return _tool_resp("read_file", {"path": "/data/分析文档.md"})
+
+    events = await _collect(agent, rf)
+    n_tool = _tool_result_count(events)
+    fired = _breaker_fired(events)
+    stop_text = " ".join(e.get("text", "") for e in events if e.get("type") == "token")
+    check(fired, "重复成功循环熔断被触发（done.note == anti-runaway breaker triggered）")
+    # 调用 1..7 各产出 1 个 tool_result；第 8 次签名累计达阈值即终止，不再产出 tool_result
+    check(n_tool == 7, f"第 8 次重复即终止（已产出工具步骤 {n_tool} == 7，而非烧满 64）")
+    check("重复读取" in stop_text or "重复" in stop_text, "停止提示点明「重复读取/调用」式停滞")
+    check("停滞" in stop_text, "停止提示建议改用以增量处理替代整篇重读")
+
+    # 反向用例：读取不同文件 / 不同行范围不应误触发重复熔断
+    print("\n[6b] 反向：read_file 读取不同文件不应误触重复熔断")
+    cfg2 = ZhishuConfig()
+    cfg2.agent.tool_fail_break = 100
+    cfg2.agent.tool_cycle_break = 100
+    cfg2.agent.max_tool_steps = 12   # 缩小硬上限以便快速结束正常任务
+    cfg2.agent.tool_repeat_break = 8
+    agent2 = _make_agent(cfg2)
+
+    def rf2(n):
+        # 每次读不同文件 → 签名各异；最终以文本收尾
+        if n < 10:
+            return _tool_resp("read_file", {"path": f"/data/doc-{n}.md"})
+        return _text_resp("已汇总各文档要点，这是结论。")
+
+    events2 = await _collect(agent2, rf2)
+    n_tool2 = _tool_result_count(events2)
+    fired2 = _breaker_fired(events2)
+    final2 = " ".join(e.get("text", "") for e in events2 if e.get("type") == "token")
+    check(not fired2, "正常读取不同文件不误触重复熔断")
+    check(n_tool2 == 10, f"10 个不同文件均被正常读取（实际 {n_tool2}）")
+    check("结论" in final2, "正常多文件任务可产出结论")
+
+
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -272,6 +325,7 @@ def main():
     loop.run_until_complete(test_hard_cap())
     loop.run_until_complete(test_parallel_normal())
     loop.run_until_complete(test_deterministic_block_early_stop())
+    loop.run_until_complete(test_success_repeat_loop())
     print(f"\n=== 通过 {PASS} / 失败 {len(FAIL)} ===")
     if FAIL:
         print("失败项:", FAIL)

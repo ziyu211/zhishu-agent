@@ -627,6 +627,9 @@ class Agent:
         # 确定性拦截（[已拦截]）独立按签名累计，阈值更低（2 次即终止）：
         # 拦截是安全策略决定的确定性结果，重复相同调用必然再次被拦，无需烧满 tool_cycle_break。
         _breaker_blocked: dict = {}
+        # 重复成功循环（Task #399）：同一 (工具名, 归一化参数) 被反复调用且均成功返回，
+        # 与失败计数解耦——正常任务偶发重读不触发，但反复 read_file 同一文档会在阈值内早停。
+        _breaker_repeat: dict = {}
         # 每个被拦签名仅注入一次「勿重试」系统提醒，引导模型改用其他命令/工具。
         _blocked_nudged: set = set()
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
@@ -782,6 +785,9 @@ class Agent:
                     if len(_sig_args) > 400:
                         _sig_args = _sig_args[:400]
                     _sig = f"{name}\u0001{_sig_args}"
+                    # 重复成功循环（Task #399）：无论成功失败，按完整签名累计相同调用次数，
+                    # 专门捕获「反复 read_file 同一文档」式纯成功停滞（无失败、连续失败计数为 0）。
+                    _breaker_repeat[_sig] = _breaker_repeat.get(_sig, 0) + 1
                     _is_fail = (result or "").startswith(("[工具错误]", "[工具执行异常]", "[已拦截]"))
                     # 确定性拦截：安全策略（白名单 / allow_shell / 角色）拒绝，重复相同调用必再被拦
                     _is_block = (result or "").startswith("[已拦截]")
@@ -886,6 +892,16 @@ class Agent:
                                  f"（累计 {_breaker_sig[_sig]} 次）"
                                  f"{('，原因：' + _reason) if _reason else ''}，"
                                  f"疑似陷入死循环，已自动终止。请检查任务目标或工具配置。")
+                    elif (not _is_fail
+                          and _breaker_repeat.get(_sig, 0) >= self.cfg.agent.tool_repeat_break):
+                        # 纯成功重复循环（Task #399）：如反复 read_file 同一文档。无失败信号，
+                        # 原 tool_cycle_break 仅统计失败故漏判，直到 max_tool_steps 才停（代价过高）。
+                        # 按完整签名累计，读取不同文件/不同行范围不会误触发；阈值低，失控即止。
+                        _stop = (f"检测到重复读取/调用循环：工具 `{name}` 以完全相同参数被反复调用"
+                                 f"（累计 {_breaker_repeat[_sig]} 次，且均为成功返回），"
+                                 f"疑似在重复处理同一文件/数据而停滞，已自动终止。"
+                                 f"请改用以增量处理（分页/检索）替代整篇重读，或明确下一步目标"
+                                 f"（如「基于已读内容写结论」），避免无意义重复。")
                     elif tool_total > self.cfg.agent.max_tool_steps:
                         _stop = (f"已达到工具步骤硬上限（{self.cfg.agent.max_tool_steps}），"
                                  f"已自动终止以避免资源耗尽。如需继续，可补充指令让任务延续。")

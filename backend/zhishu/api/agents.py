@@ -166,6 +166,21 @@ async def update_agent(name: str, body: AgentUpdate, user=require_auth("agents:w
 async def remove_agent(name: str, user=require_auth("agents:write")):
     _guard_edit(name, user)
     delete_agent(name)
+    # 闭环修复 Task #399：清理其它智能体 sub_agents 中对本体的失效引用，避免删除成员后
+    # 协调者的 sub_agents 仍含其名（覆盖度闸门推断失真、可能误判已覆盖/漏派）。
+    base = _agents_base()
+    if os.path.isdir(base):
+        for other in sorted(os.listdir(base)):
+            if other == name or not os.path.isdir(os.path.join(base, other)):
+                continue
+            try:
+                meta = read_agent_meta(other)
+                subs = meta.get("sub_agents") or []
+                if name in subs:
+                    meta["sub_agents"] = [s for s in subs if s != name]
+                    write_agent_meta(other, meta)
+            except Exception:
+                continue
     return {"ok": True, "name": name}
 
 

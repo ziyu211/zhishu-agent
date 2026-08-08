@@ -275,6 +275,12 @@ class AgentConfig:
     tool_cycle_break: int = 4
     # 工具步骤硬上限（独立于 16 步循环上限）：即便异常步/工具组合也保证终止，防止失控。
     max_tool_steps: int = 64
+    # 重复成功循环熔断（Task #399）：同一 (工具名, 归一化参数) 被反复调用且**均成功返回**
+    # 累计 N 次即终止，专门捕获「反复 read_file 同一文档 / 反复调用同一只读工具」式停滞——
+    # 这类循环无失败、连续失败计数为 0，原 tool_cycle_break 仅统计失败故无法捕获，直到
+    # max_tool_steps 才停（代价过高）。阈值远低于 max_tool_steps，使失控在 8 次内即止；
+    # 按完整签名(含参数)累计，读取不同文件/不同行范围不会误触发。
+    tool_repeat_break: int = 8
     # ---- Prompt 缓存（对标 Hermes prompt_caching.py，Task #398，opt-in，默认 auto）----
     # 把「稳定前缀（身份/指令/工具定义）」与「易变内容（检索结果、当前轮输入）」用
     # cache_control 断点隔开，使 Provider 的 KV 前缀缓存命中，缩短多步推理的重复前缀耗时。

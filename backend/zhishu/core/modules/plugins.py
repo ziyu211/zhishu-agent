@@ -8,12 +8,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from typing import Optional
 
 from ..tools import ToolRegistry, Tool
 from .runtime import load_state, read_meta, DISABLED_KEY
+
+logger = logging.getLogger("zhishu.plugins")
 
 
 def _substitute(template: str, args: dict) -> str:
@@ -113,21 +116,26 @@ def register_plugin_tools() -> int:
         d = os.path.join(root, name)
         if not os.path.isdir(d) or name in disabled:
             continue
-        meta = read_meta("plugins", name)
-        if meta.get("enabled") is False:
-            continue
-        for t in (meta.get("tools") or []):
-            tname = t.get("name")
-            if not tname:
+        # 单插件注册失败隔离（闭环修复 Task #399）：一个坏插件（元信息缺字段 / handler
+        # 构造异常）不得拖垮其余插件注册，也不得让上层拿到「假成功」——记录日志后可观测。
+        try:
+            meta = read_meta("plugins", name)
+            if meta.get("enabled") is False:
                 continue
-            spec = _plugin_schema(name, t)
-            fn = spec["function"]
-            ToolRegistry.register(Tool(
-                name=fn["name"],
-                description=fn["description"],
-                parameters=fn["parameters"],
-                handler=_make_plugin_handler(name, t),
-                toolset="plugin",
-            ))
-            count += 1
+            for t in (meta.get("tools") or []):
+                tname = t.get("name")
+                if not tname:
+                    continue
+                spec = _plugin_schema(name, t)
+                fn = spec["function"]
+                ToolRegistry.register(Tool(
+                    name=fn["name"],
+                    description=fn["description"],
+                    parameters=fn["parameters"],
+                    handler=_make_plugin_handler(name, t),
+                    toolset="plugin",
+                ))
+                count += 1
+        except Exception as e:
+            logger.error("[plugins] 注册插件 %s 失败，已跳过（其余插件不受影响）：%s", name, e)
     return count

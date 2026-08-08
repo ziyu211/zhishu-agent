@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 from typing import Any, Optional
+
+logger = logging.getLogger("zhishu.modules")
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
@@ -144,8 +147,10 @@ def _sync_plugins():
     使模块改动立即生效，无需手动『刷新』或重启。"""
     try:
         register_plugin_tools()
-    except Exception:
-        pass
+    except Exception as e:
+        # 注册异常已被 register_plugin_tools 内部按插件隔离，正常不应触达此处；
+        # 若触达（如 ToolRegistry 自身异常）则记录日志而非静默吞掉，避免「假成功」不可观测。
+        logger.error("[modules] 插件工具注册异常（已隔离，不影响其余功能）：%s", e)
 
 
 class _ToggleBody(BaseModel):
@@ -451,6 +456,9 @@ async def install_plugin(body: PluginInstallBody, user=require_auth("modules:wri
         result = parsers.install_plugin(body.name, body.descriptor)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # 闭环修复 Task #399：安装后立即注册工具，免重启即生效（此前仅写入 module.json，
+    # 须重启或手动 /plugins/refresh 工具才可用，造成「安装成功但用不了」的开环）。
+    _sync_plugins()
     return result
 
 

@@ -154,6 +154,7 @@
   - 重复签名循环：同一 `(工具名, 归一化参数)` 失败累计 `tool_cycle_break`（默认 4）次即终止，兜底「成功/失败交替」式死循环（如 `code_exec` 装依赖成功、`terminal_run` 装依赖被白名单拦截反复出现）；
     - **确定性拦截优先（Task #399）**：`[已拦截]` 为安全策略（白名单 / `allow_shell` / 角色）决定的必败结果，重复相同调用必然再次被拦，故仅 **2 次**即提前终止并回显拦截原因（白名单/开关/角色），避免把额度浪费在注定失败的调用上；同时在首次拦截时向模型注入「勿重试」系统提醒，引导其改用其他命令/工具。
   - 工具步骤硬上限：`max_tool_steps`（默认 64）独立于 16 步循环上限，保证终止。
+  - **重复成功循环熔断（Task #399）**：原熔断仅统计**失败**，故「反复 `read_file` 同一文档 / 反复调用同一只读工具」这类**全成功**停滞（连续失败计数为 0）会一路烧到 `max_tool_steps` 才停。新增 `_breaker_repeat` 按完整签名 `(工具名, 归一化参数)` 累计**成功**重复调用，达 `tool_repeat_break`（默认 8）即终止并提示「改用以增量处理（分页/检索）替代整篇重读」。阈值远低于 64，使失控在 8 次内即止；读取不同文件 / 不同行范围签名不同，不会误触发。
   - 失败判定含 `[已拦截]`（白名单拦截 apt-get 等），终止时给出可读中文提示而非静默结束。
 - **Provider 门控的 Prompt 缓存**：在 `LLMClient._prepare` 完成 sanitize 后注入缓存标记，使 Provider KV 前缀缓存命中，缩短多步推理的重复前缀耗时：
   - `anthropic`/`claude`：system 末块 + 末 tool 挂 `cache_control`；
@@ -265,9 +266,9 @@ cd backend && python start_backend.py
 | `embedding` | `backend` / `embed_model` / `fallback_hash` | 网络端点或本地；未配置降级哈希向量 |
 | `security` | `secret` / `admin_password` / `enable_auth` / `outbound_allow` / `enable_sm` / `allow_private_fetch` | 签名密钥（**必改**）、出网开关、国密开关、SSRF 放行开关 |
 | `web_search` | `backend` | bing_cn / duckduckgo / tavily / bing |
-| `agent` | `nudge_interval` / `reflection_enabled` / `skills_auto_learn` / `parallel_tools` / `parallel_tool_workers` / `tool_fail_break` / `tool_cycle_break` / `max_tool_steps` / `prompt_cache` | 自进化开关 + 推理循环优化（叶子并发 / 三级熔断 / Prompt 缓存，均默认开启或 `auto`） |
+| `agent` | `nudge_interval` / `reflection_enabled` / `skills_auto_learn` / `parallel_tools` / `parallel_tool_workers` / `tool_fail_break` / `tool_cycle_break` / `tool_repeat_break` / `max_tool_steps` / `prompt_cache` | 自进化开关 + 推理循环优化（叶子并发 / 三级熔断 / **重复成功循环熔断** / Prompt 缓存，均默认开启或 `auto`） |
 | `cron` | — | 定时任务调度配置 |
-| `memory` | `vector_enabled` 等 | 长期记忆（语义检索需配置 Embedding，无则优雅降级） |
+| `memory` | `vector_enabled` 等 | 长期记忆。开关仅控制**向量语义召回**（跨会话沉淀/检索需配置 Embedding，无则优雅降级为 None）；文件式记忆（`MEMORY.md`/`USER.md`/`SOUL.md` 与 `memory` 工具）属知识沉淀层，始终生效，不受此开关影响 |
 
 完整字段见 `deploy/zhishu.yaml.example`；运行时覆盖项落盘 `data/config.override.json`（设置页）。
 

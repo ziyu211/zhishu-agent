@@ -137,11 +137,30 @@ class AppContext:
         仅持久化本请求涉及的组，避免互相覆盖。security 组的 enable_audit /
         enable_redact 会同步到已构建的审计/脱敏器，做到免重启生效。
         """
+        warnings: list = []
         if "memory" in patch:
             self._apply_memory_cfg(patch["memory"] or {})
         if "security" in patch:
             self._apply_security_cfg(patch["security"] or {})
             self._apply_security_live()
+        # 重建记忆管理器（仅 memory 变更时；向量开关立即生效，无 embedding 后端时优雅降级为 None）
+        # 必须在持久化之前完成：若初始化失败则回滚 vector_enabled，使下方持久化的 override
+        # 与内存真实状态一致，避免在「假成功」后又被重启重新套用失效配置（闭环修复 Task #399）。
+        if "memory" in patch:
+            try:
+                new_mm = MemoryManager(
+                    self.cfg, self.cfg.server.data_dir, builtin_store=self.memory
+                )
+                await new_mm.initialize()
+                self.memory_manager = new_mm
+            except Exception as e:
+                # 重建失败不得静默吞掉——否则接口返回「已开启」而实际向量记忆后端并未接上
+                # （如未配置 Embedding 模型），形成「假成功」开环。回滚并附 warnings 提示根因。
+                self.cfg.memory.vector_enabled = False
+                warnings.append(
+                    f"向量记忆后端初始化失败（长期记忆未能开启）：{e}。"
+                    f"请先在 Provider 中配置可用的 Embedding 模型后重试。"
+                )
         # 持久化覆盖（合并已有 override，仅更新被本请求涉及的组；重启后由 _apply_override 复现）
         try:
             ov: dict = {}
@@ -163,16 +182,6 @@ class AppContext:
                 json.dump(ov, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
-        # 重建记忆管理器（仅 memory 变更时；向量开关立即生效，无 embedding 后端时优雅降级为 None）
-        if "memory" in patch:
-            try:
-                new_mm = MemoryManager(
-                    self.cfg, self.cfg.server.data_dir, builtin_store=self.memory
-                )
-                await new_mm.initialize()
-                self.memory_manager = new_mm
-            except Exception:
-                pass
         return {
             "memory": {
                 "vector_enabled": self.cfg.memory.vector_enabled,
@@ -182,6 +191,7 @@ class AppContext:
                 k: getattr(self.cfg.security, k)
                 for k in self._SECURITY_OVERRIDE_FIELDS
             },
+            "warnings": warnings,
         }
 
     def build_agent(self, owner: str | None = None) -> "Agent":
