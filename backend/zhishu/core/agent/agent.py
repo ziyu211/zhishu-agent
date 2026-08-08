@@ -49,7 +49,7 @@ from .context_engine import NoOpContextEngine, ContextEngine, CompressionContext
 from ..modules.skills import maybe_learn, maybe_reflect
 from .. import image_routing
 
-MAX_STEPS = 16
+MAX_STEPS = 90  # 默认迭代预算（对齐 Hermes 父 Agent）；run() 优先用 cfg.agent.max_steps
 
 # ---------------------------------------------------------------------------
 # 文本委派解析（弱模型兼容层）
@@ -523,15 +523,16 @@ class Agent:
         # 工具集：子智能体按 tools 字段裁剪；主管使用全部（含委派工具）。
         # 多用户隔离：plugin__/mcp__ 工具按归属过滤（共享 + 本人；admin 全量），
         # 防止 A 用户的 Agent 调用 B 用户的私有插件/MCP 工具。
+        _base_max = self.cfg.agent.max_steps or MAX_STEPS
         if agent_name:
             specs = resolve_tools(get_agent_meta(agent_name).get("tools", "all"),
                                   username=owner, is_admin=is_admin, user_role=user_role)
             if not can_delegate:
                 specs = [s for s in specs if s["function"]["name"] != DELEGATE_TOOL_NAME]
             try:
-                max_steps = int(get_agent_meta(agent_name).get("max_steps") or MAX_STEPS)
+                max_steps = int(get_agent_meta(agent_name).get("max_steps") or _base_max)
             except (TypeError, ValueError):
-                max_steps = MAX_STEPS
+                max_steps = _base_max
         else:
             specs = filter_tool_specs(ToolRegistry.specs(), owner, is_admin, user_role)
             if not can_delegate:
@@ -564,7 +565,7 @@ class Agent:
                 specs = [s for s in specs
                          if s["function"]["name"] not in
                          {"delegate_to_agent", "create_team"}]
-            max_steps = MAX_STEPS
+            max_steps = _base_max
 
         # ---- MoA 多智能体 facade：把单轮对话路由到并行聚合 ----
         if pc is not None and getattr(pc, "mode", "") == "moa":
@@ -624,17 +625,23 @@ class Agent:
         # 避免误伤正常任务中偶发的成功重复调用（如重复读取同一文件）。
         _breaker_sig: dict = {}
         _consec_fail = 0
-        # 确定性拦截（[已拦截]）独立按签名累计，阈值更低（2 次即终止）：
-        # 拦截是安全策略决定的确定性结果，重复相同调用必然再次被拦，无需烧满 tool_cycle_break。
+        # 确定性拦截（[已拦截]）按签名累计（仅用于统计/可观测，不再据此硬终止——
+        # 拦截是确定性结果，重复必再被拦，但任务不再被杀，改由 max_steps 预算兜底 + 首触提醒）。
         _breaker_blocked: dict = {}
         # 重复成功循环（Task #399）：同一 (工具名, 归一化参数) 被反复调用且均成功返回，
-        # 与失败计数解耦——正常任务偶发重读不触发，但反复 read_file 同一文档会在阈值内早停。
+        # 与失败计数解耦——正常任务偶发重读不触发，但反复 read_file 同一文档会在阈值内转为跳过。
         _breaker_repeat: dict = {}
         # 重复成功循环「停止重复」提醒去重：同一签名仅注入一次系统提醒，
         # 后续命中只把工具结果替换为跳过提示，避免刷屏；运行不终止。
         _repeat_nudged: set = set()
         # 每个被拦签名仅注入一次「勿重试」系统提醒，引导模型改用其他命令/工具。
         _blocked_nudged: set = set()
+        # 连续失败 / 工具步数接近上限 的「软提醒」去重集合（仅注入一次系统提醒，不终止）。
+        _fail_nudged: set = set()
+        _toolcap_nudged: set = set()
+        # 收尾提醒（grace call，对标 Hermes _budget_grace_call）去重：预算耗尽前仅注入一次，
+        # 提示 Agent 给出最终结论而非半路被截断。
+        _finalize_nudged: bool = False
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
         # 仅按子智能体名去重（忽略 task 文本差异）——弱模型常把同一子智能体换个说法反复
         # 重派，若按 task 前缀去重会把「换汤不换药」的重派误判为新委派，导致 stall 计数永不
@@ -661,6 +668,18 @@ class Agent:
         _sup_nudges = 0
         for step in range(max_steps):
             _did_delegate_this_step = False  # 本轮是否实际产生了委派
+            # 收尾提醒（grace call，对标 Hermes _budget_grace_call）：预算接近耗尽时仅注入一次，
+            # 提示 Agent 停止发起新工具调用、基于已有结果给出最终结论，避免在半路被截断。
+            if step >= max_steps - 2 and not _finalize_nudged:
+                _finalize_nudged = True
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[系统] 你已接近推理步数上限（上限 {max_steps}）。这是最后几次机会："
+                        f"请停止发起新的工具调用或新任务，基于已有结果直接给出最终结论/交付物。"
+                        f"若确实还需一步工具，请尽快完成并立刻总结。"
+                    ),
+                })
             # 协调类智能体第一轮强制调用工具：tool_choice="required" 确保模型
             # 必须输出至少一次 function call（delegate_to_agent），避免其只输出计划文字。
             # 但弱模型（glm/sensenova 等）的并行 function-call 不可靠（重复/漏派），
@@ -882,48 +901,42 @@ class Agent:
                             pass
                     tool_total += 1
                     traj_tools.append({"name": name, "args": args, "result": result[:300]})
-                    # ---- 反空转熔断判定（Task #395 / #399）：尽早终止失控循环，给出可理解提示 ----
-                    # 确定性拦截优先：同一命令重复被安全策略拦截，第 2 次即终止（不烧满
-                    # tool_cycle_break），并精确回显拦截原因，便于定位白名单/开关/角色问题。
-                    _block_cycle = min(2, self.cfg.agent.tool_cycle_break)
-                    if _is_block and _breaker_blocked.get(_sig, 0) >= _block_cycle:
-                        if _is_syntax_err:
-                            # 命令本身的语法/结构错误（如引号未闭合）：与 security 配置无关，
-                            # 重复相同坏命令必然再被拦，终止并告知修正命令而非调安全策略。
-                            _stop = (f"检测到重复拦截循环：工具 `{name}` 的调用被命令解析器拦截"
-                                     f"（原因：{_block_reason or '未知'}）。这是**命令本身的"
-                                     f"语法/结构问题**（如引号未闭合），与 security.allow_shell / "
-                                     f"shell_allowlist / 角色权限等配置无关；重复相同命令必然再次被拦，"
-                                     f"已自动终止。请修正命令后重试（例如补全引号、避免裸命令替换"
-                                     f"`$( )`/反引号），或改用其他工具完成任务。")
-                        else:
-                            _stop = (f"检测到重复拦截循环：工具 `{name}` 因安全策略拦截"
-                                     f"（原因：{_block_reason or '未知'}）被反复调用，该拦截为"
-                                     f"**确定性**结果，重复调用必然再次被拦，已自动终止。"
-                                     f"请检查工具配置（security.allow_shell / "
-                                     f"shell_enforce_allowlist / shell_allowlist / 角色权限）"
-                                     f"或改用被允许的命令，必要时向用户说明该限制。")
-                    elif _consec_fail >= self.cfg.agent.tool_fail_break:
-                        _stop = (f"任务执行受阻：已连续 {_consec_fail} 次工具调用失败"
-                                 f"（如命令被白名单拦截、依赖缺失、权限不足），已自动终止以避免无效消耗。"
-                                 f"请修正工具/环境或调整指令后重试。")
-                    elif _is_fail and _breaker_sig.get(_sig, 0) >= self.cfg.agent.tool_cycle_break:
-                        _reason = _block_reason if (_is_block and _block_reason) else ""
-                        _stop = (f"检测到重复失败循环：工具 `{name}` 以相同参数被反复调用且均失败"
-                                 f"（累计 {_breaker_sig[_sig]} 次）"
-                                 f"{('，原因：' + _reason) if _reason else ''}，"
-                                 f"疑似陷入死循环，已自动终止。请检查任务目标或工具配置。")
-                    elif tool_total > self.cfg.agent.max_tool_steps:
-                        # 工具步骤硬上限（最终兜底，置于重复循环判定之前，确保即便陷入重复循环
-                        # 也不会绕过此上限无限消耗资源）：达到即终止。
-                        _stop = (f"已达到工具步骤硬上限（{self.cfg.agent.max_tool_steps}），"
-                                 f"已自动终止以避免资源耗尽。如需继续，可补充指令让任务延续。")
-                    elif (not _is_fail
-                          and _breaker_repeat.get(_sig, 0) >= self.cfg.agent.tool_repeat_break):
-                        # 纯成功重复循环（Task #399）：如反复 read_file 同一文档 / 反复 todo 同一清单。
-                        # 不再整体终止运行——终止会把整个正常任务一并搞挂（用户实测 todo×8 即被掐断）。
-                        # 改为：跳过本次冗余结果、注入「停止重复 / 进入下一步」系统提醒，让智能体改用
-                        # 增量处理或直接给结论，运行继续；最终由 max_tool_steps 兜底，避免资源无限消耗。
+                    # ---- 反空转护栏（对标 Hermes IterationBudget：预算内自由运行，不硬杀任务）----
+                    # 设计哲学：运行在「迭代预算」(max_steps，默认 90，对齐 Hermes 父 Agent) 内自由
+                    # 推进；无论重复调用、失败循环还是确定性拦截，均**不再整体硬终止**任务——改为注入
+                    # 系统提醒并计入预算，由 max_steps 统一兜底；预算耗尽前注入「收尾」提醒（grace
+                    # call），确保 Agent 能给出最终结论而非半路被杀。这是对「用户实测 todo×8 被掐断 /
+                    # terminal_run 确定性拦截被掐断」两类误杀的根本修正。
+                    # 确定性拦截首触提醒（_blocked_nudged）见下方；此处补「连续失败 / 工具步数接近上限」
+                    # 两类软提醒。纯成功重复循环的「跳过+提醒」沿用 Task #399 逻辑。
+                    # —— 连续失败 / 重复失败循环：软提醒，不终止 ——
+                    if _is_fail and _sig not in _fail_nudged:
+                        _fail_nudged.add(_sig)
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                f"[系统] 工具 `{name}` 已连续/重复失败（累计 "
+                                f"{_breaker_sig.get(_sig, 0)} 次）。请停止无意义重试："
+                                f"改用其他命令/工具、修正参数，或直接向用户说明该障碍。"
+                            ),
+                        })
+                    # —— 工具步数接近软上限：提醒收尾，不终止 ——
+                    if tool_total > self.cfg.agent.max_tool_steps and _sig not in _toolcap_nudged:
+                        _toolcap_nudged.add(_sig)
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                f"[系统] 工具步骤已接近上限（{self.cfg.agent.max_tool_steps}），"
+                                f"请尽快停止发起新工具调用，并基于已有结果给出最终结论/交付物。"
+                            ),
+                        })
+                    # —— 纯成功重复循环（Task #399，保留）：跳过冗余执行 + 收尾提醒，不终止 ——
+                    if (not _is_fail
+                            and _breaker_repeat.get(_sig, 0) >= self.cfg.agent.tool_repeat_break):
+                        # 如反复 read_file 同一文档 / 反复 todo 同一清单。不再整体终止运行——
+                        # 终止会把整个正常任务一并搞挂（用户实测 todo×8 即被掐断）。改为：跳过本次
+                        # 冗余结果、注入「停止重复 / 进入下一步」系统提醒，让智能体改用增量处理或直接
+                        # 给结论，运行继续；最终由 max_steps 迭代预算兜底，避免资源无限消耗。
                         _redirect = (
                             f"检测到重复读取/调用循环：工具 `{name}` 以完全相同参数被反复调用"
                             f"（累计 {_breaker_repeat[_sig]} 次，且均为成功返回），结果无变化。\n"
@@ -940,9 +953,8 @@ class Agent:
                         # 不终止运行，模型可据此进入下一步。
                         result = (f"[系统] 该调用与上一次结果完全相同，已为你跳过重复执行。"
                                   f"请停止重复，按上述提示进入下一步或直接给出结论。")
-                        _stop = ""
-                    else:
-                        _stop = ""
+                    # 所有分支均不硬终止：运行继续，由 max_steps 迭代预算统一兜底。
+                    _stop = ""
                     if _stop:
                         yield {"type": "token", "text": _stop}
                         if self.memory:
@@ -1336,13 +1348,14 @@ class Agent:
             yield {"type": "done"}
             return
 
-        # 达最大步数退出：若已执行工具，给出轨迹摘要而非静默 done（前端通常不展示 note）
+        # 达迭代预算退出（对标 Hermes 预算耗尽：不再「已自动终止」，而是温和收尾，
+        # 把已执行的轨迹摘要回给用户，任务以「已为你收尾」方式结束而非被掐断）。
         if tool_total > 0:
             bits = [f"- {t['name']}: {t['result'][:160]}" for t in traj_tools[-3:]]
             summary = (
-                f"已达到最大推理步数（{max_steps}），本次已执行 {tool_total} 个工具步骤：\n"
+                f"已抵达推理步数上限（{max_steps}），本次共执行 {tool_total} 个工具步骤，已为你收尾：\n"
                 + "\n".join(bits)
-                + "\n\n如需继续，可补充指令让任务延续。"
+                + "\n\n（如需继续，可补充指令让任务延续。）"
             )
             _roster = getattr(self, "_team_roster_preface", "")
             if _roster:
@@ -1351,7 +1364,7 @@ class Agent:
             yield {"type": "token", "text": summary}
             if self.memory:
                 self.memory.append(session, "assistant", summary)
-        yield {"type": "done", "note": f"已达到最大推理步数({max_steps})"}
+        yield {"type": "done", "note": f"iteration budget reached({max_steps})"}
 
     # =====================================================================
     # 多模态附件组装（对标 Hermes 图片 / PDF 处理，零 OCR）
