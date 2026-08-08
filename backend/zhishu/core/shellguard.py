@@ -8,8 +8,9 @@
   * `terminal_run` 工具同样只有角色门（operator+）没有命令门。
 
 本模块提供三件事，两处调用点复用同一套策略：
-  1. `check_command()` —— 拒绝清单（毁灭性/提权/外传）+ 可执行文件白名单（按
-     `; && || | &` 切段逐段校验首个 token），并禁止命令替换以防绕过白名单。
+  1. `check_command()` —— 拒绝清单（毁灭性/提权/外传，对完整命令文本检查）+ 可执行
+     文件白名单（引号感知切段 + 剥离 heredoc 体后，逐段校验首个 token），并禁止命令替换
+     以防绕过白名单。引号内的 ; & | \n 与 heredoc 正文不再被误判为命令分隔符。
   2. `sandbox_env()`   —— 最小化环境变量，剔除一切密钥类变量，杜绝 `env` 外传。
   3. `run_guarded()`   —— 独立进程组 + 超时整组击杀 + POSIX rlimit（CPU/内存/文件
      大小/进程数）+ 输出截断的统一执行入口。
@@ -87,8 +88,9 @@ _DENY_COMPILED = tuple((re.compile(p, re.IGNORECASE), why) for p, why in _DENY_R
 # 命令替换 / 进程替换：能把任意程序塞进白名单命令的参数里，直接禁用
 _SUBSTITUTION = re.compile(r"\$\(|`|<\(|>\(|\$\{[^}]*\|")
 
-# 段分隔符：按 shell 控制算符切分，逐段校验首个 token
-_SEGMENT_SPLIT = re.compile(r"\|\||&&|[;\n|&]")
+# 段切分交由 `_split_segments`（引号感知）+ `_strip_heredocs`（剥离 heredoc 体）
+# 处理，避免多行脚本 / 引号内 ; & | \n 被误判为命令分隔符（原 `_SEGMENT_SPLIT`
+# 裸切段会把 `python3 -c "a; b"` 拆断、把 heredoc 正文逐行当命令，误杀合法脚本）。
 
 # 环境变量前缀赋值（FOO=bar cmd）—— 会被 shell 用来改 PATH/LD_PRELOAD 后再调白名单命令
 _ENV_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -113,6 +115,88 @@ def _base_name(token: str) -> str:
     return t.lower()
 
 
+# heredoc 操作符：<< / <<- 后跟分隔符（可引号包裹）。here-string（<<<）不匹配。
+_HEREDOC_OP = re.compile(r"<<-?\s*(?P<delim>['\"]?[A-Za-z_][A-Za-z0-9_]*['\"]?)")
+
+
+def _strip_heredocs(text: str) -> str:
+    """剥离 heredoc（<< / <<-）多行体，使正文不被当成命令逐段校验。
+
+    here-string（<<<）是单行，不处理；>> 是追加重定向，不是 heredoc。
+    剥离后仍保留 `cmd <<DELIM` 这一行（首 token 如 python3 仍需白名单校验）。
+    注意：本函数只动段切分用的副本；拒绝清单 / 命令替换仍对**完整原文**检查，
+    因此 heredoc 正文里的 `rm -rf /` 等高危内容一样会被拦下。
+    """
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        m = _HEREDOC_OP.search(line)
+        if m:
+            delim = m.group("delim").strip().strip("'\"")
+            out.append(line)
+            i += 1
+            while i < n:
+                body = lines[i].rstrip("\r\n")
+                if body.lstrip("\t") == delim or body == delim:
+                    break
+                i += 1
+            # 跳过分隔符所在行（若文件未正常结束则保留到末尾，不越界）
+            if i < n:
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
+def _split_segments(text: str) -> list[str]:
+    """引号感知的段切分：仅在引号**外**按 shell 控制算符切段。
+
+    引号（单/双）内的 ; & | || && \\n 视为数据，不当分隔符——这正是修复
+    `python3 -c "多行脚本"` 被误判『引号不闭合』的根因。双字符算符 || && 优先于
+    单字符切分。返回非空（strip 后）的段列表，供 `check_command` 逐段校验首 token。
+    """
+    segments: list[str] = []
+    cur: list[str] = []
+    quote: Optional[str] = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            cur.append(ch)
+            i += 1
+            continue
+        two = text[i:i + 2]
+        if two in ("||", "&&"):
+            if cur:
+                segments.append("".join(cur))
+            cur = []
+            i += 2
+            continue
+        if ch in (";", "|", "&", "\n"):
+            if cur:
+                segments.append("".join(cur))
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    if cur:
+        segments.append("".join(cur))
+    return segments
+
+
 def check_command(cmd: str, allowlist: Optional[Iterable[str]] = None,
                   enforce_allowlist: bool = True) -> Optional[str]:
     """校验命令。放行返回 None，拒绝返回中文原因（可直接回给用户）。"""
@@ -135,7 +219,8 @@ def check_command(cmd: str, allowlist: Optional[Iterable[str]] = None,
         return "禁止命令替换 / 进程替换（$( ) 、反引号、<( )）"
 
     allow = {c.lower() for c in (allowlist or DEFAULT_SHELL_ALLOWLIST)}
-    for seg in _SEGMENT_SPLIT.split(text):
+    cleaned = _strip_heredocs(text)
+    for seg in _split_segments(cleaned):
         seg = seg.strip()
         if not seg:
             continue

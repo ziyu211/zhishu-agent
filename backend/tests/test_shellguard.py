@@ -50,9 +50,37 @@ def test_substitution_blocked():
            "$( ) 命令替换被拦截")
 
 
+def test_multiline_scripts_allowed():
+    print("[5] 多行 / 引号内脚本正确放行（方案 A 修复）")
+    heredoc = "python3 <<'EOF'\nimport os\nprint(os.getcwd())\nEOF"
+    _check(sg.check_command(heredoc, enforce_allowlist=True) is None,
+           "python3 <<'EOF' heredoc 放行（正文不再当命令）")
+    heredoc2 = "python3 <<PYEOF\nimport json\nprint(json.dumps({}))\nPYEOF"
+    _check(sg.check_command(heredoc2, enforce_allowlist=True) is None,
+           "python3 <<PYEOF 无引号分隔符 heredoc 放行")
+    multiline = 'python3 -c "import json\nprint(json.dumps({}))"'
+    _check(sg.check_command(multiline, enforce_allowlist=True) is None,
+           'python3 -c "含换行" 引号内换行不当分隔符，放行')
+    semi = "python3 -c 'a=1; b=2; print(a+b)'"
+    _check(sg.check_command(semi, enforce_allowlist=True) is None,
+           "python3 -c '含;' 引号内分号不当分隔符，放行")
+    pipe = "cat a.txt | python3 -c 'import sys; print(len(sys.stdin.read()))'"
+    _check(sg.check_command(pipe, enforce_allowlist=True) is None,
+           "引号内 ; 与管道组合放行（python3 在白名单）")
+
+
+def test_heredoc_high_risk_still_blocked():
+    print("[6] heredoc 正文内的高危命令仍被拒绝清单拦下")
+    bad = "python3 <<'EOF'\nimport os\nos.system('rm -rf /')\nEOF"
+    _check(sg.check_command(bad, enforce_allowlist=True) is not None,
+           "heredoc 正文里的 rm -rf / 仍被拒绝（完整文本检查）")
+
+
 if __name__ == "__main__":
     test_enforce_false_allows_cd_and_apt()
     test_enforce_true_default_allowlist()
     test_deny_always_wins()
     test_substitution_blocked()
+    test_multiline_scripts_allowed()
+    test_heredoc_high_risk_still_blocked()
     print("\nALL shellguard TESTS PASSED")
