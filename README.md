@@ -3,7 +3,7 @@
 > 一个面向**内网离线、安全合规、自主可控**场景的多用户本地智能体系统。
 > 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端；配置驱动多模型接入，内置 RBAC 多租户、知识库、记忆、工具、插件/技能/MCP、定时任务与技能自进化闭环。
 >
-> 最近更新：2026-08-06 — 新增第九节 9.8 国产信创部署、9.9 OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models，复用 RBAC，可对接 Open WebUI / LobeChat）；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。2026-08-07 — 版本统一至 1.0.13；新增第八节 8.1「内网 Embedding 模型接入」指南；新增多推理框架兼容画像（vLLM / SGLang / LMDeploy / MindIE / Ollama / Xinference / TGI / llama.cpp / generic）与 Qwen3.5 模板缺陷自愈（去 tools 重试并缓存结论）。
+> 最近更新：2026-08-06 — 新增第九节 9.8 国产信创部署、9.9 OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models，复用 RBAC，可对接 Open WebUI / LobeChat）；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。2026-08-08 — 版本统一至 1.0.15；新增第八节 8.1「内网 Embedding 模型接入」指南；新增多推理框架兼容画像（vLLM / SGLang / LMDeploy / MindIE / Ollama / Xinference / TGI / llama.cpp / generic）与 Qwen3.5 模板缺陷自愈（去 tools 重试并缓存结论）。
 
 ---
 
@@ -323,10 +323,10 @@ cp deploy/zhishu.yaml.example deploy/zhishu.yaml
 
 ```bash
 # 标准（需 docker.io 可达）
-docker build -t zhishu-agent:1.0.13 -f deploy/Dockerfile .
+docker build -t zhishu-agent:1.0.15 -f deploy/Dockerfile .
 
 # 受限网络 / 国内零代理（推荐内网、本机）
-docker build -t zsagent:1.0.13 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.15 -f deploy/Dockerfile.local .
 ```
 
 ### 9.3 运行
@@ -336,7 +336,7 @@ docker run -d --name zsagent \
   -p 8080:8080 \
   -v zsagent_data:/app/backend/data \
   --restart unless-stopped \
-  zsagent:1.0.13
+  zsagent:1.0.15
 ```
 
 - `zsagent_data` 卷持久化：向量库、会话记忆、`providers.json`、用户库、媒体文件。
@@ -348,7 +348,7 @@ docker run -d --name zsagent \
 docker run -d --name zsagent -p 8080:8080 \
   -v "$(pwd)/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro" \
   -v zsagent_data:/app/backend/data \
-  --restart unless-stopped zsagent:1.0.13
+  --restart unless-stopped zsagent:1.0.15
 ```
 
 > 重建容器（`docker rm` + `run`）会丢弃可写层：请确保挂载的 `zhishu.yaml` 中 `security.secret` 与旧值一致（否则触发硬闸门或 Provider Key 失效），或启动时传 `-e ZHISHU_SECRET=<同值>`。
@@ -391,7 +391,7 @@ scp -P <port> zhishu-src.tar.gz root@<host>:/opt/zhishu-agent/
 ssh -p <port> root@<host> "cd /opt/zhishu-agent && tar xzf zhishu-src.tar.gz && rm -f zhishu-src.tar.gz"
 
 # 3. 远程构建镜像（耗时较长，建议 nohup 后台跑并 tail 日志）
-ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.13 -f deploy/Dockerfile.local . > build.log 2>&1 &"
+ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.15 -f deploy/Dockerfile.local . > build.log 2>&1 &"
 
 # 4. 生成生产配置：必须替换默认 secret 与 admin 口令，否则进程启动即 exit 2
 #    secret 用 64 位强随机；配置以只读挂载进容器，不烧进镜像
@@ -404,7 +404,7 @@ docker run -d --name zsagent --restart always \
   -p 8090:8080 \
   -v zsagent_data:/app/backend/data \
   -v /opt/zhishu-agent/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro \
-  zsagent:1.0.13
+  zsagent:1.0.15
 
 # 6. 回填 Provider Key（Key 与 secret 强耦合，不能直接拷贝旧密文，必须走 API 明文回填）
 curl -X POST http://127.0.0.1:8090/api/v1/providers -H "Authorization: Bearer $TOK" \
@@ -434,10 +434,10 @@ curl -X POST http://127.0.0.1:8090/api/v1/models/default -H "Authorization: Bear
 
 ```bash
 # x86_64 信创（海光 / 兆芯）—— 沿用现有镜像
-docker build -t zsagent:1.0.13 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.15 -f deploy/Dockerfile.local .
 
 # ARM64（鲲鹏 920 / 飞腾）—— 指定平台交叉构建
-docker build --platform linux/arm64 -t zsagent:1.0.13-arm64 -f deploy/Dockerfile.local .
+docker build --platform linux/arm64 -t zsagent:1.0.15-arm64 -f deploy/Dockerfile.local .
 ```
 
 - 纯 wheel 依赖意味着在 ARM64 / LoongArch 下 `pip install` 不会触发本地编译；**但生产务必在「目标架构的同源机器」上原生构建**（鲲鹏机上直接 `docker build`），避免 qemu 仿真带来的性能与稳定性损耗。
