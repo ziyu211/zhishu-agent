@@ -795,6 +795,14 @@ class Agent:
                     # 确定性拦截：安全策略（白名单 / allow_shell / 角色）拒绝，重复相同调用必再被拦
                     _is_block = (result or "").startswith("[已拦截]")
                     _block_reason = (result or "")[len("[已拦截]"):].strip() if _is_block else ""
+                    # 区分「命令语法/结构错误」与「安全策略配置拦截」：前者（引号不闭合、
+                    # 空命令、命令过长、含空字节、裸命令替换、环境变量前缀）与 security 配置
+                    # 无关，重复相同坏命令必然再被拦；后者才是 allow_shell/白名单/角色问题。
+                    _is_syntax_err = _is_block and any(
+                        k in (_block_reason or "") for k in (
+                            "引号不闭合", "命令为空", "命令过长", "包含空字节",
+                            "命令替换", "环境变量前缀", "无法安全解析",
+                        ))
                     if _is_fail:
                         _breaker_sig[_sig] = _breaker_sig.get(_sig, 0) + 1
                         _consec_fail += 1
@@ -879,12 +887,22 @@ class Agent:
                     # tool_cycle_break），并精确回显拦截原因，便于定位白名单/开关/角色问题。
                     _block_cycle = min(2, self.cfg.agent.tool_cycle_break)
                     if _is_block and _breaker_blocked.get(_sig, 0) >= _block_cycle:
-                        _stop = (f"检测到重复拦截循环：工具 `{name}` 因安全策略拦截"
-                                 f"（原因：{_block_reason or '未知'}）被反复调用，该拦截为"
-                                 f"**确定性**结果，重复调用必然再次被拦，已自动终止。"
-                                 f"请检查工具配置（security.allow_shell / "
-                                 f"shell_enforce_allowlist / shell_allowlist / 角色权限）"
-                                 f"或改用被允许的命令，必要时向用户说明该限制。")
+                        if _is_syntax_err:
+                            # 命令本身的语法/结构错误（如引号未闭合）：与 security 配置无关，
+                            # 重复相同坏命令必然再被拦，终止并告知修正命令而非调安全策略。
+                            _stop = (f"检测到重复拦截循环：工具 `{name}` 的调用被命令解析器拦截"
+                                     f"（原因：{_block_reason or '未知'}）。这是**命令本身的"
+                                     f"语法/结构问题**（如引号未闭合），与 security.allow_shell / "
+                                     f"shell_allowlist / 角色权限等配置无关；重复相同命令必然再次被拦，"
+                                     f"已自动终止。请修正命令后重试（例如补全引号、避免裸命令替换"
+                                     f"`$( )`/反引号），或改用其他工具完成任务。")
+                        else:
+                            _stop = (f"检测到重复拦截循环：工具 `{name}` 因安全策略拦截"
+                                     f"（原因：{_block_reason or '未知'}）被反复调用，该拦截为"
+                                     f"**确定性**结果，重复调用必然再次被拦，已自动终止。"
+                                     f"请检查工具配置（security.allow_shell / "
+                                     f"shell_enforce_allowlist / shell_allowlist / 角色权限）"
+                                     f"或改用被允许的命令，必要时向用户说明该限制。")
                     elif _consec_fail >= self.cfg.agent.tool_fail_break:
                         _stop = (f"任务执行受阻：已连续 {_consec_fail} 次工具调用失败"
                                  f"（如命令被白名单拦截、依赖缺失、权限不足），已自动终止以避免无效消耗。"
@@ -962,17 +980,26 @@ class Agent:
                     # 从源头消解「重复拦截循环」（与上方 2 次硬终止形成双保险）。
                     if _is_block and _sig not in _blocked_nudged:
                         _blocked_nudged.add(_sig)
-                        messages.append({
-                            "role": "system",
-                            "content": (
+                        if _is_syntax_err:
+                            _block_nudge = (
+                                f"[系统] 工具 `{name}` 的本次调用被命令解析器拒绝"
+                                f"（原因：{_block_reason or '未知'}）。这是**命令本身的"
+                                f"语法/结构问题**（如引号未闭合），与 security.allow_shell / "
+                                f"shell_allowlist / 角色权限等配置无关；以相同参数重复调用必然"
+                                f"再次被拒，纯属浪费。请勿重试相同参数，请修正命令"
+                                f"（例如补全引号、避免裸命令替换 `$( )`/反引号）后重试，"
+                                f"或改用其他工具完成任务。"
+                            )
+                        else:
+                            _block_nudge = (
                                 f"[系统] 工具 `{name}` 的本次调用已被安全策略拦截"
                                 f"（原因：{_block_reason or '未知'}）。该拦截为**确定性**结果："
                                 f"以相同参数重复调用必然再次被拦，纯属浪费。请勿重试相同参数。"
                                 f"若必须完成目标，请改用其他被允许的命令/工具，或向用户说明该限制"
                                 f"并建议管理员调整 security.allow_shell / shell_enforce_allowlist /"
                                 f" shell_allowlist 或赋予相应角色权限。"
-                            ),
-                        })
+                            )
+                        messages.append({"role": "system", "content": _block_nudge})
                 continue
 
             # ---- 文本委派兜底（弱模型兼容）：模型没发 function call，而是把
