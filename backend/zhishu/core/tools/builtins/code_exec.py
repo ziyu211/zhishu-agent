@@ -58,10 +58,10 @@ _zh_socket.create_server = _zh_blocked
 
 
 def _code_exec_allowed(ctx: Optional[ToolContext]) -> bool:
-    """代码执行授权：仅 operator / admin，且 security.allow_code_exec 开启。
-    fail-closed：无安全配置或非授权角色一律拒绝（默认不再放行）。"""
+    """代码执行授权：user / operator / admin，且 security.allow_code_exec 开启。
+    fail-closed：无安全配置或非授权角色一律拒绝；viewer 仍为只读角色不开放代码执行。"""
     role = getattr(ctx, "user_role", None)
-    if role not in ("admin", "operator"):
+    if role not in ("admin", "operator", "user"):
         return False
     sec = getattr(ctx, "security", None)
     if sec is None:
