@@ -21,7 +21,7 @@ from .base import Tool, ToolContext, Toolset
 ROLE_RANK = {"viewer": 0, "user": 1, "operator": 2, "admin": 3}
 
 TOOL_MIN_ROLE: dict[str, str] = {
-    "terminal_run": "operator",          # shell 执行风险更高，保留 operator 及以上
+    "terminal_run": "user",              # shell 执行：与 operator 完全对等（user 及以上可用）
     "code_exec": "user",                 # 代码执行：开放到 user（含 operator/admin）
     "create_tool": "user",               # 同源 Python 执行引擎，随 code_exec 一并下放
 }

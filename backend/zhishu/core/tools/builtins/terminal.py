@@ -1,7 +1,7 @@
 """本地终端工具（本地内网执行，禁止出网）。
 
 安全闸门与定时任务 shell 动作**共用** `core/shellguard`：
-  1. 角色门：operator 及以上；
+  1. 角色门：user 及以上；
   2. 总开关 security.allow_shell；
   3. 高危拒绝清单 + 可执行文件白名单；
   4. 最小化环境变量（剔除密钥）+ 独立进程组 + 超时整组击杀 + POSIX 资源上限。
@@ -32,8 +32,8 @@ from ...shellguard import check_command, run_guarded
 )
 async def terminal_run(args: dict, ctx) -> str:
     role = getattr(ctx, "user_role", None)
-    if role not in ("admin", "operator"):
-        return "[已拦截] 当前角色无权执行终端命令（需 operator 及以上）"
+    if role not in ("admin", "operator", "user"):
+        return "[已拦截] 当前角色无权执行终端命令（需 user 及以上）"
 
     sec = getattr(ctx, "security", None)
     if sec is not None and not getattr(sec, "allow_shell", True):

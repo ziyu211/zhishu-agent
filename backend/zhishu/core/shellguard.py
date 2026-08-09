@@ -5,7 +5,7 @@
     指到 data/sandbox 之外**没有任何护栏**：命令内容不过滤、继承宿主全量环境变量
     （含 ZHISHU_SECRET / 各 Provider Key）、超时后只 kill 直接子进程（shell 派生的
     孙进程继续留守）、无资源上限。一个 operator 建一条定时任务即可读走密钥或打穿宿主机。
-  * `terminal_run` 工具同样只有角色门（operator+）没有命令门。
+  * `terminal_run` 工具此前只有角色门（user+）没有命令门。
 
 本模块提供三件事，两处调用点复用同一套策略：
   1. `check_command()` —— 拒绝清单（毁灭性/提权/外传，对完整命令文本检查）+ 可执行
