@@ -91,6 +91,14 @@ _DELEGATE_XML_TAG_RE = re.compile(
 _AGENT_KEYS = ("agent_name", "agent", "name", "sub_agent", "target")
 _TASK_KEYS = ("task", "instruction", "prompt", "input", "query", "content")
 
+# 仅匹配显式标注 ```python / ```py 的围栏代码块；不匹配 ```json / ```bash 等其他语言，
+# 也不匹配无标注代码块——避免把示例/说明性质的代码片段误判为「要执行的代码」。
+# 用于「弱模型把 Python 写成 Markdown 代码块而非发起 function call」的兜底执行。
+_PY_FENCE_RE = re.compile(
+    r"```(?:python|py)[ \t]*\r?\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def _extract_balanced(text: str, lparen: int) -> tuple[str, int]:
     """从 text[lparen]=='(' 起做「感知引号」的括号配对，返回 (括号内文本, 右括号后位置)。
@@ -247,6 +255,25 @@ def _parse_delegate_calls(text: str, limit: int = 6) -> list[dict]:
         args = _coerce_delegate_args(inner)
         if args.get("agent_name"):
             out.append(args)
+    return out
+
+
+def _extract_python_blocks(text: str) -> list[str]:
+    """从模型文本中提取所有显式标注 ```python / ```py 的代码块内容。
+
+    仅匹配带 python/py 语言标注的围栏块（见 ``_PY_FENCE_RE``），不匹配其他语言块，
+    也不匹配无标注代码块，避免把示例/说明性质的代码片段误当成要执行的代码。
+
+    用于「弱模型把 Python 写成 Markdown 代码块而非发起 function call」的兜底执行：
+    抽出的代码会走与 function call 完全一致的 code_exec 执行路径，真正运行而非只贴文本。
+    """
+    if not text:
+        return []
+    out: list[str] = []
+    for m in _PY_FENCE_RE.finditer(text):
+        body = m.group(1)
+        if body and body.strip():
+            out.append(body)
     return out
 
 
@@ -1105,6 +1132,68 @@ class Agent:
                     _missing_now = [a for a in _expected_cache
                                     if a not in _delegated_agents and a != agent_name]
                     if _delegate_stall < 2 and not (is_coordinator and _missing_now):
+                        continue
+
+            # ---- 代码块兜底（弱模型兼容）：模型没发 function call，而是把 Python 写成
+            # Markdown 代码块（典型如用 requests/akshare 抓取行情、做数据分析）。若直接把代码当
+            # 最终回复吐给用户，就会出现「贴代码不执行」的退化表现。这里把显式 python/py 代码块
+            # 抽出，走与 function call 完全一致的 code_exec 执行路径，真正运行并回填结果后 continue，
+            # 让模型基于真实执行结果作答，彻底消除「只贴代码不跑」的回归。
+            # 仅在当前用户被授权运行代码（operator/admin 且 allow_code_exec 开启）时生效。
+            if _content and DELEGATE_TOOL_NAME not in _content:
+                try:
+                    from ..tools.builtins.code_exec import _code_exec_allowed
+                except Exception:
+                    _code_exec_allowed = None
+                if _code_exec_allowed and _code_exec_allowed(self.ctx):
+                    _py_blocks = _extract_python_blocks(_content)
+                    if _py_blocks:
+                        # 模型这段「伪代码」只作为思考轨迹回填，不当最终回答吐给用户
+                        messages.append({"role": "assistant", "content": _content})
+                        _code = "\n\n".join(b.strip("\n") for b in _py_blocks)
+                        yield {"type": "tool_call", "name": "code_exec", "args": {"code": _code}}
+                        _result = await ToolRegistry.execute(
+                            "code_exec", {"code": _code}, self.ctx)
+                        # 收集 /media 下载链接，供最终回复护栏兜底
+                        if "/media/" in (_result or ""):
+                            _ml = extract_media_links(_result)
+                            if _ml:
+                                _col = getattr(self, "_turn_media_links", None)
+                                if _col is None:
+                                    _col = []
+                                    self._turn_media_links = _col
+                                _col.extend(_ml)
+                        tool_total += 1
+                        traj_tools.append({
+                            "name": "code_exec",
+                            "args": {"code": _code[:120]},
+                            "result": (_result or "")[:300],
+                        })
+                        messages.append({
+                            "role": "assistant",
+                            "content": _content,
+                            "tool_calls": [{
+                                "id": f"code_exec_{tool_total}",
+                                "type": "function",
+                                "function": {
+                                    "name": "code_exec",
+                                    "arguments": json.dumps({"code": _code}, ensure_ascii=False),
+                                },
+                            }],
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": f"code_exec_{tool_total}",
+                            "content": _result or "",
+                        })
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[系统] 你刚才提供的 Python 代码已由系统通过 code_exec 工具实际执行，"
+                                "执行结果见上方工具返回。请基于真实执行结果进行分析与总结，"
+                                "直接给出最终结论，不要再重复贴出相同的代码块。"
+                            ),
+                        })
                         continue
 
             # 协调类智能体强制委派闸门：
