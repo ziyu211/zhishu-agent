@@ -3,7 +3,7 @@
 > 一个面向**内网离线、安全合规、自主可控**场景的多用户本地智能体系统。
 > 采用 **FastAPI 单进程**同时托管智能体引擎、REST/SSE API 与编译后的前端；配置驱动多模型接入，内置 RBAC 多租户、知识库、记忆、工具、插件/技能/MCP、定时任务与技能自进化闭环。
 >
-> 最近更新：2026-08-06 — 新增第九节 9.8 国产信创部署、9.9 OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models，复用 RBAC，可对接 Open WebUI / LobeChat）；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。2026-08-08 — 版本统一至 1.0.16；2026-08-09 升级至 1.0.17；新增第八节 8.1「内网 Embedding 模型接入」指南；新增多推理框架兼容画像（vLLM / SGLang / LMDeploy / MindIE / Ollama / Xinference / TGI / llama.cpp / generic）与 Qwen3.5 模板缺陷自愈（去 tools 重试并缓存结论）。
+> 最近更新：2026-08-06 — 新增第九节 9.8 国产信创部署、9.9 OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models，复用 RBAC，可对接 Open WebUI / LobeChat）；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。2026-08-08 — 版本统一至 1.0.16；2026-08-09 升级至 1.0.17；新增第八节 8.1「内网 Embedding 模型接入」指南；新增多推理框架兼容画像（vLLM / SGLang / LMDeploy / MindIE / Ollama / Xinference / TGI / llama.cpp / generic）与 Qwen3.5 模板缺陷自愈（去 tools 重试并缓存结论）；**同日工具级 RBAC 下沉**（`terminal_run` / `code_exec` / `create_tool` 开放至 `user`，`operator` 与 `user` 在对话窗口内完全对等）、**`code_exec` 出网与全局 `outbound_allow` 解耦**（新增独立开关 `code_exec_network_isolated`，默认不隔离）、**补齐审计缺口 G1–G6**（令牌吊销/登出、向量长期记忆清理、脱敏统计、统一鉴权守卫与导入缺陷修复，详见第十二节 12.6）。
 
 ---
 
@@ -58,6 +58,25 @@
 - admin 可通过 `X-Act-As` 请求头（前端「切换用户」）代管任意用户的资源。
 - 媒体文件按 `/media/<owner>/<file>` 存储，网关校验 Token 归属，禁止跨租户访问。
 
+### 3.3 工具级 RBAC（执行闸 / 可见性闸 / 内部闸）
+
+除 3.1 的权限点矩阵外，高危工具另有**工具级角色闸门** `core/tools/registry.py` 的 `TOOL_MIN_ROLE`，与权限点相互独立、双保险：
+
+| 工具 | 最低角色 | 说明 |
+|------|----------|------|
+| `terminal_run` | `user` | 沙箱终端命令执行 |
+| `code_exec` | `user` | 沙箱代码执行（与 `terminal_run` 同源 Python 引擎） |
+| `create_tool` | `user` | 运行时自建工具（同源执行引擎，随 `code_exec` 一并下放） |
+| 其余内置工具 | —（无限制） | 四角色均可用 |
+
+- **三道闸**：
+  1. **执行闸**（`registry.execute`）：`user_role` 低于 `TOOL_MIN_ROLE` 直接返回 `[已拦截] 当前角色无权使用该工具`，fail-closed。
+  2. **可见性闸**（`runtime.tool_visible_to`）：低于最低角色的工具不在前端工具清单暴露。
+  3. **内部闸**：`code_exec._code_exec_allowed` / `terminal.py` 内部仍有角色判定兜底。
+- **当前角色对等性**：`operator` 与 `user` 在默认对话窗口内对文档处理 / 工具调用**完全对等**（`terminal_run` / `code_exec` / `create_tool` 三者均 `user`，无差异）；`admin` 为严格超集（X-Act-As 代管、跨用户读媒体、可见他人私有模块）。
+- **`viewer` 双闸 fail-closed**：既不可见也不可执行上述高危工具。
+- **`cron` 的 `shell` 动作**：仍仅 `admin` / `operator` 可创建/修改（命令再由 `core/shellguard.py` 纵深防御闸门校验），不受工具级下沉影响。
+
 ---
 
 ## 四、核心模块
@@ -98,7 +117,7 @@
 | `code_exec` | `code_exec` | 沙箱内代码执行 |
 
 - **沙箱**：工具仅能在 `SANDBOX_ROOT`（默认 `data/sandbox`）内操作。
-- **出网隔离**：`safe_web_fetch` / `web_search` 受 `security.outbound_allow` 门控。
+- **出网隔离开关**：`safe_web_fetch` / `web_search` 受 `security.outbound_allow` 门控（默认 `false` = 内网隔离）。`code_exec` 的执行**与全局 `outbound_allow` 解耦**，由独立开关 `security.code_exec_network_isolated`（默认 `false` = 不隔离、允许出网）单独管控——内网抓数据 / 跑脚本默认即可联网，真正硬隔离仍靠基础设施防火墙 / 容器 egress。
 - **多模态生成**：支持图片生成/视频生成路由（`image_routing.py`），产物经 `MediaStore` 按 owner 落盘、`/media` 网关鉴权访问。
 
 ### 5. 插件 / 技能 / MCP（运行时模块）
@@ -665,3 +684,17 @@ GitHub Actions `E2E Tests / e2e`（`.github/workflows/e2e.yml`，push/PR 到 `ma
 - `backend/tests/test_closure_audit.py`：新增 3 个针对本根因的回归测试（`test_cron_stop_no_cancelled_error` / `test_lifespan_teardown_isolated` / `test_vector_store_follows_data_dir`），**89/89 断言通过**。
 - 既有 `backend/tests/http_closure_check.py` 24/24 不受影响。
 - 复查补充：`core/modules/mcp.py` 的 `MCPClient.close()` 取消 `_reader_task` 后未 `await`（同类隐患，未触发 e2e 因测试不连接 MCP client），已补 `await` + `except (asyncio.CancelledError, Exception)` 与 `cron.stop` 一致。
+
+### 12.6 审计缺口修复（2026-08-09）
+
+在 12.1–12.5 业务闭环审计之上，本轮对「认证 / 记忆 / 脱敏 / 前端」四个面补齐 5 项闭环缺口（编号 G1–G6，其中 G5 为误报已跳过），均经 `backend/tests/test_audit_gaps_fix.py` 回归验证，并配套产出 `AUDIT_REPORT_2026-08-09.html`：
+
+| 编号 | 缺口 | 位置 | 处置 |
+|------|------|------|------|
+| G1 | 向量长期记忆不可观测 / 不可清理 | `core/memory/backends.py` / `manager.py` / `vector_provider.py` | 新增 `stats()` / `clear()`；新增 `GET/DELETE /api/v1/memory/vector`（`modules:write` 守卫，非 admin 限定本人 `owner`） |
+| G2 | 令牌无主动吊销 / 登出 | `core/security.py` / `api/auth.py` / `api/users.py` | 引入 `jti` + `revoked_tokens.json` 持久化；新增 `POST /auth/logout`、`POST /users/{uid}/revoke`（`bump_epoch` 强制失效该用户全部令牌） |
+| G3 | 统一鉴权守卫缺 `skip_act_as`；`require_auth` 定义顺序致导入 `NameError` | `api/auth.py` | `require_auth` 支持 `skip_act_as`（`/me`、`/change-password`、`/logout` 关闭 X-Act-As 穿透，避免自改密码 / 登出被代管误影响）；前移定义修复「默认参数在定义前求值」导致的导入崩溃 |
+| G4 | 前端消费 `/auth/status` 死代码（部署模式 / 用户数提示） | `frontend/src/views/LoginView.vue` | 移除未使用的 `authStatus` 调用与登录页部署提示文案（避免泄露部署形态 / 用户规模） |
+| G6 | 脱敏命中无统计 | `core/redact.py` / `api/admin.py` | `Redactor` 增 `calls` / `masked` 计数；新增 `GET /admin/redact/stats` |
+
+> G5（模型持久化）经核查为误报——`app.selectedModel` 已落盘 `localStorage`，跳过。
