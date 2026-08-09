@@ -321,10 +321,15 @@ class SecurityConfig:
     allow_private_fetch: bool = False      # /models/fetch 是否允许拉取内网/私有地址的模型列表（默认否，防 SSRF）
     # 自扩展代码执行（对标 Hermes 自创工具能力）：在内网可信部署下允许智能体
     # 生成 Python 并（一次性或注册为可复用工具）执行，以处理标准工具不支持的文件/任务。
-    # 护栏：子进程沙箱 cwd、超时、内存上限、禁网络、输出截断。生产可按需关闭。
+    # 护栏：子进程沙箱 cwd、超时、内存上限、输出截断。生产可按需关闭。
+    # ⚠️ 出网策略：code_exec 的子进程网络**不再**受全局 outbound_allow 约束——
+    # 由本开关 code_exec_network_isolated 单独管控（解耦需求：内网/抓数据等场景
+    # 要求 code_exec 不受 outbound_allow 影响也能执行与出网）。默认 False=不隔离（允许出网），
+    # 仅当某部署需要在应用层再拦 code_exec 出网时置 True；真正的硬隔离仍靠基础设施（防火墙/容器 egress）。
     allow_code_exec: bool = True
     code_exec_timeout: int = 30            # 子进程默认超时（秒），上限 120
     code_exec_mem_limit_mb: int = 0        # 子进程内存上限(MB)，0=不限制
+    code_exec_network_isolated: bool = False  # code_exec 子进程是否禁网（默认否，与 outbound_allow 解耦）
     # --- Shell 闸门（cron shell 任务 + terminal_run 工具共用，见 core/shellguard.py）---
     # 此前 cron 的 shell 动作在宿主机裸跑：不过滤命令、继承全量环境变量（含密钥）、
     # 超时只杀直接子进程。下列开关为纵深防御，默认开启白名单。

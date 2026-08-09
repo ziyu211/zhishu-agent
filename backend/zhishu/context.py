@@ -90,6 +90,7 @@ class AppContext:
         "allow_private_fetch": bool,
         "outbound_allow": bool,
         "allow_code_exec": bool,
+        "code_exec_network_isolated": bool,
         "allow_shell": bool,
         "shell_enforce_allowlist": bool,
         "enable_audit": bool,

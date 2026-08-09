@@ -30,6 +30,7 @@ def _security_view(ctx) -> dict:
          "allow_private_fetch": s.allow_private_fetch,
          "outbound_allow": s.outbound_allow,
          "allow_code_exec": s.allow_code_exec,
+         "code_exec_network_isolated": s.code_exec_network_isolated,
          "allow_shell": s.allow_shell,
          "shell_enforce_allowlist": s.shell_enforce_allowlist,
          "enable_audit": s.enable_audit,
@@ -39,7 +40,8 @@ def _security_view(ctx) -> dict:
 
 # security 组可经前台切换的运行时字段（与 ctx._SECURITY_OVERRIDE_FIELDS 保持一致）
 _SECURITY_FIELDS = (
-    "allow_private_fetch", "outbound_allow", "allow_code_exec", "allow_shell",
+    "allow_private_fetch", "outbound_allow", "allow_code_exec",
+    "code_exec_network_isolated", "allow_shell",
     "shell_enforce_allowlist", "enable_audit", "enable_redact",
 )
 

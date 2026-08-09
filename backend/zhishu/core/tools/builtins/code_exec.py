@@ -70,15 +70,18 @@ def _code_exec_allowed(ctx: Optional[ToolContext]) -> bool:
 
 
 def _block_network(ctx: Optional[ToolContext]) -> bool:
-    """网络封锁与出网闸门联动：security.outbound_allow=true 时放行代码执行出网。
+    """code_exec 子进程是否禁网：由独立开关 security.code_exec_network_isolated 控制，
+    默认 False（不隔离、允许出网），**与全局 outbound_allow 解耦**。
 
-    此前 block_network 被硬编码为 True，导致即便管理员放开了 outbound_allow，
-    code_exec 内跑 akshare/requests 等仍报「已禁用网络访问（内网隔离）」。
+    设计取舍：code_exec 是模型自生成代码的「受控自修改」能力，用户要求其在内网/抓数据
+    等场景下不受全局 outbound_allow 影响仍可执行与出网。因此这里不再读 outbound_allow，
+    而是用 code_exec 专属开关；真正的网络硬隔离仍由基础设施层（防火墙 / 容器 egress 策略）兜底。
+    仅当某部署需在应用层再拦 code_exec 出网时，将 code_exec_network_isolated 置 True。
     """
     sec = getattr(ctx, "security", None)
     if sec is None:
-        return True
-    return not bool(getattr(sec, "outbound_allow", False))
+        return False
+    return bool(getattr(sec, "code_exec_network_isolated", False))
 
 
 def _resolve_path(path: str, owner: Optional[str] = None,
