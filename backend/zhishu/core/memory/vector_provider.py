@@ -50,3 +50,13 @@ class VectorMemoryProvider(MemoryProvider):
                                                    "source": f"mem_{owner or 'anon'}"})
         except Exception:
             pass
+
+    def stats(self, owner: Optional[str] = None) -> dict:
+        if self.backend:
+            return self.backend.stats(owner)
+        return {"backend": None, "count": 0, "owner": owner or "*"}
+
+    def clear(self, owner: Optional[str] = None) -> int:
+        if self.backend:
+            return self.backend.clear(owner)
+        return 0

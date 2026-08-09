@@ -39,7 +39,10 @@ class AppContext:
             path=os.path.join(cfg.server.data_dir, "zhishu_users.db"),
         )
         self.users.bootstrap(cfg.security.admin_user, cfg.security.admin_password)
-        self.auth = AuthService(cfg.security, users=self.users)
+        self.auth = AuthService(
+            cfg.security, users=self.users,
+            revoked_path=os.path.join(cfg.server.data_dir, "revoked_tokens.json"),
+        )
         # 数据脱敏器（合规）：注入审计日志落库前的 PII 遮蔽
         self.redactor = Redactor(cfg.security.enable_redact)
         set_default_redactor(self.redactor)

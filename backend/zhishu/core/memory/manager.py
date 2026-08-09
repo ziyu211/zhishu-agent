@@ -47,3 +47,17 @@ class MemoryManager:
     @property
     def vector_enabled(self) -> bool:
         return self.external is not None
+
+    def vector_stats(self, owner: Optional[str] = None) -> dict:
+        """向量长期记忆体量（可观测性）。未开启时返回 enabled=False。"""
+        if self.external:
+            out = self.external.stats(owner)
+            out["enabled"] = True
+            return out
+        return {"enabled": False, "backend": None, "count": 0, "owner": owner or "*"}
+
+    def vector_clear(self, owner: Optional[str] = None) -> int:
+        """清空向量长期记忆（按 owner）。未开启时返回 0。"""
+        if self.external:
+            return self.external.clear(owner)
+        return 0

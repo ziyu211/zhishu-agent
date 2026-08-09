@@ -40,6 +40,8 @@ class Redactor:
         self.patterns = dict(_PATTERNS)
         if extra_patterns:
             self.patterns.update(extra_patterns)
+        # 脱敏命中统计（可观测性）：calls=调用次数，masked=被遮蔽的 PII 单元数。
+        self.stats = {"calls": 0, "masked": 0}
 
     @staticmethod
     def _mask(value: str, keep_head: int, keep_tail: int) -> str:
@@ -54,10 +56,21 @@ class Redactor:
         """脱敏一段文本；返回遮蔽后的副本。"""
         if not self.enabled or not text:
             return text
+        self.stats["calls"] += 1
         try:
             out = text
+            total = 0
             for _name, (pat, head, tail) in self.patterns.items():
-                out = pat.sub(lambda m: self._mask(m.group(0), head, tail), out)
+                cnt = {"n": 0}
+
+                def _sub(m, _cnt=cnt, _head=head, _tail=tail):
+                    _cnt["n"] += 1
+                    return self._mask(m.group(0), _head, _tail)
+
+                out = pat.sub(_sub, out)
+                total += cnt["n"]
+            if total:
+                self.stats["masked"] += total
             return out
         except Exception:
             # 脱敏失败不得回退原文（避免 PII 泄露），整体隐藏并记录。
@@ -81,6 +94,7 @@ class Redactor:
                 if isinstance(v, str):
                     if is_sensitive_key:
                         out[k] = "*" * max(4, min(len(v), 12))
+                        self.stats["masked"] += 1
                     else:
                         out[k] = self.redact(v)
                 elif isinstance(v, dict):
@@ -122,3 +136,8 @@ def get_default() -> Redactor:
 
 def redact(text: str) -> str:
     return get_default().redact(text)
+
+
+def redact_stats() -> dict:
+    """返回进程级脱敏命中统计（可观测性）。"""
+    return dict(get_default().stats)

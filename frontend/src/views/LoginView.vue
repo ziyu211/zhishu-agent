@@ -3,6 +3,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { api, setToken } from '@/api/client'
 import { health } from '@/api/system'
+import { authStatus } from '@/api/auth'
 import { useAppStore } from '@/stores/app'
 import { clearActAs } from '@/api/actas'
 
@@ -15,6 +16,7 @@ const password = ref('')
 const loading = ref(false)
 const errorMsg = ref('')
 const version = ref('')
+const deployHint = ref('')
 
 onMounted(async () => {
   // 平滑切入
@@ -25,6 +27,20 @@ onMounted(async () => {
     if (res?.version) version.value = res.version
   } catch {
     /* 版本号仅作展示，拉取失败静默忽略 */
+  }
+  // 消费 /auth/status：展示部署形态（免登录 / 密码登录 / 已建用户数）
+  try {
+    const st = await authStatus()
+    if (!st?.auth_enabled) {
+      deployHint.value = '当前为免登录模式（未开启鉴权）'
+    } else {
+      const n = st.user_count ?? 0
+      deployHint.value = n > 0
+        ? `已开启密码登录 · 已创建 ${n} 个用户`
+        : '已开启密码登录 · 尚未创建用户（首次登录将初始化管理员）'
+    }
+  } catch {
+    /* 部署形态提示非关键，失败静默忽略 */
   }
 })
 
@@ -64,6 +80,7 @@ async function handleLogin() {
       </div>
       <h1 class="login-title">智枢智能体</h1>
       <p class="login-desc">国产化智能体平台 · 本地部署 · 数据不出域</p>
+      <p v-if="deployHint" class="login-hint">{{ deployHint }}</p>
 
       <form class="login-form" @submit.prevent="handleLogin">
         <input v-model="username" type="text" class="login-input" placeholder="用户名" autofocus />
@@ -122,6 +139,8 @@ async function handleLogin() {
 
 .login-title { font-size: 24px; font-weight: 600; color: $text-primary; margin: 0 0 8px; }
 .login-desc { font-size: 13px; color: $text-muted; margin: 0 0 28px; line-height: 1.6; }
+
+.login-hint { font-size: 12px; color: $text-muted; margin: -18px 0 18px; opacity: 0.85; }
 
 .login-form { display: flex; flex-direction: column; gap: 12px; }
 

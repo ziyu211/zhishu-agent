@@ -303,11 +303,22 @@ class UserStore:
 
 
 class AuthService:
-    def __init__(self, cfg: SecurityConfig, users: Optional["UserStore"] = None):
+    def __init__(self, cfg: SecurityConfig, users: Optional["UserStore"] = None,
+                 revoked_path: Optional[str] = None):
         self.cfg = cfg
         self.crypto = Crypto(cfg.enable_sm)
         self.secret = cfg.secret
         self.users = users
+        # 吊销表：已主动登出 / 强制下线的令牌 jti 集合（持久化到 data_dir，重启后仍生效）。
+        self.revoked_path = revoked_path
+        self.revoked: set = set()
+        if revoked_path:
+            try:
+                if os.path.isfile(revoked_path):
+                    with open(revoked_path, "r", encoding="utf-8") as _f:
+                        self.revoked = set(json.load(_f) or [])
+            except Exception:
+                self.revoked = set()
 
     def login(self, username: str, password: str) -> Optional[dict]:
         """返回 {token, user, role, display_name} 或 None。"""
@@ -338,7 +349,10 @@ class AuthService:
         }
 
     def _token(self, user: str, role: str, ttl: int = 86400 * 7, epoch: int = 0) -> str:
-        payload = json.dumps({"u": user, "r": role, "e": epoch, "exp": int(time.time()) + ttl})
+        # jti：令牌唯一标识，用于主动登出 / 吊销（旧令牌无 jti -> 视为未吊销）。
+        payload = json.dumps({"u": user, "r": role, "e": epoch,
+                              "jti": secrets.token_hex(8),
+                              "exp": int(time.time()) + ttl})
         sig = self.crypto.sign(self.secret, payload)
         return f"{payload}.{sig}"
 
@@ -351,6 +365,10 @@ class AuthService:
                 return None
             data = json.loads(payload_b64)
             if data.get("exp", 0) < time.time():
+                return None
+            # 吊销检查：主动登出 / 管理员强制下线会把该 jti 加入 revoked 集合。
+            jti = data.get("jti")
+            if jti and jti in self.revoked:
                 return None
             # 吊销检查：用户被删除/停用后，旧令牌立即失效；角色被降级后，令牌里的
             # 旧角色不再被信任（避免「降级无效」）。
@@ -388,6 +406,22 @@ class AuthService:
             return data
         except Exception:
             return None
+
+    def revoke_token(self, jti: Optional[str]) -> None:
+        """主动登出：把当前令牌 jti 加入吊销集合并持久化。"""
+        if not jti:
+            return
+        self.revoked.add(jti)
+        self._save_revoked()
+
+    def _save_revoked(self) -> None:
+        if not self.revoked_path:
+            return
+        try:
+            with open(self.revoked_path, "w", encoding="utf-8") as _f:
+                json.dump(sorted(self.revoked), _f)
+        except Exception:
+            pass
 
     def can(self, role: str, perm: str) -> bool:
         allowed = ROLES.get(role, [])

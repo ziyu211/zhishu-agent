@@ -696,3 +696,26 @@ async def search_memory(q: str = "", user=require_auth("modules:read")):
                 if q.lower() in line.lower():
                     hits.append({"file": fn, "line": i, "text": line.strip()})
     return {"query": q, "hits": hits}
+
+
+@router.get("/memory/vector")
+async def memory_vector_stats(owner: Optional[str] = None,
+                              user=require_auth("modules:read")):
+    """向量长期记忆体量（可观测性）。非管理员只能查看自己的。"""
+    ctx = get_ctx()
+    if user.get("r") != "admin":
+        owner = user.get("u")
+    return ctx.memory_manager.vector_stats(owner)
+
+
+@router.delete("/memory/vector")
+async def memory_vector_clear(owner: Optional[str] = None,
+                              user=require_auth("modules:write")):
+    """清空向量长期记忆（按 owner）。非管理员只能清空自己的。"""
+    ctx = get_ctx()
+    if user.get("r") != "admin":
+        owner = user.get("u")
+    deleted = ctx.memory_manager.vector_clear(owner)
+    ctx.audit.log(user.get("u", ""), "memory_vector_clear",
+                  f"清空向量长期记忆 owner={owner or '*'} deleted={deleted}")
+    return {"ok": True, "owner": owner or "*", "deleted": deleted}

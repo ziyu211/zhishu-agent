@@ -42,3 +42,12 @@ async def redact_test(req: dict = Body(...), user=require_auth("audit:read")):
     if obj is not None:
         return {"enabled": True, "result": ctx.redactor.redact_dict(obj)}
     return {"enabled": True, "result": ctx.redactor.redact(text or "")}
+
+
+@router.get("/admin/redact/stats")
+async def redact_stats_ep(user=require_auth("audit:read")):
+    """脱敏命中统计（可观测性）：返回启用状态与累计调用/遮蔽计数。"""
+    ctx = get_ctx()
+    return {"enabled": ctx.cfg.security.enable_redact,
+            "calls": ctx.redactor.stats.get("calls", 0),
+            "masked": ctx.redactor.stats.get("masked", 0)}

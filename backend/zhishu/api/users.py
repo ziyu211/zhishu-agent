@@ -149,3 +149,19 @@ async def delete_user(uid: int, user=require_auth("users:write")):
             pass
     ctx.audit.log(user.get("u", ""), "delete_user", f"删除用户 {username}（已级联清理归属数据）")
     return {"ok": True}
+
+
+@router.post("/{uid}/revoke")
+async def revoke_user(uid: int, user=require_auth("users:write")):
+    """管理员强制下线：抬高目标用户 password_epoch，使其全部既有令牌立即失效。"""
+    ctx, store = _store()
+    target = store.get(uid)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    username = target.get("username", "")
+    try:
+        store.bump_epoch(uid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    ctx.audit.log(user.get("u", ""), "revoke_user", f"强制下线用户 {username}")
+    return {"ok": True, "username": username}

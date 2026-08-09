@@ -63,54 +63,7 @@ def _extract_token(authorization: str | None) -> str | None:
     return authorization[7:] if authorization.startswith("Bearer ") else authorization
 
 
-def _current(authorization: str | None) -> dict:
-    ctx = get_ctx()
-    if not ctx.cfg.security.enable_auth:
-        return {"u": "anonymous", "r": "admin"}
-    data = ctx.auth.verify(_extract_token(authorization))
-    if not data:
-        raise HTTPException(status_code=401, detail="未登录或登录已过期")
-    return data
-
-
-@router.get("/me")
-async def me(response: Response, authorization: str | None = Header(None)):
-    from ..core.security import ROLE_LABELS, ROLES
-    data = _current(authorization)
-    # 已在线会话（token 存 localStorage）打开页面时经 /me 刷新 media Cookie，
-    # 使旧会话无需重新登录即可访问受保护的 /media 资源。
-    token = _extract_token(authorization)
-    if token:
-        _set_media_cookie(response, token)
-    role = data.get("r", "")
-    return {
-        "user": data.get("u", ""),
-        "role": role,
-        "role_label": ROLE_LABELS.get(role, role),
-        "perms": ROLES.get(role, []),
-    }
-
-
-@router.post("/change-password")
-async def change_password(req: ChangePwdReq, authorization: str | None = Header(None)):
-    ctx = get_ctx()
-    data = _current(authorization)
-    username = data.get("u", "")
-    if not ctx.users:
-        raise HTTPException(status_code=400, detail="未启用多用户存储")
-    u = ctx.users.verify_password(username, req.old_password)
-    if not u:
-        raise HTTPException(status_code=400, detail="原密码错误")
-    try:
-        ctx.users.set_password(u["id"], req.new_password)
-        ctx.users.bump_epoch(u["id"])  # 改密后立即使旧令牌失效
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    ctx.audit.log(username, "change_password", "修改自身密码")
-    return {"ok": True}
-
-
-def require_auth(perm: str = "chat"):
+def require_auth(perm: str = "chat", skip_act_as: bool = False):
     def dependency(authorization: str | None = Header(None),
                    x_act_as: str | None = Header(None, alias="X-Act-As")):
         ctx = get_ctx()
@@ -123,7 +76,9 @@ def require_auth(perm: str = "chat"):
         # 管理员「切换用户」：仅在当前用户为 admin 时生效；目标用户须存在。
         # 切换后 data 完全以目标用户身份运行（u=目标、r=目标角色），
         # 使所有隔离/归属/权限逻辑自动按目标用户生效；real_u 仅用于审计留痕。
-        if x_act_as and data.get("r") == "admin":
+        # skip_act_as=True 时（/me、/change-password、/logout）禁止代管穿透，
+        # 避免身份初始化/自改密码被管理员 X-Act-As 误影响。
+        if not skip_act_as and x_act_as and data.get("r") == "admin":
             row = ctx.users.get_by_name(x_act_as) if ctx.users else None
             if row is not None:
                 tgt = dict(row)  # sqlite3.Row 无 .get()，须先转 dict
@@ -138,3 +93,52 @@ def require_auth(perm: str = "chat"):
             raise HTTPException(status_code=403, detail="无权限执行该操作")
         return data
     return Depends(dependency)
+
+
+@router.get("/me")
+async def me(response: Response,
+            authorization: str | None = Header(None),
+            user=require_auth("chat", skip_act_as=True)):
+    from ..core.security import ROLE_LABELS, ROLES
+    # 已在线会话（token 存 localStorage）打开页面时经 /me 刷新 media Cookie，
+    # 使旧会话无需重新登录即可访问受保护的 /media 资源。
+    token = _extract_token(authorization)
+    if token:
+        _set_media_cookie(response, token)
+    role = user.get("r", "")
+    return {
+        "user": user.get("u", ""),
+        "role": role,
+        "role_label": ROLE_LABELS.get(role, role),
+        "perms": ROLES.get(role, []),
+    }
+
+
+@router.post("/change-password")
+async def change_password(req: ChangePwdReq,
+                          user=require_auth("chat", skip_act_as=True)):
+    ctx = get_ctx()
+    username = user.get("u", "")
+    if not ctx.users:
+        raise HTTPException(status_code=400, detail="未启用多用户存储")
+    u = ctx.users.verify_password(username, req.old_password)
+    if not u:
+        raise HTTPException(status_code=400, detail="原密码错误")
+    try:
+        ctx.users.set_password(u["id"], req.new_password)
+        ctx.users.bump_epoch(u["id"])  # 改密后立即使旧令牌失效
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    ctx.audit.log(username, "change_password", "修改自身密码")
+    return {"ok": True}
+
+
+@router.post("/logout")
+async def logout(response: Response,
+                user=require_auth("chat", skip_act_as=True)):
+    """主动登出：吊销当前令牌（jti 加入 revoked 集合），并清除 media Cookie。"""
+    ctx = get_ctx()
+    ctx.auth.revoke_token(user.get("jti"))
+    response.delete_cookie(MEDIA_COOKIE, path="/media")
+    ctx.audit.log(user.get("u", ""), "logout", "主动登出")
+    return {"ok": True}

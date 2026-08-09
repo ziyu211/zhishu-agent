@@ -30,6 +30,14 @@ class MemoryBackend:
     def search(self, owner: Optional[str], query: str, top_k: int = 5) -> List[str]:
         raise NotImplementedError
 
+    def stats(self, owner: Optional[str] = None) -> dict:
+        """返回该 owner 的长期记忆体量（count 等）。"""
+        raise NotImplementedError
+
+    def clear(self, owner: Optional[str] = None) -> int:
+        """清空该 owner 的长期记忆，返回删除条数。"""
+        raise NotImplementedError
+
 
 class BuiltinMemoryBackend(MemoryBackend):
     """默认后端：复用内置 RAG 管线（sqlite 向量库）。"""
@@ -70,6 +78,27 @@ class BuiltinMemoryBackend(MemoryBackend):
             logger.warning("BuiltinMemoryBackend.search 失败: %s", e)
             return []
         return [h["text"] for h in hits]
+
+    def stats(self, owner: Optional[str] = None) -> dict:
+        try:
+            docs = self.kb.list_documents(owner=owner or None, limit=1000)
+            return {"backend": "builtin", "count": len(docs), "owner": owner or "*"}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("BuiltinMemoryBackend.stats 失败: %s", e)
+            return {"backend": "builtin", "count": 0, "owner": owner or "*", "error": str(e)}
+
+    def clear(self, owner: Optional[str] = None) -> int:
+        try:
+            docs = self.kb.list_documents(owner=owner or None, limit=10000)
+            n = 0
+            for d in docs:
+                did = d.get("doc_id")
+                if did and self.kb.delete_document(did, owner or None):
+                    n += 1
+            return n
+        except Exception as e:  # noqa: BLE001
+            logger.warning("BuiltinMemoryBackend.clear 失败: %s", e)
+            return 0
 
 
 class Mem0MemoryBackend(MemoryBackend):
@@ -113,6 +142,19 @@ class Mem0MemoryBackend(MemoryBackend):
             if t:
                 out.append(t)
         return out[:top_k]
+
+    def stats(self, owner: Optional[str] = None) -> dict:
+        # mem0 不直接暴露计数，返回后端标识（count 为 None 表示未知）。
+        return {"backend": "mem0", "count": None, "owner": owner or "*"}
+
+    def clear(self, owner: Optional[str] = None) -> int:
+        uid = self._uid(owner)
+        try:
+            self._mem.delete_all(user_id=uid)
+            return -1  # mem0 不返回删除计数
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Mem0MemoryBackend.clear 失败: %s", e)
+            return 0
 
 
 def create_memory_backend(cfg, data_dir: str) -> MemoryBackend:

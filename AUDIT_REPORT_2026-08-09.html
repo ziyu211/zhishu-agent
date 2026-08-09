@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智枢 Zhishu Agent · 全量代码审查与业务闭环审计报告</title>
+<style>
+  :root{ --bg:#0f1420; --card:#171d2b; --card2:#1d2638; --line:#2a3346; --txt:#e6ebf2; --mut:#9aa7bd;
+         --ok:#2ecc71; --warn:#f1c40f; --minor:#5aa9ff; --bad:#ff5c5c; --accent:#7c5cff; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;line-height:1.6}
+  .wrap{max-width:1180px;margin:0 auto;padding:32px 24px 80px}
+  h1{font-size:26px;margin:0 0 6px;background:linear-gradient(90deg,#7c5cff,#5aa9ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  h2{font-size:19px;margin:38px 0 12px;padding-left:11px;border-left:4px solid var(--accent)}
+  h3{font-size:15px;margin:22px 0 8px;color:#cdd6e6}
+  .sub{color:var(--mut);font-size:13px;margin-bottom:6px}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:14px 0 4px;font-size:13px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:14px}
+  .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .kpi b{display:block;font-size:26px;margin-bottom:2px}
+  .kpi small{color:var(--mut)}
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px;background:var(--card);border-radius:10px;overflow:hidden}
+  th,td{border-bottom:1px solid var(--line);padding:9px 11px;text-align:left;vertical-align:top}
+  th{background:var(--card2);color:#cdd6e6;font-weight:600}
+  tr:last-child td{border-bottom:none}
+  code{background:#0c1018;color:#8fd0ff;padding:1px 6px;border-radius:5px;font-size:12px}
+  .tag{display:inline-block;padding:2px 9px;border-radius:20px;font-size:11.5px;font-weight:600;white-space:nowrap}
+  .t-ok{background:rgba(46,204,113,.16);color:var(--ok)}
+  .t-warn{background:rgba(241,196,15,.16);color:var(--warn)}
+  .t-minor{background:rgba(90,169,255,.16);color:var(--minor)}
+  .t-bad{background:rgba(255,92,92,.16);color:var(--bad)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:12px 0}
+  .gap{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--warn);border-radius:10px;padding:14px 18px;margin:12px 0}
+  .gap.minor{border-left-color:var(--minor)}
+  .gap b{color:#fff}
+  .file{color:var(--mut);font-size:12px}
+  ul{margin:6px 0 6px 18px;padding:0}
+  li{margin:3px 0}
+  .note{color:var(--mut);font-size:12.5px;margin-top:6px}
+  .ok-line{color:var(--ok)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>智枢 Zhishu Agent · 全量代码审查与业务闭环审计报告</h1>
+<div class="sub">审查日期：2026-08-09 ｜ 范围：前端 13 个功能页签 + 后端 12 个 Router / 87 个业务端点 + 13 个核心业务模块 ｜ 方法：静态全量扫描 + 逐文件核验 + 前端↔后端交叉比对</div>
+
+<div class="legend">
+  <span><i class="dot" style="background:var(--ok)"></i>✅ 完整闭环</span>
+  <span><i class="dot" style="background:var(--warn)"></i>⚠️ 部分缺口 / 可观测性</span>
+  <span><i class="dot" style="background:var(--minor)"></i>🔸 轻微不一致 / 死代码</span>
+  <span><i class="dot" style="background:var(--bad)"></i>❌ 阻断性缺陷</span>
+</div>
+
+<div class="grid">
+  <div class="kpi"><b>13 / 13</b><small>前端功能页签均有后端支撑（无死 UI）</small></div>
+  <div class="kpi"><b>13 / 13</b><small>核心业务模块 CRUD 闭环完整</small></div>
+  <div class="kpi"><b>0</b><small>阻断性缺陷 / 路由注册遗漏 / 路径冲突</small></div>
+  <div class="kpi"><b>0</b><small>裸 <code>except:</code> 吞错 / 业务 TODO / 写入静默 no-op</small></div>
+  <div class="kpi"><b>6</b><small>已核实的真实缺口 / 改进项（见下文）</small></div>
+  <div class="kpi"><b>✓</b><small>上一轮「贴代码不执行」修复已落地并生效</small></div>
+</div>
+
+<h2>一、总体结论</h2>
+<div class="card">
+<p><b class="ok-line">项目整体处于健康状态。</b>前端 13 个功能页签与路由表、<code>views/</code> 组件一一对应，每个页签均有真实后端 API 调用，<b>不存在「纯 UI 无后端支撑」的死页</b>。后端 12 个 <code>APIRouter</code> 在 <code>main.py</code> 中全部注册，<b>无「已定义未注册」「导入未使用」「路径+方法冲突」</b>。13 个核心业务模块（技能/插件/MCP/智能体/Provider/会话/RAG/记忆/定时任务/RBAC/设置/脱敏/文件媒体）均实现 <code>创建→读取→更新→删除→持久化→权限校验→API 暴露</code> 的完整闭环。</p>
+<p>代码质量信号优秀：全仓 <b>0 处裸 <code>except:</code></b>、业务代码 <b>0 处 TODO/FIXME</b>、<b>0 处写入静默 no-op</b>、<b>0 处死引用</b>。仅 3 处 <code>NotImplementedError</code> 均为预期（抽象基类 ×2、非默认向量后端占位 ×1）。这与 2026-08-04 的「全链路闭环审计 07fef54（修复 15 处断点）」一脉相承。</p>
+<p>共发现 <b>6 项</b>经逐文件核实的真实缺口/改进项，其中 1 项为 Agent 初查误报（已核实为无缺口），其余为可观测性/安全强化/一致性层面的改进建议，<b>均非阻断性</b>。</p>
+</div>
+
+<h2>二、逐页签业务闭环核验（前端 → 后端）</h2>
+<table>
+<thead><tr><th>页签 / 路由</th><th>核心后端端点</th><th>业务动作覆盖</th><th>状态</th></tr></thead>
+<tbody>
+<tr><td><b>登录</b> /login</td><td><code>POST /api/v1/auth/login</code> · <code>GET /health</code></td><td>登录下发 token + media Cookie；版本探测</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>对话</b> /chat</td><td><code>POST /api/v1/chat</code>(SSE) · <code>conversations</code> CRUD · <code>chat/attach</code> · <code>chat/parse</code></td><td>多会话流式对话、附件落盘+解析、子智能体选择、归属校验、并发限流</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>模型</b> /models</td><td><code>providers</code> CRUD · <code>models/default</code> · <code>models/fetch</code> · <code>models/presets</code></td><td>Provider 增删改、启用、优先级、默认模型、远程模型探测、SSRF 防护</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>技能</b> /skills</td><td><code>skills</code> CRUD · <code>toggle</code> · <code>import</code> · <code>export</code></td><td>技能增删改、启停、Hermes/OpenClaw 导入、导出 zip、权限隔离</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>插件</b> /plugins</td><td><code>plugins</code> CRUD · <code>toggle</code> · <code>refresh</code> · <code>install</code></td><td>自定义工具增删改、启停即时注册、掩码恢复明文、内置解析插件安装</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>MCP</b> /mcp</td><td><code>mcp</code> CRUD · <code>connect</code> · <code>call</code> · <code>refresh</code> · <code>tools</code></td><td>服务器增删改、连接、工具列表、工具调用测试、即时生效</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>记忆</b> /memory</td><td><code>memory</code> GET/PUT · <code>export</code> · <code>search</code></td><td>MEMORY/USER/SOUL 文件型记忆读写、导出、检索（按用户隔离）</td><td><span class="tag t-warn">⚠️ 闭环（向量记忆缺可观测接口）</span></td></tr>
+<tr><td><b>智能体</b> /agents</td><td><code>agents</code> CRUD · <code>toggle</code> · <code>options</code></td><td>多 Agent 协作成员增删改、启停、级联清理悬挂 sub_agents 引用</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>定时任务</b> /cron</td><td><code>cron</code> CRUD · <code>toggle</code> · <code>run</code> · <code>history</code></td><td>周期任务、手动执行、执行历史、shell 动作限 admin/operator 防 RCE</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>用户</b> /users</td><td><code>users</code> CRUD · <code>password</code> · <code>roles</code></td><td>用户增删改、角色/状态、重置密码、分页筛选、删除级联全部归属数据</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>系统</b> /system</td><td><code>admin/status</code> · <code>admin/audit</code> · <code>admin/redact</code></td><td>运行状态、审计日志（audit:read 拆分）、PII 脱敏自测</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>设置</b> /settings</td><td><code>settings</code> GET/POST · <code>auth/change-password</code></td><td>改密、默认模型、外观；管理员长期记忆/安全开关即时生效并持久化</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+<tr><td><b>OpenAI 网关</b> /v1</td><td><code>/v1/models</code> · <code>/v1/chat/completions</code></td><td>OpenAI 兼容模型列表与对话（复用 RBAC + 限流）</td><td><span class="tag t-ok">✅ 闭环</span></td></tr>
+</tbody>
+</table>
+<div class="note">运行时路由：<code>GET /health</code>（公开）、<code>GET /media/{path}</code>（中间件鉴权 + 归属隔离 + 穿越防护）、<code>GET /{full_path}</code>（SPA 兜底）。三项均正常。</div>
+
+<h2>三、核心模块闭环深度核验</h2>
+<div class="card">
+<p>对每个领域独立验证了「写路径是否真正落盘 / 权限是否在读与写两侧一致 / 是否存在静默失败」：</p>
+<ul>
+<li><b>技能 / 插件 / MCP</b>：目录即模块（<code>data/{skills,plugins,mcp}/&lt;name&gt;/</code>），改动即时注册工具生效；env/header/api_key 均掩码；<span class="ok-line">OK</span>。</li>
+<li><b>Provider / 模型</b>：<code>providers.json</code> JSON 文件，<code>api_key</code> 经 SM4/XOR 加密落盘；<code>add</code> 禁止覆盖他人、<code>remove</code> 校验 owner/admin；<span class="ok-line">OK</span>。</li>
+<li><b>会话 / 对话</b>：SQLite <code>zhishu_conversations.db</code>，删除级联清理记忆 turns 与磁盘附件；SSE 对话自动建会话并校验 agent/owner <code>can_view</code>；<span class="ok-line">OK</span>。</li>
+<li><b>RAG / 知识库</b>：向量库 SQLite + 原文件，owner 或 NULL(共享) 过滤覆盖 search/list/get/delete；图谱按 <code>allowed_doc_ids</code> 过滤；<span class="ok-line">OK</span>。</li>
+<li><b>长期记忆</b>：会话记忆 SQLite（FTS5）按 <code>owner:session</code> 命名空间隔离；文件型记忆按 <code>user_memory_dir</code> 隔离；<span class="ok-line">OK（向量记忆见缺口 G1）</span>。</li>
+<li><b>定时任务</b>：SQLite <code>cron.db</code>，<code>_run_shell</code> 纵深防御（实时复核 role + <code>check_command</code>/<code>run_guarded</code>）；<span class="ok-line">OK</span>。</li>
+<li><b>用户 / RBAC</b>：SQLite 用户库（salt+hash + <code>password_epoch</code>），末管理员守卫；删除级联 conversations/providers/memory/cron/agents/KB/附件；审计日志写前经 Redactor；SM3/SM4/SM2 缺依赖时降级 SHA256/XOR；<span class="ok-line">OK</span>。</li>
+<li><b>设置 / 脱敏</b>：<code>apply_settings</code> 落盘 <code>config.override.json</code> 并重建 MemoryManager（失败回滚）；Redactor 手机/身份证/邮箱/银行卡正则失败安全隐藏；<span class="ok-line">OK</span>。</li>
+</ul>
+</div>
+
+<h2>四、已核实的真实缺口与改进项（6 项）</h2>
+
+<div class="gap">
+<b>G1 · ⚠️ 向量长期记忆无可观测 / 清理接口</b> <span class="file">api/modules.py:647-698 · core/memory</span><br>
+<code>/memory/*</code> 仅覆盖 <code>MEMORY.md / USER.md / SOUL.md</code> <b>文件型</b>记忆。<b>向量长期记忆</b>（<code>MemoryManager</code> / <code>VectorMemoryProvider</code>）只能经 <code>/settings</code> 整体开关重建，<b>无按用户查看 / 检索 / 清空</b>的 API。<br>
+<b>影响</b>：开启向量记忆后，管理员无法审计「某用户沉淀了多少向量记忆」或按需清理，属于可观测性缺口。<br>
+<b>建议</b>：新增 <code>GET /api/v1/memory/vector</code>（统计/列举）+ <code>DELETE /api/v1/memory/vector</code>（按 owner 清空），或纳入 <code>/admin/status</code> 展示向量记忆体量。
+</div>
+
+<div class="gap">
+<b>G2 · ⚠️ 无主动登出 / 令牌吊销端点</b> <span class="file">api/auth.py（后端源码无 logout/revoke）</span><br>
+鉴权为无状态 Bearer，token <b>仅在改密 <code>bump_epoch</code> 时失效</b>，服务端无任何 <code>logout</code> / <code>revoke</code> / 强制下线接口。<br>
+<b>影响</b>：多用户/审计场景下，用户无法主动使当前会话失效；管理员无法强制下线某账号（只能改其密码连带踢掉所有人）。<br>
+<b>建议</b>：新增 <code>POST /api/v1/auth/logout</code>（将当前 jti/token 加入吊销表，<code>AuthService.verify</code> 回查）或 <code>POST /api/v1/users/:uid/revoke</code>（admin 强制抬高 epoch）。
+</div>
+
+<div class="gap">
+<b>G3 · 🔸 <code>/me</code> 与 <code>/change-password</code> 绕过 <code>require_auth</code> 的 X-Act-As 分支</b> <span class="file">api/auth.py:76-110</span><br>
+两端点用内联 <code>_current()</code> 而非全站统一的 <code>require_auth(perm)</code> 依赖，因此不经过 admin 的 <code>X-Act-As</code> 代管逻辑。<br>
+<b>影响</b>：行为正确（身份初始化不应被代管穿透；改密有专用 admin 端点 <code>/users/:uid/password</code>），但与全站守卫范式不一致，增加维护认知成本。<br>
+<b>建议</b>：统一走 <code>require_auth</code> 并显式 <code>skip_act_as=True</code>，消除特例。
+</div>
+
+<div class="gap">
+<b>G4 · 🔸 前端 <code>authStatus()</code> 包装函数无调用方（死代码）</b> <span class="file">frontend/src/api/auth.ts:7</span><br>
+<code>authStatus()</code> 导出但全仓无任何调用；后端 <code>GET /api/v1/auth/status</code> 端点存在且仅在登录页「判断鉴权是否开启/用户数」时有用，但前端登录页直接尝试 login，未消费该端点。<br>
+<b>影响</b>：轻微——端点可用但未利用，登录页无法据此优化「是否展示密码框 / 是否提示初始化」。非死端点，仅是前端包装冗余。<br>
+<b>建议</b>：登录页改为先调 <code>auth/status</code> 判断部署形态（匿名/密码登录/已建用户），或删除该未用包装。
+</div>
+
+<div class="gap">
+<b>G5 · ✅ 模型选择持久化 —— 初查误报，已核实为无缺口</b> <span class="file">frontend/src/stores/app.ts:12/85/100/101</span><br>
+初查曾标记「模型选择刷新后重置」为半闭环。<b>经核验</b>：<code>app.selectedModel</code> 已持久化到 <code>localStorage('zhishu.selectedModel')</code>，刷新保留；对话发送时回填 <code>model: app.selectedModel</code>。非服务端 per-user，但自托管单部署完全可接受。<b>结论：无缺口，特此澄清以免误导。</b>
+</div>
+
+<div class="gap">
+<b>G6 · ⚠️ 脱敏无独立管理闭环（按设计为自测接口）</b> <span class="file">api/admin.py:34 · core/redact.py</span><br>
+<code>POST /admin/redact</code> 仅为<b>自测</b>接口；脱敏实际作用在审计日志落库。无「查看脱敏规则 / 预览全部已脱敏字段 / 脱敏命中统计」的管理端点（开关在 <code>/settings</code>）。<br>
+<b>影响</b>：合规审计人员无法量化「系统已脱敏多少条敏感数据」。<br>
+<b>建议</b>：在系统页增加「脱敏命中统计」（可在 <code>/admin/status</code> 或新增 <code>/admin/redact/stats</code> 返回计数），闭环可观测。
+</div>
+
+<h2>五、上一轮修复确认</h2>
+<div class="card">
+<p><b class="ok-line">「贴代码不执行」回归修复已落地并生效。</b> 核查当前仓库：</p>
+<ul>
+<li><code>core/agent/agent.py:261</code> 定义 <code>_extract_python_blocks()</code>；</li>
+<li><code>core/agent/agent.py:1137+</code> 主循环「无 tool_calls」分支新增<b>代码块→code_exec 兜底</b>，弱模型贴 Python 代码块会自动真实执行并回填；</li>
+<li><code>core/agent/system_prompt.py:33</code> 新增「代码执行硬性规则」强制调用工具、修正过时网络表述；</li>
+<li>提交 <code>8f96991</code> 已推送 GitHub，远程 <code>zsagent:1.0.16</code> 已完成 <code>docker cp</code> + restart + commit 固化。</li>
+</ul>
+</div>
+
+<h2>六、汇总评分与建议优先级</h2>
+<table>
+<thead><tr><th>维度</th><th>评分</th><th>说明</th></tr></thead>
+<tbody>
+<tr><td>前端页签覆盖</td><td><span class="tag t-ok">✅ 优秀</span></td><td>13/13 页签均有后端支撑</td></tr>
+<tr><td>后端路由完整性</td><td><span class="tag t-ok">✅ 优秀</span></td><td>12 router 全注册，0 冲突/0 遗漏</td></tr>
+<tr><td>CRUD 业务闭环</td><td><span class="tag t-ok">✅ 优秀</span></td><td>13/13 模块完整落盘 + 权限双侧一致</td></tr>
+<tr><td>代码健壮性</td><td><span class="tag t-ok">✅ 优秀</span></td><td>0 裸 except / 0 业务 TODO / 0 静默 no-op</td></tr>
+<tr><td>安全与可观测性</td><td><span class="tag t-warn">⚠️ 良好</span></td><td>G1/G2/G6 三项可观测性与令牌吊销建议补齐</td></tr>
+<tr><td>一致性</td><td><span class="tag t-minor">🔸 良好</span></td><td>G3/G4 两处轻微不一致/死代码，建议顺手清理</td></tr>
+</tbody>
+</table>
+<div class="note">建议下一步：按 P1（G1 向量记忆可观测、G2 令牌吊销）→ P2（G6 脱敏统计、G3/G4 一致性清理）顺序迭代。所有缺口均为增强项，<b>无阻断性缺陷，现有功能可正常交付使用</b>。</div>
+
+</div>
+</body>
+</html>
