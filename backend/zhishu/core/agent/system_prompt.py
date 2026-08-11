@@ -21,6 +21,9 @@ _TOOL_GUIDANCE = """\
 - 读取用户上传的文档（txt/md/csv/tsv/json/代码/日志等文本，以及 docx/xlsx/pptx/odt·ods·odp/rtf/epub/pdf 等）：\
 一律使用 read_file 工具，传入附件的 stored_path（或 /media/ URL），它基于标准库零依赖解析，\
 并支持分页(page)、行号(start_line/end_line)、字符预算(max_chars)。
+- **比对两个文件（如「对比这两份 Excel / 找出差异」）**：直接调用 compare_files 工具，传入两个文件的\
+引用（stored_path / /media/ URL / 文件名）即可，对比在服务端完成并返回差异报告；\
+千万不要自己 read_file 两份再人工对比，那既容易空转也不可靠。
 - parse_docx / parse_xlsx / parse_pdf 等旧插件已废弃，不要再调用，以免失败或空转。
 - 图片：作为视觉参考直接传给模型即可（系统不内置 OCR，无法提取图片内文字）。
 - 自愈：若 read_file 或解析器遇到不支持的文件格式、编码、或需要标准工具没有的处理\
