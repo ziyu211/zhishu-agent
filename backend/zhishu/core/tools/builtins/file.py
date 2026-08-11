@@ -32,6 +32,18 @@ async def file_read(args: dict, ctx) -> str:
 # 图片扩展名（read_file 据此判断是否为图片；图片仅作视觉参考，不提取文字）
 _IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff", ".svg"}
 
+# 二进制文件扩展名：file_write 是「文本模式写入」，绝不可用来生成这些文件，
+# 否则会把内容当 UTF-8 文本写进二进制容器，生成 Excel/Word/PDF/图片等无法打开的损坏文件。
+# .xlsx 等 Office 文件应走 generate_excel（或 code_exec + openpyxl）；其余走 code_exec。
+_BINARY_WRITE_BLOCKED = {
+    ".xlsx", ".xlsm", ".xls", ".docx", ".doc", ".pptx", ".ppt",
+    ".pdf", ".zip", ".gz", ".tar", ".tgz", ".7z", ".rar", ".bz2", ".xz",
+    ".odt", ".ods", ".odp", ".epub", ".bin",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico",
+    ".mp3", ".wav", ".ogg", ".opus", ".m4a", ".flac",
+    ".mp4", ".mov", ".webm", ".avi", ".mkv",
+}
+
 
 def _resolve_read_path(path: str, owner: str | None = None,
                        is_admin: bool = False) -> str | None:
@@ -191,7 +203,15 @@ async def read_file(args: dict, ctx) -> str:
     toolset="files",
 )
 async def file_write(args: dict, ctx) -> str:
-    path = _safe_path(args.get("path", ""))
+    raw_path = args.get("path", "")
+    ext = os.path.splitext(raw_path)[1].lower()
+    if ext in _BINARY_WRITE_BLOCKED:
+        hint = ("用 generate_excel 工具生成（支持多工作表 / CSV 输入）" if ext in (".xlsx", ".xlsm")
+                else "用 code_exec 编写 Python 生成（如 python-docx 生成 docx、fpdf 生成 pdf），"
+                     "生成的文件会自动发布为 /media 下载链接")
+        return (f"[file_write] 拒绝写入 {ext} 二进制文件：file_write 是文本模式写入，"
+                f"用它写 {ext} 会生成打不开的损坏文件。请{hint}。")
+    path = _safe_path(raw_path)
     content = args.get("content", "")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
