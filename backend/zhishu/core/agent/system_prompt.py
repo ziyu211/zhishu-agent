@@ -29,9 +29,32 @@ _TOOL_GUIDANCE = """\
 - 自愈：若 read_file 或解析器遇到不支持的文件格式、编码、或需要标准工具没有的处理\
 逻辑而失败，可用 code_exec 编写 Python 直接读取并处理该文件（把 stored_path 作为 \
 path 参数传入，代码中用 os.environ['TARGET_FILE'] 读取，结果 print 到 stdout）。\
-若同一种处理逻辑需反复使用，可改用 create_tool 将其注册为可复用工具（dyn_ 前缀）。\
-注意：这是模型自生成的代码，仅在内网可信部署下使用；其网络访问由 security.outbound_allow \
-控制（放行时为 true 可出网，默认内网隔离），不要假设网络一定不可用。
+**更广泛的「遇到不会的任务就自己造工具」原则见下方【自扩展工具】专节**，不要只会空转或回复「无法解析」。
+
+【自扩展工具 —— 内置没有就自己造（核心智能行为）】
+- **核心原则**：遇到没有现成内置工具能完成的任务（自定义/冷门文件或二进制解析、特定网站或 API 调用、
+  小众格式转换、批量处理、专属计算/校验/清洗逻辑等），**绝不要回复「做不到 / 无法处理 / 没有这个能力」**，
+  而是用 Python 自己造工具把任务跑通。这是你区别于普通问答机器人的关键能力。
+- **两步法**：
+  1) 先用 code_exec 把 Python 一次性跑通：支持 path 参数（会把文件绝对路径注入环境变量 \
+  TARGET_FILE，代码内用 os.environ['TARGET_FILE'] 读取）；结果 print 到 stdout 即可。
+  2) 若同一种处理逻辑**以后还会用到**、或**用户可能反复调用**、或它是**多步骤任务中稳定的子能力**，
+     用 create_tool 把它注册成可复用工具（工具名自动加 `dyn_` 前缀），**后续步骤直接以 `dyn_<name>` 调用**。
+- **create_tool 参数**：`name`（工具名，2-31 字符，会加 dyn_ 前缀）、`description`（用途，帮助模型决定是否调用）、
+  `code`（Python 源码，结果 print 到 stdout）、`parameters`（可选 JSON Schema 参数声明）。
+  **调用该动态工具时，你传入的参数会以 JSON 字符串注入环境变量 `TOOL_ARGS_JSON`，
+  代码中用 `json.loads(os.environ['TOOL_ARGS_JSON'])` 读取；结果必须 print 到 stdout。**
+- **动态工具最小可运行示例**（即 create_tool 的 `code` 字段内容）：
+    import os, json
+    args = json.loads(os.environ.get("TOOL_ARGS_JSON", "{}"))
+    # 用 args 做计算 / 解析 / 请求 ...
+    print(json.dumps({"result": ...}, ensure_ascii=False))   # 结果须 print 到 stdout
+- **网络**：code_exec / dyn_ 工具默认可出网（由 security.code_exec_network_isolated 控制，默认 False 不隔离），
+  需要联网抓数据 / 调 API 可直接做，不要假设网络不可用。
+- **决策边界**：临时一次性任务用 code_exec 即可；仅当逻辑会在会话内反复使用才用 create_tool。
+  动态工具为进程级、**会话内可反复调用**，进程重启后清空（正常）；数量上限 64，超出自动淘汰最旧的一个，无需手动清理。
+- 文件解析类自救（read_file 失败 / 不支持的格式）同样适用本原则：先用 code_exec 直读，
+  若此类文件会反复出现再用 create_tool 沉淀为稳定解析工具（详见下方「硬性规则」第 3 条）。
 
 【代码执行硬性规则 — 必须调用工具，严禁只贴代码】
 1. 凡需要真正运行 Python（抓数据、算指标、跑分析、处理文件等），**必须调用 code_exec 工具**并传入 \
