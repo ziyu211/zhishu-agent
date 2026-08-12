@@ -211,15 +211,15 @@ def _register_dynamic(tname: str, desc: str, code: str, params: dict,
 
 @tool(
     "code_exec",
-    "运行 Python 代码（对标 Hermes 自创工具/自愈能力）。"
-    "当 read_file 或解析器遇到不支持的文件格式、或需要标准工具没有的处理逻辑时，"
-    "可编写 Python 打印结果来解决。可选 path 参数会把文件绝对路径注入环境变量 "
-    "TARGET_FILE，代码内用 os.environ['TARGET_FILE'] 读取。代码须把结果 print 到 stdout。"
+    "【提速关键】需要连续运行『多段』Python 时，必须用 snippets 列表一次提交"
+    "（例：snippets:[\"import pandas as pd\",\"df=pd.read_csv(TARGET_FILE)\",\"print(df.describe())\"]），"
+    "系统在单个子进程内顺序执行、共享解释器与变量、避免每段都冷启动一个 Python（显著提速）。仅跑单段才用 code。"
+    "运行 Python 代码（对标 Hermes 自创工具/自愈能力）。当 read_file 或解析器遇到不支持的文件格式、"
+    "或需要标准工具没有的处理逻辑时，可编写 Python 打印结果来解决。可选 path 参数会把文件绝对路径注入 "
+    "TARGET_FILE 环境变量，代码内用 os.environ['TARGET_FILE'] 读取。代码须把结果 print 到 stdout。"
     "代码产生的新文件会【自动】落盘到媒体库并回传 /media/... 下载链接，无需额外参数；"
     "save_output=true 时额外收集 ZHISHU_OUTPUT_DIR 目录内的文件再发布一次。"
-    "注意：这是模型自生成的代码，仅在内网可信部署下使用。"
-    "需要连续跑多段 Python（如先 import 再多次处理）时，用 snippets 列表一次提交多段代码，"
-    "系统在单个子进程内顺序执行（共享解释器与变量，避免每段都冷启动一个 Python，显著提速）。",
+    "注意：这是模型自生成的代码，仅在内网可信部署下使用。",
     {
         "type": "object",
         "properties": {
@@ -243,6 +243,7 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
     if not code and snippets:
         # 合并多段代码在单个子进程内顺序执行（变量跨段保留），消除多次冷启动
         code = "\n\n".join(s.strip() for s in snippets if isinstance(s, str) and s.strip())
+    _used_singular = bool(code) and not snippets
     if not code:
         return "[code_exec] 缺少 code / snippets 参数"
     sec = getattr(ctx, "security", None)
@@ -288,6 +289,9 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
         )
         if _refs:
             result = append_unique_links(_ref_text, _refs)
+    if _used_singular:
+        result += ("\n\n[提速提示] 本次只跑了 1 段 Python。若还需运行多段脚本（如先 import 再多次处理），"
+                   "请用 snippets 列表一次提交，系统在单个子进程内顺序执行、共享变量，避免每段都冷启动。")
     return result
 
 

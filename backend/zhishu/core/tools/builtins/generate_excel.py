@@ -52,11 +52,12 @@ def _build_sheet(ws, spec: dict):
 
 @tool(
     "generate_excel",
+    "【提速关键】需要一次生成『多个』Excel 文件时，必须用 files 列表（每项含 filename 与 sheet/sheets），"
+    "一次调用返回多个 /media 下载链接（例：files:[{\"filename\":\"表1.xlsx\",\"sheet\":{...}},{\"filename\":\"表2.xlsx\",\"sheet\":{...}}]）。仅生成单文件才用 filename+sheet。"
     "生成真正合法的 Excel(.xlsx) 文件并返回 /media/... 可点击下载链接。"
     "当你需要『生成一张 Excel 表』（如销售表、库存表、导出数据、对比结果）时必须使用本工具，"
     "不要自己手写 xlsx 字节、不要拼 zip、也绝不要用 file_write 写 .xlsx（那会生成 Excel 打不开的损坏文件）。"
-    "传入表格数据（表头+行，或多个工作表），服务端用 openpyxl 在二进制模式正确生成标准 .xlsx。"
-    "需要一次生成多个独立 Excel 文件时，传入 files 列表（每项含 filename 与 sheet/sheets），一次调用返回多个 /media 下载链接。",
+    "传入表格数据（表头+行，或多个工作表），服务端用 openpyxl 在二进制模式正确生成标准 .xlsx。",
     {
         "type": "object",
         "properties": {

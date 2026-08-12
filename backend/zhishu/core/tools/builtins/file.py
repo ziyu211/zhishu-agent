@@ -95,15 +95,14 @@ def _resolve_read_path(path: str, owner: str | None = None,
 
 @tool(
     "read_file",
-    "按需读取文件内容（对标 hermes 解耦/按需哲学），是读取用户上传文档的唯一入口。"
-    "需要一次读取多个文件时，传入 paths 列表（批量读取，减少工具往返、显著提升处理速度）。"
+    "【提速关键】读取『多个』文件时必须用 paths 列表一次读取（例：paths:[\"a.txt\",\"b.csv\",\"c.pdf\"]），"
+    "严禁为每个文件单独调用本工具——每多一次调用就多一次 LLM 往返，这是处理变慢的主因。仅读单个文件才用 path。"
+    "按需读取文件内容（对标 hermes 解耦/按需哲学），是读取用户上传文档的唯一入口；"
     "支持 TXT/MD/CSV/TSV/JSON/代码/日志等文本，以及 Word(.docx)/Excel(.xlsx)/PPT(.pptx)/"
-    "OpenDocument(.odt/.ods/.odp)/RTF(.rtf)/EPUB(.epub)/PDF(.pdf) ——"
-    "前者用标准库零依赖提取，无需任何第三方库。支持分页(page)、行号(start_line/end_line)、"
-    "字符预算(max_chars)。**如需读取文件末尾最近 N 行（例如『提取最新100期』、查看日志尾部），"
-    "请直接使用 tail 参数（如 tail: 100），无需先知道总行数。** 用于对话框附件或磁盘文件的按需解析，"
-    "而非一次性全量解析。请勿使用 parse_docx/parse_xlsx/parse_pdf（已废弃）。图片请作为视觉参考传入模型，"
-    "系统不内置 OCR，无法提取图片内文字。",
+    "OpenDocument(.odt/.ods/.odp)/RTF(.rtf)/EPUB(.epub)/PDF(.pdf)——前者用标准库零依赖提取。支持分页(page)、"
+    "行号(start_line/end_line)、字符预算(max_chars)。**如需读取文件末尾最近 N 行（如『最新100期』、日志尾部），"
+    "直接用 tail 参数（tail:100），无需先知道总行数。** 用于附件或磁盘文件的按需解析，非一次性全量解析；"
+    "请勿使用 parse_docx/parse_xlsx/parse_pdf（已废弃）。图片请作为视觉参考传入模型，系统不内置 OCR。",
     {"type": "object", "properties": {
         "path": {"type": "string", "description": "单个文件路径：附件 stored_path、/media/ URL 或相对文件名（批量请用 paths）"},
         "paths": {"type": "array", "description": "批量读取：多个文件路径列表，一次调用读取多个文件并带分隔头拼接返回（减少往返、提速关键）", "items": {"type": "string"}},
@@ -143,10 +142,12 @@ async def read_file(args: dict, ctx) -> str:
     paths = args.get("paths") or []
     if isinstance(paths, str):
         paths = [paths]
+    _used_singular = False
     if not paths:
         single = (args.get("path") or args.get("file_path") or "").strip()
         if single:
             paths = [single]
+            _used_singular = True
     if not paths:
         return "[read_file] 缺少 path / paths 参数"
 
@@ -209,7 +210,11 @@ async def read_file(args: dict, ctx) -> str:
         for p, r in zip(paths, results):
             out.append(f"===== 文件 {os.path.basename(p)} =====\n{r}")
         return "\n\n".join(out)
-    return results[0] if results else "[read_file] 无有效文件"
+    body = results[0] if results else "[read_file] 无有效文件"
+    if _used_singular:
+        body += ("\n\n[提速提示] 本次只读了 1 个文件。若还需读取其它文件，请用 paths 列表一次读取"
+                 "（如 paths:[\"a.txt\",\"b.csv\"]），可少跑多次 LLM 往返、明显更快。")
+    return body
 
 
 @tool(

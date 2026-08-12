@@ -19,6 +19,8 @@ from ...shellguard import check_command, run_guarded
 
 @tool(
     "terminal_run",
+    "【提速关键】需要执行『多条』命令时必须用 commands 列表一次提交（例：commands:[\"cd data\",\"python run.py\",\"ls -l\"]），"
+    "逐条过白名单/高危校验后合并为单次执行，减少往返与快照开销。仅跑单条才用 command。"
     "执行本地 shell 命令（仅内网本机，命令受白名单与高危拦截约束）。",
     {
         "type": "object",

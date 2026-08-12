@@ -109,6 +109,8 @@ async def check_read_file(owner="tester"):
         single = await read_file({"path": f"/media/{owner}/a.txt"}, ctx)
         assert "alpha line1" in single, single
         assert "===== 文件" not in single, single
+        # v1.0.24：单数调用返回须带【提速提示】引导改用 paths 批量
+        assert "[提速提示]" in single, single
 
         # 批量 paths：带分隔头拼接
         multi = await read_file(
@@ -155,6 +157,8 @@ async def check_code_exec():
     # 单 code 向后兼容
     one = await code_exec({"code": "print('SOLO_CODE')"}, ctx)
     assert "SOLO_CODE" in one, one
+    # v1.0.24：单数调用返回须带【提速提示】引导改用 snippets 批量
+    assert "[提速提示]" in one, one
 
 
 async def check_generate_excel():
@@ -188,11 +192,24 @@ async def check_generate_excel():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+async def check_speed_hints():
+    """v1.0.24：4 个文件处理工具的顶层 description 须以【提速关键】开头，
+    把「用批量参数压 N 次同类调用为 1 次」这条最可靠的提速手段直接钉在模型决策点。"""
+    from zhishu.core.tools.registry import ToolRegistry
+
+    for name in ("read_file", "terminal_run", "code_exec", "generate_excel"):
+        spec = ToolRegistry.get(name)
+        assert spec is not None, f"{name} 未注册"
+        assert spec.description.startswith("【提速关键】"), (
+            f"{name} 的 description 未前置【提速关键】：{spec.description[:40]}")
+
+
 async def main():
     await check_read_file()
     await check_terminal()
     await check_code_exec()
     await check_generate_excel()
+    await check_speed_hints()
     print("ALL_TESTS_PASSED")
 
 
