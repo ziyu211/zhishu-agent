@@ -12,8 +12,8 @@ ZHISHU_SECRET 与各 Provider Key）或 `curl x | sh` 打穿宿主机。
 from __future__ import annotations
 
 from ..base import tool
-from .sandbox import sandbox_cwd_for
-from .artifacts import snapshot, publish_diff
+from .sandbox import sandbox_cwd_for, SANDBOX_ROOT
+from .artifacts import snapshot, publish_diff, publish_referenced_paths, append_unique_links
 from ...shellguard import check_command, run_guarded
 
 
@@ -67,4 +67,12 @@ async def terminal_run(args: dict, ctx) -> str:
     )
     if media is not None:
         result += publish_diff(cwd, before, media, owner)
+        # 兜底：捕获模型写到 cwd 之外、却把内部绝对路径回显给用户的真实产物
+        _ref_text, _refs = publish_referenced_paths(
+            result, media, owner,
+            media_root=getattr(media, "root", None),
+            sandbox_root=SANDBOX_ROOT, out_dir=None,
+        )
+        if _refs:
+            result = append_unique_links(_ref_text, _refs)
     return result

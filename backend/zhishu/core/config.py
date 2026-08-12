@@ -199,6 +199,9 @@ class MediaConfig:
     video_timeout: float = 600.0              # 单次生成最长等待（秒）
     # 产物落盘目录（相对 data_dir），经 /media 同源托管，避免临时 URL 过期
     store_dir: str = "generated"
+    # 媒体产物留存天数（>0 才启动后台清理；0=永久保留，避免重现「文件已清理」）。
+    # 默认 0：除非显式配置，智枢绝不自动删除用户已生成的文件。
+    retention_days: int = 0
     # 上游瞬时失败重试（应对 Agnes 等服务的 429/5xx Service busy）
     max_retries: int = 4                      # 最多重试次数（不含首次）
     retry_base_delay: float = 2.0             # 指数退避基期（秒）

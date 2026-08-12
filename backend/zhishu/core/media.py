@@ -193,6 +193,28 @@ class MediaStore:
             return ext.lower()
         return fallback
 
+    def sweep_expired(self, retention_days: int) -> int:
+        """删除超过 retention_days 天的产物文件（owner 隔离：递归逐文件清理）。
+
+        仅在 retention_days > 0 时由后台任务调用；默认配置 0 不触发任何删除，
+        确保「用户已生成的下载文件」永远不会被系统自动清理（杜绝「文件已清理」类投诉）。
+        返回删除的文件数；遍历/删除异常逐文件吞掉，不影响其余文件。
+        """
+        if retention_days <= 0:
+            return 0
+        cutoff = time.time() - retention_days * 86400.0
+        removed = 0
+        for dirpath, _dirs, files in os.walk(self.root):
+            for fn in files:
+                fp = os.path.join(dirpath, fn)
+                try:
+                    if os.path.getmtime(fp) < cutoff:
+                        os.remove(fp)
+                        removed += 1
+                except OSError:
+                    continue
+        return removed
+
 
 def resolve_media_fallback(file_path: str, user: Optional[dict],
                           root: str, max_bytes: int) -> Optional[str]:

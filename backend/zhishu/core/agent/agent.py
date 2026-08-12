@@ -45,6 +45,7 @@ from .download_guard import (
     strip_evasion,
     strip_leaked_paths,
 )
+from ..tools.builtins.artifacts import publish_referenced_paths
 from .context_engine import NoOpContextEngine, ContextEngine, CompressionContextEngine
 from ..modules.skills import maybe_learn, maybe_reflect
 from .. import image_routing
@@ -1380,22 +1381,22 @@ class Agent:
                 _guarded = _guarded or _g2
             # 下载链接护栏（续二）：剥离模型泄漏的内部绝对路径 + 搪塞话术，
             # 并尽量把真实文件重新发布为 /media 链接，确保「生成文件必有下载链接」。
+            # 与原仅覆盖 SANDBOX_ROOT 的版本相比，现统一走 publish_referenced_paths：
+            #   ① 落在媒体根（data_dir/generated）内的文件直接改写为 /media 链接（零拷贝）；
+            #   ② 其它任意真实存在的文件（sandbox / output /tmp/挂载卷等）一并拷贝发布。
             try:
                 from ..tools.builtins import SANDBOX_ROOT as _SB_ROOT
-                _leaked = find_leaked_paths(final)
+                _media = getattr(self.ctx, "media", None)
+                _owner = getattr(self.ctx, "user", "anonymous") or "anonymous"
                 _recovered = []
-                if _leaked and getattr(self.ctx, "media", None) is not None:
-                    _sb = os.path.abspath(_SB_ROOT)
-                    for _lp in _leaked:
-                        _ap = os.path.abspath(_lp)
-                        if _ap.startswith(_sb + os.sep) and os.path.isfile(_ap):
-                            try:
-                                _url = self.ctx.media.save_file(
-                                    _ap, kind="file",
-                                    owner=getattr(self.ctx, "user", "anonymous") or "anonymous")
-                                _recovered.append((os.path.basename(_ap), _url))
-                            except Exception:
-                                pass
+                if _media is not None:
+                    _ref_text, _recovered = publish_referenced_paths(
+                        final, _media, _owner,
+                        media_root=getattr(_media, "root", None),
+                        sandbox_root=_SB_ROOT, out_dir=None,
+                    )
+                    if _recovered:
+                        final = _ref_text
                 final = strip_evasion(final)
                 final = strip_leaked_paths(final)
                 if _recovered and not _guarded:

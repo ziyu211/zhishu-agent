@@ -29,8 +29,8 @@ from typing import Optional
 
 from ..base import tool, Tool, ToolContext
 from .. import registry as _registry
-from .artifacts import snapshot, publish_diff
-from .sandbox import sandbox_cwd_for
+from .artifacts import snapshot, publish_diff, publish_referenced_paths, append_unique_links
+from .sandbox import sandbox_cwd_for, SANDBOX_ROOT
 
 # 全局动态工具登记（进程级）。键为工具名，值为 (描述, 代码, 参数schema, 会话)
 CREATED_TOOLS: dict[str, tuple[str, str, dict, str]] = {}
@@ -270,6 +270,15 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
             if files:
                 result += "\n\n[输出目录生成的可下载文件]:\n" + "\n".join(
                     f"- [{n}]({u})" for n, u in files)
+        # 兜底：捕获模型写到 cwd/output 之外、却把内部绝对路径回显给用户的真实产物
+        # （如 data/generated/attachments/<owner>/...、/tmp、挂载卷等），统一补出 /media 链接。
+        _ref_text, _refs = publish_referenced_paths(
+            result, media, owner,
+            media_root=getattr(media, "root", None),
+            sandbox_root=SANDBOX_ROOT, out_dir=out_dir,
+        )
+        if _refs:
+            result = append_unique_links(_ref_text, _refs)
     return result
 
 

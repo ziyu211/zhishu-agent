@@ -6,7 +6,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: zhishu-agent:1.0.18
+    image: zhishu-agent:1.0.19
     container_name: zhishu-agent
     ports:
       - "8080:8080"

@@ -23,10 +23,28 @@ from .core.media import media_mime, content_disposition, resolve_media_fallback
 from . import api as api_pkg
 
 # 单一版本来源：登录页通过 /health 拉取此版本展示
-APP_VERSION = "1.0.18"
+APP_VERSION = "1.0.19"
 
 
 @asynccontextmanager
+async def _media_sweep_loop(media, retention_days: int):
+    """后台周期清理过期媒体产物（仅当 retention_days>0 时由 lifespan 启动）。
+
+    每小时检查一次；单轮为同步删除，文件量在常规部署下很小，阻塞可控。
+    任何单轮异常仅打印告警，不影响服务主流程。
+    """
+    import asyncio as _asyncio
+    while True:
+        await _asyncio.sleep(3600)
+        try:
+            n = media.sweep_expired(retention_days)
+            if n:
+                print(f"[智枢] 媒体留存清理：已删除 {n} 个超过 {retention_days} 天的过期文件",
+                      file=__import__("sys").stderr, flush=True)
+        except Exception as _e:  # noqa: BLE001
+            print(f"[智枢] 媒体留存清理失败：{_e!r}", file=__import__("sys").stderr, flush=True)
+
+
 async def lifespan(app: FastAPI):
     # 启动即异步连接已启用的 MCP 服务器、注册插件/MCP 工具（不阻塞请求）
     import asyncio
@@ -40,6 +58,11 @@ async def lifespan(app: FastAPI):
             _boot_tasks.append(asyncio.create_task(get_ctx().memory_manager.initialize()))
         # 启动定时任务调度器（任务定义持久化，重启后自动续算）
         get_ctx().cron.start()
+        # 可选媒体留存清理（仅当 media.retention_days>0 启用；默认 0=永久保留，
+        # 避免系统自动删除用户已生成文件而重现「文件已清理」类投诉）。
+        if getattr(get_ctx().cfg.media, "retention_days", 0) > 0:
+            _boot_tasks.append(asyncio.create_task(
+                _media_sweep_loop(get_ctx().media, get_ctx().cfg.media.retention_days)))
     except Exception as _e:
         import traceback as _tb
         print(f"[智枢] 启动期后台任务初始化失败：{_e!r}", file=__import__("sys").stderr, flush=True)
