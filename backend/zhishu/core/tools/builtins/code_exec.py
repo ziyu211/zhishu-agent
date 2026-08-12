@@ -217,25 +217,34 @@ def _register_dynamic(tname: str, desc: str, code: str, params: dict,
     "TARGET_FILE，代码内用 os.environ['TARGET_FILE'] 读取。代码须把结果 print 到 stdout。"
     "代码产生的新文件会【自动】落盘到媒体库并回传 /media/... 下载链接，无需额外参数；"
     "save_output=true 时额外收集 ZHISHU_OUTPUT_DIR 目录内的文件再发布一次。"
-    "注意：这是模型自生成的代码，仅在内网可信部署下使用。",
+    "注意：这是模型自生成的代码，仅在内网可信部署下使用。"
+    "需要连续跑多段 Python（如先 import 再多次处理）时，用 snippets 列表一次提交多段代码，"
+    "系统在单个子进程内顺序执行（共享解释器与变量，避免每段都冷启动一个 Python，显著提速）。",
     {
         "type": "object",
         "properties": {
-            "code": {"type": "string", "description": "要执行的 Python 代码（结果请 print 到 stdout）"},
+            "code": {"type": "string", "description": "要执行的 Python 代码（结果请 print 到 stdout）；与 snippets 二选一"},
+            "snippets": {"type": "array", "description": "批量代码段：多个 Python 代码片段列表，合并为一段在单个子进程内顺序执行（共享解释器与导入，变量跨段保留，消除多次冷启动、减少往返）", "items": {"type": "string"}},
             "path": {"type": "string", "description": "可选：目标文件 stored_path / /media/ URL，将作为 TARGET_FILE 环境变量供代码读取"},
             "timeout": {"type": "integer", "description": "超时秒数，默认取 security.code_exec_timeout，上限 120"},
             "save_output": {"type": "boolean", "description": "为 true 时收集代码生成的文件并落盘到媒体库，回传 /media/... 可下载链接"},
         },
-        "required": ["code"],
+        "required": [],
     },
     toolset="core",
 )
 async def code_exec(args: dict, ctx: ToolContext) -> str:
     if not _code_exec_allowed(ctx):
         return "[已拦截] 当前配置禁止代码执行（security.allow_code_exec=false）"
+    snippets = args.get("snippets") or []
+    if isinstance(snippets, str):
+        snippets = [snippets]
     code = (args.get("code") or "").strip()
+    if not code and snippets:
+        # 合并多段代码在单个子进程内顺序执行（变量跨段保留），消除多次冷启动
+        code = "\n\n".join(s.strip() for s in snippets if isinstance(s, str) and s.strip())
     if not code:
-        return "[code_exec] 缺少 code 参数"
+        return "[code_exec] 缺少 code / snippets 参数"
     sec = getattr(ctx, "security", None)
     default_to = getattr(sec, "code_exec_timeout", 30) or 30
     mem = getattr(sec, "code_exec_mem_limit_mb", 0) or 0

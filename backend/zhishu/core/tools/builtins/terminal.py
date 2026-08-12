@@ -23,10 +23,11 @@ from ...shellguard import check_command, run_guarded
     {
         "type": "object",
         "properties": {
-            "command": {"type": "string", "description": "要执行的命令"},
+            "command": {"type": "string", "description": "单条要执行的命令（多条请用 commands 列表）"},
+            "commands": {"type": "array", "description": "批量命令：多条 shell 命令列表，逐条经白名单/高危校验后合并为单次执行（减少往返与快照开销）", "items": {"type": "string"}},
             "timeout": {"type": "integer", "description": "超时秒数，默认30"},
         },
-        "required": ["command"],
+        "required": [],
     },
     toolset="core",
 )
@@ -39,8 +40,16 @@ async def terminal_run(args: dict, ctx) -> str:
     if sec is not None and not getattr(sec, "allow_shell", True):
         return "[已拦截] 系统已关闭本地命令执行（security.allow_shell=false）"
 
-    cmd = (args.get("command") or "").strip()
-    if not cmd:
+    commands = args.get("commands") or []
+    if isinstance(commands, str):
+        commands = [commands]
+    single = (args.get("command") or "").strip()
+    # 解析待执行命令列表：优先单条 command，否则取 commands 列表
+    if single:
+        candidate_cmds = [single]
+    else:
+        candidate_cmds = [c.strip() for c in commands if isinstance(c, str) and c.strip()]
+    if not candidate_cmds:
         return "空命令"
     try:
         timeout = int(args.get("timeout", 30))
@@ -48,13 +57,19 @@ async def terminal_run(args: dict, ctx) -> str:
         timeout = 30
     timeout = max(1, min(timeout, 300))
 
-    reason = check_command(
-        cmd,
-        allowlist=(getattr(sec, "shell_allowlist", None) or None) if sec else None,
-        enforce_allowlist=getattr(sec, "shell_enforce_allowlist", True) if sec else True,
-    )
-    if reason:
-        return f"[已拦截] {reason}"
+    # 逐条安全校验（白名单 + 高危拦截），再合并为单次执行
+    eff_allowlist = (getattr(sec, "shell_allowlist", None) or None) if sec else None
+    eff_enforce = getattr(sec, "shell_enforce_allowlist", True) if sec else True
+    for c in candidate_cmds:
+        reason = check_command(
+            c,
+            allowlist=eff_allowlist,
+            enforce_allowlist=eff_enforce,
+        )
+        if reason:
+            return f"[已拦截] {reason}"
+    # 合并为一条 shell（按顺序执行），共享一次快照与一次进程
+    cmd = "\n".join(candidate_cmds)
 
     media = getattr(ctx, "media", None)
     owner = getattr(ctx, "user", "anonymous") or "anonymous"

@@ -55,11 +55,12 @@ def _build_sheet(ws, spec: dict):
     "生成真正合法的 Excel(.xlsx) 文件并返回 /media/... 可点击下载链接。"
     "当你需要『生成一张 Excel 表』（如销售表、库存表、导出数据、对比结果）时必须使用本工具，"
     "不要自己手写 xlsx 字节、不要拼 zip、也绝不要用 file_write 写 .xlsx（那会生成 Excel 打不开的损坏文件）。"
-    "传入表格数据（表头+行，或多个工作表），服务端用 openpyxl 在二进制模式正确生成标准 .xlsx。",
+    "传入表格数据（表头+行，或多个工作表），服务端用 openpyxl 在二进制模式正确生成标准 .xlsx。"
+    "需要一次生成多个独立 Excel 文件时，传入 files 列表（每项含 filename 与 sheet/sheets），一次调用返回多个 /media 下载链接。",
     {
         "type": "object",
         "properties": {
-            "filename": {"type": "string", "description": "输出文件名，如 销售表.xlsx（缺省 export.xlsx）"},
+            "filename": {"type": "string", "description": "单工作簿输出文件名，如 销售表.xlsx（缺省 export.xlsx）"},
             "sheet": {
                 "type": "object",
                 "description": "单个工作表：{name?, header?:[列名], rows?:[[...],...], csv?:'csv文本'}",
@@ -67,6 +68,11 @@ def _build_sheet(ws, spec: dict):
             "sheets": {
                 "type": "array",
                 "description": "多个工作表：[{name?, header?, rows?, csv?}, ...]",
+                "items": {"type": "object"},
+            },
+            "files": {
+                "type": "array",
+                "description": "批量生成多个独立 Excel 工作簿：[{filename?, sheet?/sheets?}, ...]，一次调用返回多个 /media 下载链接",
                 "items": {"type": "object"},
             },
         },
@@ -84,52 +90,71 @@ async def generate_excel(args: dict, ctx) -> str:
     except Exception:
         return "[generate_excel] 缺少 openpyxl 依赖，无法生成 Excel（请联系管理员安装）"
 
-    filename = (args.get("filename") or "export.xlsx").strip()
-    if not filename.lower().endswith((".xlsx", ".xlsm")):
-        filename += ".xlsx"
-
-    sheets_in = args.get("sheets")
-    single = args.get("sheet")
-    if not sheets_in and isinstance(single, dict):
-        sheets_in = [single]
-    if not sheets_in or not isinstance(sheets_in, list):
-        return ("[generate_excel] 缺少表格数据：请传入 sheets=[{header:[...], rows:[[...]]}] "
-                "或 sheet={header, rows}，也可用 csv 字段直接给 CSV 文本。")
-
-    wb = Workbook()
-    # 移除默认空表，按用户数据重建
-    default = wb.active
-    wb.remove(default)
-    for idx, spec in enumerate(sheets_in):
-        if not isinstance(spec, dict):
-            continue
-        name = (spec.get("name") or f"Sheet{idx + 1}")[:31]
-        ws = wb.create_sheet(title=name)
-        try:
-            _build_sheet(ws, spec)
-        except Exception as e:  # noqa: BLE001
-            ws.append([f"[该工作表解析失败: {e}]"])
-    if not wb.sheetnames:
-        wb.create_sheet("Sheet1")
-
     owner = getattr(ctx, "user", "anonymous") or "anonymous"
-    tmp_path = None
-    try:
-        fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
-        os.close(fd)
-        wb.save(tmp_path)
-        # 落盘到媒体库（保留文件名），返回 /media 链接
-        url = media.save_file(tmp_path, kind="file", owner=owner)
-    except Exception as e:  # noqa: BLE001
-        return f"[generate_excel] 生成失败: {e}"
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
 
-    n = len(wb.sheetnames)
-    return (f"已生成标准 Excel 文件「{filename}」（共 {n} 个工作表，可被 Excel / WPS /  libreoffice 正常打开）：\n"
-            f"[{filename}]({url})\n\n"
-            f"（点击即可下载。如需多表，传入 sheets 数组；如需从 CSV 生成，给 csv 字段即可）")
+    # 批量模式：files = [{filename?, sheet?/sheets?}, ...]
+    files = args.get("files") or []
+    if isinstance(files, str):
+        files = [files]
+    if not files:
+        # 兼容单工作簿模式（filename + sheet/sheets）
+        single_sheets = args.get("sheets")
+        single_sheet = args.get("sheet")
+        if not single_sheets and isinstance(single_sheet, dict):
+            single_sheets = [single_sheet]
+        files = [{
+            "filename": (args.get("filename") or "export.xlsx").strip(),
+            "sheets": single_sheets,
+        }]
+
+    def _save_one(spec: dict) -> str:
+        if not isinstance(spec, dict):
+            return f"[generate_excel] 无效的 files 元素: {spec!r}"
+        filename = (spec.get("filename") or "export.xlsx").strip()
+        if not filename.lower().endswith((".xlsx", ".xlsm")):
+            filename += ".xlsx"
+        sheets_in = spec.get("sheets")
+        single = spec.get("sheet")
+        if not sheets_in and isinstance(single, dict):
+            sheets_in = [single]
+        if not sheets_in or not isinstance(sheets_in, list):
+            return (f"[generate_excel] 「{filename}」缺少表格数据：请传入 sheets=[...] "
+                    f"或 sheet={{...}}，也可用 csv 字段。")
+        wb = Workbook()
+        # 移除默认空表，按用户数据重建
+        default = wb.active
+        wb.remove(default)
+        for idx, s in enumerate(sheets_in):
+            if not isinstance(s, dict):
+                continue
+            name = (s.get("name") or f"Sheet{idx + 1}")[:31]
+            ws = wb.create_sheet(title=name)
+            try:
+                _build_sheet(ws, s)
+            except Exception as e:  # noqa: BLE001
+                ws.append([f"[该工作表解析失败: {e}]"])
+        if not wb.sheetnames:
+            wb.create_sheet("Sheet1")
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(suffix=".xlsx")
+            os.close(fd)
+            wb.save(tmp_path)
+            # 落盘到媒体库（保留文件名），返回 /media 链接
+            url = media.save_file(tmp_path, kind="file", owner=owner)
+        except Exception as e:  # noqa: BLE001
+            return f"[generate_excel] 「{filename}」生成失败: {e}"
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+        n = len(wb.sheetnames)
+        return (f"已生成标准 Excel 文件「{filename}」（共 {n} 个工作表，可被 Excel / WPS / libreoffice 正常打开）：\n"
+                f"[{filename}]({url})")
+
+    results = [_save_one(f) for f in files]
+    if len(results) > 1:
+        return "\n\n".join(results)
+    return results[0] if results else "[generate_excel] 无有效生成任务"

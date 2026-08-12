@@ -96,6 +96,7 @@ def _resolve_read_path(path: str, owner: str | None = None,
 @tool(
     "read_file",
     "按需读取文件内容（对标 hermes 解耦/按需哲学），是读取用户上传文档的唯一入口。"
+    "需要一次读取多个文件时，传入 paths 列表（批量读取，减少工具往返、显著提升处理速度）。"
     "支持 TXT/MD/CSV/TSV/JSON/代码/日志等文本，以及 Word(.docx)/Excel(.xlsx)/PPT(.pptx)/"
     "OpenDocument(.odt/.ods/.odp)/RTF(.rtf)/EPUB(.epub)/PDF(.pdf) ——"
     "前者用标准库零依赖提取，无需任何第三方库。支持分页(page)、行号(start_line/end_line)、"
@@ -104,23 +105,22 @@ def _resolve_read_path(path: str, owner: str | None = None,
     "而非一次性全量解析。请勿使用 parse_docx/parse_xlsx/parse_pdf（已废弃）。图片请作为视觉参考传入模型，"
     "系统不内置 OCR，无法提取图片内文字。",
     {"type": "object", "properties": {
-        "path": {"type": "string", "description": "文件路径：附件 stored_path、/media/ URL 或相对文件名"},
+        "path": {"type": "string", "description": "单个文件路径：附件 stored_path、/media/ URL 或相对文件名（批量请用 paths）"},
+        "paths": {"type": "array", "description": "批量读取：多个文件路径列表，一次调用读取多个文件并带分隔头拼接返回（减少往返、提速关键）", "items": {"type": "string"}},
         "page": {"type": "integer", "description": "页码，从 1 开始，默认 1"},
         "page_size": {"type": "integer", "description": "每页行数，默认 800"},
         "max_chars": {"type": "integer", "description": "返回字符预算上限，默认 24000"},
         "start_line": {"type": "integer", "description": "起始行号（1 基），与 end_line 配合按行范围读取，优先于分页"},
         "end_line": {"type": "integer", "description": "结束行号（含），与 start_line 配合"},
         "tail": {"type": "integer", "description": "读取文件末尾最近 N 行（如 tail:100 取最新100期）；优先级高于 page/start_line/end_line"},
-    }, "required": ["path"]},
+    }, "required": []},
     toolset="files",
 )
 async def read_file(args: dict, ctx) -> str:
     from ...rag import read_file_text, paginate_text, format_read
+    from ....context import get_ctx
 
     # 兼容模型五花八门的参数名（尤其把 read_file 当「按行范围读取」工具时）
-    path = (args.get("path") or args.get("file_path") or "").strip()
-    if not path:
-        return "[read_file] 缺少 path 参数"
     page = int(args.get("page") or args.get("page_number") or 1)
     page_size = int(args.get("page_size") or args.get("lines_per_page") or 800)
     max_chars = int(args.get("max_chars") or 24000)
@@ -137,58 +137,79 @@ async def read_file(args: dict, ctx) -> str:
                 end_line = int(off) + int(lim)
             except (TypeError, ValueError):
                 pass
+    tail_n = args.get("tail") or args.get("last_n") or args.get("last_lines")
+
+    # 批量模式：paths 列表一次读取多个文件；否则取单个 path
+    paths = args.get("paths") or []
+    if isinstance(paths, str):
+        paths = [paths]
+    if not paths:
+        single = (args.get("path") or args.get("file_path") or "").strip()
+        if single:
+            paths = [single]
+    if not paths:
+        return "[read_file] 缺少 path / paths 参数"
 
     owner = getattr(ctx, "user", None)
     is_admin = getattr(ctx, "is_admin", False)
-    abs_path = _resolve_read_path(path, owner, is_admin)
-    if not abs_path or not os.path.isfile(abs_path):
-        return f"[read_file] 文件不存在或越权: {path}"
 
-    filename = os.path.basename(abs_path)
-    ext = os.path.splitext(filename)[1].lower()
+    _c = get_ctx()
+    if _c is not None:
+        media_root = os.path.normpath(os.path.join(
+            os.path.abspath(_c.cfg.server.data_dir), _c.cfg.media.store_dir))
+    else:
+        media_root = None
 
-    # ── 图片：仅作视觉参考，系统不内置 OCR ──
-    if ext in _IMG_EXTS:
-        return (f"[read_file] {filename} 是图片。请作为视觉参考(vision)传入模型；"
-                f"系统不内置 OCR，无法提取图片内文字。")
-
-    # ── 文档：零依赖标准库提取（read_file_text 内部优先 stdlib）──
-    try:
-        with open(abs_path, "rb") as f:
-            raw = f.read()
-        from ....context import get_ctx
-        _c = get_ctx()
-        if _c is not None:
-            media_root = os.path.normpath(os.path.join(
-                os.path.abspath(_c.cfg.server.data_dir), _c.cfg.media.store_dir))
-        else:
-            media_root = None
-        text, ftype = read_file_text(filename, raw, media_root, owner)
-    except ValueError as e:
-        return f"[read_file] 解析失败: {e}"
-    except Exception as e:  # noqa: BLE001
-        return f"[read_file] 读取失败: {e}"
-    # 归一化换行（兼容 Windows CRLF 文件，避免行尾残留 \\r 干扰解析/展示）
-    if "\r" in text:
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-    if not text.strip():
-        return f"[read_file] {filename} 未提取到可解析文本（可能是图片型文档，请转换为文本型文档）。"
-    # ── tail：取末尾最近 N 行（如「最新100期」），自动换算成行范围 ──
-    tail_n = args.get("tail") or args.get("last_n") or args.get("last_lines")
-    if tail_n is not None:
+    def _read_one(path: str) -> str:
+        path = (path or "").strip()
+        if not path:
+            return ""
+        abs_path = _resolve_read_path(path, owner, is_admin)
+        if not abs_path or not os.path.isfile(abs_path):
+            return f"[read_file] 文件不存在或越权: {path}"
+        filename = os.path.basename(abs_path)
+        ext = os.path.splitext(filename)[1].lower()
+        # ── 图片：仅作视觉参考，系统不内置 OCR ──
+        if ext in _IMG_EXTS:
+            return (f"[read_file] {filename} 是图片。请作为视觉参考(vision)传入模型；"
+                    f"系统不内置 OCR，无法提取图片内文字。")
+        # ── 文档：零依赖标准库提取（read_file_text 内部优先 stdlib）──
         try:
-            nn = int(tail_n)
-        except (TypeError, ValueError):
-            nn = 0
-        if nn > 0:
-            # 去掉末尾换行再算行数，避免空行导致 tail 偏移（与 `tail -n` 语义一致）
-            _t = text.rstrip("\n")
-            total = len(_t.split("\n"))
-            start_line = max(1, total - nn + 1)
-            end_line = total
-            text = _t
-    pg = paginate_text(text, page, page_size, max_chars, start_line, end_line)
-    return format_read(filename, ftype, pg)
+            with open(abs_path, "rb") as f:
+                raw = f.read()
+            text, ftype = read_file_text(filename, raw, media_root, owner)
+        except ValueError as e:
+            return f"[read_file] 解析失败: {e}"
+        except Exception as e:  # noqa: BLE001
+            return f"[read_file] 读取失败: {e}"
+        # 归一化换行（兼容 Windows CRLF 文件，避免行尾残留 \\r 干扰解析/展示）
+        if "\r" in text:
+            text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if not text.strip():
+            return f"[read_file] {filename} 未提取到可解析文本（可能是图片型文档，请转换为文本型文档）。"
+        # ── tail：取末尾最近 N 行（如「最新100期」），自动换算成行范围 ──
+        if tail_n is not None:
+            try:
+                nn = int(tail_n)
+            except (TypeError, ValueError):
+                nn = 0
+            if nn > 0:
+                _t = text.rstrip("\n")
+                total = len(_t.split("\n"))
+                _s = max(1, total - nn + 1)
+                _e = total
+                pg = paginate_text(_t, page, page_size, max_chars, _s, _e)
+                return format_read(filename, ftype, pg)
+        pg = paginate_text(text, page, page_size, max_chars, start_line, end_line)
+        return format_read(filename, ftype, pg)
+
+    results = [_read_one(p) for p in paths]
+    if len(paths) > 1:
+        out = []
+        for p, r in zip(paths, results):
+            out.append(f"===== 文件 {os.path.basename(p)} =====\n{r}")
+        return "\n\n".join(out)
+    return results[0] if results else "[read_file] 无有效文件"
 
 
 @tool(
