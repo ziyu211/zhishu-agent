@@ -57,7 +57,10 @@ class CompatProfile:
     supports_tools: Optional[bool] = None    # True=确定支持 / False=确定不支持 / None=未知（先试后降级）
     supports_tool_choice: bool = True
     supports_stream_options: bool = False
-    supports_parallel_tool_calls: bool = False
+    # 默认乐观开启并行工具调用：绝大多数 OpenAI 兼容端点都支持，
+    # 个别不支持的会在首次 400 后由自愈回路（REPAIR_STRIP_OPTIONAL → CAP_NO_OPTIONAL）
+    # 自动降级并永久记住，最多多一次重试，不会死循环。
+    supports_parallel_tool_calls: bool = True
     # ---- 参数 ----
     drop_params: tuple[str, ...] = ()        # 无条件从请求体剔除的字段
     extra_params: dict = field(default_factory=dict)  # 无条件补充的字段
@@ -114,11 +117,13 @@ PROFILES: dict[str, CompatProfile] = {
     "llamacpp": _p("llamacpp", "llama.cpp server",
                    supports_tools=None, supports_stream_options=False,
                    drop_params=("stream_options", "parallel_tool_calls")),
-    # 未知端点：按最保守策略发请求，再靠动态自愈放宽
+    # 未知端点：按最保守策略发请求，再靠动态自愈放宽。
+    # 并行工具调用默认乐观下发（见 CompatProfile 默认 True），仅 stream_options 仍保守丢弃，
+    # 因为不少网关会拒绝该未知字段；parallel_tool_calls 即便被拒也有自愈回路兜底。
     "generic": _p("generic", "通用 / 自动探测",
                   multimodal_content=True, supports_tools=None,
                   supports_stream_options=False,
-                  drop_params=("stream_options", "parallel_tool_calls")),
+                  drop_params=("stream_options",)),
 }
 
 #: 常见别名 → 画像 key
@@ -172,6 +177,7 @@ _CLOUD_HINTS = (
     "api.openai.com", "dashscope", "deepseek.com", "bigmodel.cn", "moonshot.cn",
     "baidubce.com", "minimax", "siliconflow", "ark.cn-", "volces.com",
     "aliyuncs.com", "azure.com", "sensecore", "01.ai", "stepfun",
+    "sensenova.cn", "sensenova", "agnes-ai.cn", "agnes",
 )
 
 

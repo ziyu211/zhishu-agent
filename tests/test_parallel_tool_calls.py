@@ -69,6 +69,29 @@ def test_runtime_cap_no_optional_strips_flag():
     compat.runtime_caps.clear()  # 清理，避免污染其它测试
 
 
+def test_generic_profile_enables_parallel():
+    """未知 / 自动探测端点(generic) 现在应乐观下发 parallel_tool_calls（靠自愈兜底）。
+
+    这正是 v1.0.23 修复点：sensenova / agnes 等国产 OpenAI 兼容网关此前被解析为
+    generic 且 drop_params 含 parallel_tool_calls → 信号被剥 → 模型永远一次一个工具调用。
+    """
+    prof = compat.resolve_profile("", "https://unknown-gateway.example.com/v1", "")
+    assert prof.key == "generic", prof.key
+    assert prof.supports_parallel_tool_calls is True, prof
+    kw = sanitize_kwargs({"model": "m", "tools": [{}]}, prof, tools_enabled=True)
+    assert kw.get("parallel_tool_calls") is True, kw
+
+
+def test_sensenova_resolves_openai_parallel():
+    """"sensenova.cn" / "agnes-ai.cn" 等国产网关应解析为标准 openai 画像且并行=True。"""
+    for base in ("https://token.sensenova.cn/v1", "https://api.agnes-ai.cn/v1"):
+        prof = compat.resolve_profile("", base, "")
+        assert prof.key == "openai", (base, prof.key)
+        assert prof.supports_parallel_tool_calls is True, prof
+        kw = sanitize_kwargs({"model": "m", "tools": [{}]}, prof, tools_enabled=True)
+        assert kw.get("parallel_tool_calls") is True, (base, kw)
+
+
 def main():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

@@ -6,6 +6,7 @@
 > 最近更新：2026-08-06 — 新增第九节 9.8 国产信创部署、9.9 OpenAI 兼容服务端网关（/v1/chat/completions + /v1/models，复用 RBAC，可对接 Open WebUI / LobeChat）；2026-08-03 完成全量代码审计与架构加固（详见第十一节「安全审计与多用户架构」）。2026-08-08 — 版本统一至 1.0.16；2026-08-09 升级至 1.0.18；新增第八节 8.1「内网 Embedding 模型接入」指南；新增多推理框架兼容画像（vLLM / SGLang / LMDeploy / MindIE / Ollama / Xinference / TGI / llama.cpp / generic）与 Qwen3.5 模板缺陷自愈（去 tools 重试并缓存结论）；**同日工具级 RBAC 下沉**（`terminal_run` / `code_exec` / `create_tool` 开放至 `user`，`operator` 与 `user` 在对话窗口内完全对等）、**`code_exec` 出网与全局 `outbound_allow` 解耦**（新增独立开关 `code_exec_network_isolated`，默认不隔离）、**补齐审计缺口 G1–G6**（令牌吊销/登出、向量长期记忆清理、脱敏统计、统一鉴权守卫与导入缺陷修复，详见第十二节 12.6）。**2026-08-09 升级至 1.0.18**：对全部功能模块做业务闭环复核，修复「登出未清除 /media Cookie 致越权访问他人媒体产物」缺口（前端登出现在调用后端 `POST /api/v1/auth/logout`，吊销令牌并清除 Cookie）。**2026-08-09 升级至 1.0.19**：优化「文件处理→生成→下载链接」闭环——新增 `artifacts.publish_referenced_paths`，自动捕获模型写到 cwd/output 之外（如 `data/generated/attachments/<owner>/...`、`/tmp`、挂载卷）的真实产物并统一补出 `/media` 下载链接；agent 下载护栏兜底覆盖媒体根（零拷贝改写，避免「生成后无下载链接」）；新增可选媒体留存 TTL（`media.retention_days`，默认 0=永久保留，避免自动清理致「文件已清理」）。**2026-08-09 升级至 1.0.20**：修复系统提示词 `_TOOL_GUIDANCE` 仍含「沙箱」字样（与下载护栏「系统提示不再暴露沙箱路径」契约不符），改为「隔离执行环境」措辞，`test_download_guard` 由 32/1 回升至 33/33 全绿。
 > **2026-08-09 升级至 1.0.21**：文件处理提速——为 `read_file`（`paths`）、`terminal_run`（`commands`）、`code_exec`（`snippets`）、`generate_excel`（`files`）新增批量参数，把原本 N 次串行工具往返压缩为 1 次调用；`code_exec` 多段合并后在单个子进程内顺序执行（共享解释器与变量，消除每段冷启动一个 Python 的开销）。系统提示新增「减少往返·批量调用（提速关键）」专节引导模型优先合并同类调用，缩小与 Hermes 的体感速度差。
 > **2026-08-12 升级至 1.0.22**：补齐「文件处理提速」的框架层短板——此前 `parallel_tools` 虽默认开启，但请求体从未下发 `parallel_tool_calls: true`，模型收不到「可一回合并行发多个工具」的信号，仍逐个串行调用（N 次 LLM 往返 = 比 Hermes 慢的主因）。现于 `compat.sanitize_kwargs` 对支持并行的 Provider 主动下发该参数，配合 agent 循环已有的 `asyncio.gather` 并发执行，把 N 次串行往返压成 1 次；系统提示「减少往返」一节改为强指令（正/反例）。不支持并行的端点经既有自愈回路自动关闭，零回归。新增 `tests/test_parallel_tool_calls.py` 回归。
+> **2026-08-12 升级至 1.0.23**：修复 1.0.22 仍漏网的「国产 OpenAI 兼容网关被解析为 generic 后并行信号被剥」问题——`sensenova.cn` / `agnes-ai.cn` 等此前不在云端网关清单，`detect_compat` 返回 `generic`，而 `generic` 的 `drop_params` 含 `parallel_tool_calls` 且默认能力为 False，导致 `parallel_tool_calls: true` 永不下发、模型仍一次一个工具串行（用户实测 trace 仍 8×read_file / 7×code_exec 串行）。现改为：① `CompatProfile.supports_parallel_tool_calls` 默认 `False→True`（乐观下发，不支持的端点经既有自愈回路自动降级）；② `generic` 从 `drop_params` 移除 `parallel_tool_calls`；③ `_CLOUD_HINTS` 补全 `sensenova.cn` / `agnes-ai.cn` 走标准 `openai` 画像。回归测试新增 generic 现下发、sensenova 解析为 openai 且并行=True 两项断言（共 6 项全过）。
 
 ---
 
@@ -344,10 +345,10 @@ cp deploy/zhishu.yaml.example deploy/zhishu.yaml
 
 ```bash
 # 标准（需 docker.io 可达）
-docker build -t zhishu-agent:1.0.22 -f deploy/Dockerfile .
+docker build -t zhishu-agent:1.0.23 -f deploy/Dockerfile .
 
 # 受限网络 / 国内零代理（推荐内网、本机）
-docker build -t zsagent:1.0.22 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.23 -f deploy/Dockerfile.local .
 ```
 
 ### 9.3 运行
@@ -357,7 +358,7 @@ docker run -d --name zsagent \
   -p 8080:8080 \
   -v zsagent_data:/app/backend/data \
   --restart unless-stopped \
-  zsagent:1.0.22
+  zsagent:1.0.23
 ```
 
 - `zsagent_data` 卷持久化：向量库、会话记忆、`providers.json`、用户库、媒体文件。
@@ -369,7 +370,7 @@ docker run -d --name zsagent \
 docker run -d --name zsagent -p 8080:8080 \
   -v "$(pwd)/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro" \
   -v zsagent_data:/app/backend/data \
-  --restart unless-stopped zsagent:1.0.22
+  --restart unless-stopped zsagent:1.0.23
 ```
 
 > 重建容器（`docker rm` + `run`）会丢弃可写层：请确保挂载的 `zhishu.yaml` 中 `security.secret` 与旧值一致（否则触发硬闸门或 Provider Key 失效），或启动时传 `-e ZHISHU_SECRET=<同值>`。
@@ -412,7 +413,7 @@ scp -P <port> zhishu-src.tar.gz root@<host>:/opt/zhishu-agent/
 ssh -p <port> root@<host> "cd /opt/zhishu-agent && tar xzf zhishu-src.tar.gz && rm -f zhishu-src.tar.gz"
 
 # 3. 远程构建镜像（耗时较长，建议 nohup 后台跑并 tail 日志）
-ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.22 -f deploy/Dockerfile.local . > build.log 2>&1 &"
+ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.23 -f deploy/Dockerfile.local . > build.log 2>&1 &"
 
 # 4. 生成生产配置：必须替换默认 secret 与 admin 口令，否则进程启动即 exit 2
 #    secret 用 64 位强随机；配置以只读挂载进容器，不烧进镜像
@@ -425,7 +426,7 @@ docker run -d --name zsagent --restart always \
   -p 8090:8080 \
   -v zsagent_data:/app/backend/data \
   -v /opt/zhishu-agent/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro \
-  zsagent:1.0.22
+  zsagent:1.0.23
 
 # 6. 回填 Provider Key（Key 与 secret 强耦合，不能直接拷贝旧密文，必须走 API 明文回填）
 curl -X POST http://127.0.0.1:8090/api/v1/providers -H "Authorization: Bearer $TOK" \
@@ -455,10 +456,10 @@ curl -X POST http://127.0.0.1:8090/api/v1/models/default -H "Authorization: Bear
 
 ```bash
 # x86_64 信创（海光 / 兆芯）—— 沿用现有镜像
-docker build -t zsagent:1.0.22 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.23 -f deploy/Dockerfile.local .
 
 # ARM64（鲲鹏 920 / 飞腾）—— 指定平台交叉构建
-docker build --platform linux/arm64 -t zsagent:1.0.22-arm64 -f deploy/Dockerfile.local .
+docker build --platform linux/arm64 -t zsagent:1.0.23-arm64 -f deploy/Dockerfile.local .
 ```
 
 - 纯 wheel 依赖意味着在 ARM64 / LoongArch 下 `pip install` 不会触发本地编译；**但生产务必在「目标架构的同源机器」上原生构建**（鲲鹏机上直接 `docker build`），避免 qemu 仿真带来的性能与稳定性损耗。
