@@ -249,10 +249,19 @@ async def make_downloadable(args: dict, ctx) -> str:
     media = getattr(ctx, "media", None)
     if media is None:
         return "[make_downloadable] 当前环境不支持（无媒体存储）"
-    if p.startswith("/media/"):
-        return f"该文件已是下载链接：[{os.path.basename(p)}]({p})"
     owner = getattr(ctx, "user", None)
     is_admin = getattr(ctx, "is_admin", False)
+    # /media/ 入参：必须校验文件真实存在，杜绝「确认」幻觉/失效链接
+    # （否则模型可凭记忆拼凑 /media 链接，用户点击即 404「文件不存在或已被清理」）
+    if p.startswith("/media/"):
+        abs_chk = _resolve_read_path(p, owner, is_admin)
+        if not abs_chk or not os.path.isfile(abs_chk):
+            return (f"[make_downloadable] 链接 {p} 在媒体库中无对应文件"
+                    f"（文件可能从未真正落盘、或已被清理）。"
+                    f"请用 file_write 重新生成报告文件（path=报告.txt, content=报告全文），"
+                    f"它会自动返回真实可下载的 /media 链接；"
+                    f"禁止把未经校验的 /media 链接交给用户。")
+        return f"该文件已是可下载链接（已校验存在）：[{os.path.basename(p)}]({p})"
     abs_path = _resolve_read_path(p, owner, is_admin)
     if not abs_path or not os.path.isfile(abs_path):
         return f"[make_downloadable] 文件不存在或越权: {p}"
