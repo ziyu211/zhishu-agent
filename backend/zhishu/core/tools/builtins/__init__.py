@@ -4,11 +4,9 @@
 """
 from __future__ import annotations
 
-import os
-
 # 受限工作区根目录（工具只能在此范围内写文件，防止越权读内网其它文件）。
 # 该目录仅作内部执行 cwd 使用，绝不暴露给模型，模型拿到的永远是 /media/... 下载链接。
-SANDBOX_ROOT = os.environ.get("ZHISHU_SANDBOX", "data/sandbox")
-os.makedirs(SANDBOX_ROOT, exist_ok=True)
+# 实际定义与按 owner 隔离的子目录逻辑统一收敛到 sandbox 子模块。
+from .sandbox import SANDBOX_ROOT, sandbox_cwd_for  # noqa: E402,F401
 
 from . import terminal, file, web, knowledge, delegate, skills, code_exec, sessions, todo, memory, agent_admin, compare, generate_excel  # noqa: E402,F401

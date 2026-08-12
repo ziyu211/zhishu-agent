@@ -373,8 +373,12 @@ class CronScheduler:
         if reason:
             return f"[已拦截] {reason}"
 
-        sandbox = os.environ.get("ZHISHU_SANDBOX",
-                                 os.path.join(self.cfg.server.data_dir, "sandbox"))
+        # 按任务归属者隔离沙箱子目录，避免不同 owner 的 cron shell 共享 cwd 串号
+        from .tools.builtins.sandbox import sandbox_cwd_for
+
+        base = os.environ.get("ZHISHU_SANDBOX",
+                              os.path.join(self.cfg.server.data_dir, "sandbox"))
+        sandbox = sandbox_cwd_for(job.get("owner"), base=base)
         return await run_guarded(
             payload, cwd=sandbox,
             timeout=max(5, int(getattr(sec, "shell_timeout", 300))),

@@ -30,6 +30,7 @@ from typing import Optional
 from ..base import tool, Tool, ToolContext
 from .. import registry as _registry
 from .artifacts import snapshot, publish_diff
+from .sandbox import sandbox_cwd_for
 
 # 全局动态工具登记（进程级）。键为工具名，值为 (描述, 代码, 参数schema, 会话)
 CREATED_TOOLS: dict[str, tuple[str, str, dict, str]] = {}
@@ -183,7 +184,7 @@ def _make_handler(code: str, mem_limit_mb: int, timeout: int, block_network: boo
             "TOOL_ARGS_JSON": json.dumps(args or {}, ensure_ascii=False),
             "TOOL_SESSION": getattr(ctx, "session", "default"),
         }
-        cwd = os.path.abspath(os.environ.get("ZHISHU_SANDBOX", "data/sandbox"))
+        cwd = sandbox_cwd_for(getattr(ctx, "user", "anonymous") or "anonymous")
         return await _run_python(
             code, timeout, extra_env, cwd,
             mem_limit_mb=mem_limit_mb, block_network=block_network,
@@ -245,9 +246,9 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
         if not rp:
             return f"[code_exec] 路径越权或不存在: {path}"
         extra_env["TARGET_FILE"] = rp
-    cwd = os.path.abspath(os.environ.get("ZHISHU_SANDBOX", "data/sandbox"))
     media = getattr(ctx, "media", None)
     owner = getattr(ctx, "user", "anonymous") or "anonymous"
+    cwd = sandbox_cwd_for(owner)
     # save_output=true 时额外收集 ZHISHU_OUTPUT_DIR（工作区的新文件始终自动发布）
     explicit_save = bool(args.get("save_output"))
     out_dir = None

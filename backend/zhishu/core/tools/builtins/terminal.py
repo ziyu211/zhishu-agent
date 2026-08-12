@@ -12,7 +12,7 @@ ZHISHU_SECRET 与各 Provider Key）或 `curl x | sh` 打穿宿主机。
 from __future__ import annotations
 
 from ..base import tool
-from . import SANDBOX_ROOT
+from .sandbox import sandbox_cwd_for
 from .artifacts import snapshot, publish_diff
 from ...shellguard import check_command, run_guarded
 
@@ -58,12 +58,13 @@ async def terminal_run(args: dict, ctx) -> str:
 
     media = getattr(ctx, "media", None)
     owner = getattr(ctx, "user", "anonymous") or "anonymous"
+    cwd = sandbox_cwd_for(owner)
     # 执行前快照工作区，自动发布本次新增/修改的文件为下载链接
-    before = snapshot(SANDBOX_ROOT) if media is not None else {}
+    before = snapshot(cwd) if media is not None else {}
     result = await run_guarded(
-        cmd, cwd=SANDBOX_ROOT, timeout=timeout, max_output=8000,
+        cmd, cwd=cwd, timeout=timeout, max_output=8000,
         mem_mb=int(getattr(sec, "shell_mem_limit_mb", 1024) or 0) if sec else 1024,
     )
     if media is not None:
-        result += publish_diff(SANDBOX_ROOT, before, media, owner)
+        result += publish_diff(cwd, before, media, owner)
     return result
