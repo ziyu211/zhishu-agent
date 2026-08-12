@@ -64,11 +64,19 @@ export const useAppStore = defineStore('app', {
       this.user = u
       if (u) saveUser(u)
     },
-    logout() {
-      clearToken()
-      clearActAs()
-      this.user = null
-      this.models = []
+    async logout() {
+      // 先通知后端吊销令牌并清除 /media Cookie，再清本地会话。
+      // 即使后端调用失败（如 token 已过期）也保证本地登出，避免卡死。
+      try {
+        await api.logout()
+      } catch {
+        /* 后端失败仍继续本地登出 */
+      } finally {
+        clearToken()
+        clearActAs()
+        this.user = null
+        this.models = []
+      }
     },
     async loadModels() {
       this.loadingModels = true

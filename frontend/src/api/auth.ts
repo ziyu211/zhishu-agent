@@ -11,5 +11,8 @@ export const login = (username: string, password: string) =>
 export const me = () => request<any>('/api/v1/auth/me', { skipActAs: true })
 export const changePassword = (body: ChangePasswordReq) =>
   request<any>('/api/v1/auth/change-password', { method: 'POST', body, skipActAs: true })
+// 主动登出：吊销令牌并清除 /media 鉴权 Cookie（后端 /auth/logout 处理）。
+// skipActAs 避免管理员代管身份穿透，导致误吊销目标用户会话。
+export const logout = () => request<any>('/api/v1/auth/logout', { method: 'POST', skipActAs: true })
 
-export const authApi = { authStatus, login, me, changePassword }
+export const authApi = { authStatus, login, me, changePassword, logout }

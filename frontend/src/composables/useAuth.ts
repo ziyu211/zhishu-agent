@@ -11,7 +11,7 @@ import {
   getUser,
   type LocalUser,
 } from '@/api/http'
-import { login as apiLogin, me } from '@/api/auth'
+import { login as apiLogin, me, logout as apiLogout } from '@/api/auth'
 
 export function useAuth() {
   const user = ref<LocalUser | null>(getUser())
@@ -45,7 +45,13 @@ export function useAuth() {
     }
   }
 
-  function logout() {
+  async function logout() {
+    // 先通知后端吊销令牌并清除 /media Cookie，再清本地会话。
+    try {
+      await apiLogout()
+    } catch {
+      /* 后端失败仍继续本地登出 */
+    }
     clearToken()
     user.value = null
     isAuthed.value = false

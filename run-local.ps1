@@ -15,7 +15,7 @@ docker run -d `
   -e ZHISHU_ALLOW_INSECURE_DEFAULTS=1 `
   -v zsagent_data:/app/backend/data `
   -v "D:\data\hemers\zhishu-agent\backend\zhishu:/app/backend/zhishu" `
-  zsagent:1.0.13
+  zsagent:1.0.18
 
 Start-Sleep -Seconds 8
 docker ps --filter name=zsagent --format "{{.Names}} {{.Status}}"

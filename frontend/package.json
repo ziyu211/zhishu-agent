@@ -1,6 +1,6 @@
 {
   "name": "zhishu-webui",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "private": true,
   "description": "智枢智能体 前端（Vue3 + Vite + Naive UI，同源调用后端，零境外直连）",
   "type": "module",
