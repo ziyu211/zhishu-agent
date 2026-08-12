@@ -456,7 +456,15 @@ def sanitize_kwargs(kw: dict, profile: CompatProfile,
     if not profile.supports_stream_options:
         out.pop("stream_options", None)
     if not profile.supports_parallel_tool_calls:
+        # 端点不支持并行工具调用：剥除该参数，避免被网关以 400 拒绝。
         out.pop("parallel_tool_calls", None)
+    elif tools_enabled:
+        # 主动告知模型：可在单个响应里并行发出多个相互独立的工具调用。
+        # agent 循环会并发执行（asyncio.gather + 信号量，见 agent.py），
+        # 把原本 N 次串行 LLM 往返压缩为 1 次 —— 这是「智枢比 Hermes 慢」的核心修复点。
+        # 若端点实际拒绝该参数，is_param_unsupported 会触发 REPAIR_STRIP_OPTIONAL
+        # 自愈（首次 400 后扒掉并写入 runtime_caps），最多一次重试，不死循环。
+        out["parallel_tool_calls"] = True
     for p in profile.drop_params:
         out.pop(p, None)
     if profile.max_tokens_cap and isinstance(out.get("max_tokens"), int):
