@@ -45,7 +45,6 @@ from .download_guard import (
     strip_evasion,
     strip_leaked_paths,
 )
-from ..tools.builtins.artifacts import publish_referenced_paths
 from .context_engine import NoOpContextEngine, ContextEngine, CompressionContextEngine
 from ..modules.skills import maybe_learn, maybe_reflect
 from .. import image_routing
@@ -1386,6 +1385,9 @@ class Agent:
             #   ② 其它任意真实存在的文件（sandbox / output /tmp/挂载卷等）一并拷贝发布。
             try:
                 from ..tools.builtins import SANDBOX_ROOT as _SB_ROOT
+                # 延迟导入避免循环依赖：artifacts 又反向 import 本包 download_guard，
+                # 而本包 __init__ 会在导入期触发 agent.py 顶层执行，顶层 import artifacts 会形成环。
+                from ..tools.builtins.artifacts import publish_referenced_paths
                 _media = getattr(self.ctx, "media", None)
                 _owner = getattr(self.ctx, "user", "anonymous") or "anonymous"
                 _recovered = []
