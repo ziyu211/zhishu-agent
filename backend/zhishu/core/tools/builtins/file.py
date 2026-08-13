@@ -95,17 +95,17 @@ def _resolve_read_path(path: str, owner: str | None = None,
 
 @tool(
     "read_file",
-    "【提速关键】读取『多个』文件时必须用 paths 列表一次读取（例：paths:[\"a.txt\",\"b.csv\",\"c.pdf\"]），"
-    "严禁为每个文件单独调用本工具——每多一次调用就多一次 LLM 往返，这是处理变慢的主因。仅读单个文件才用 path。"
-    "按需读取文件内容（对标 hermes 解耦/按需哲学），是读取用户上传文档的唯一入口；"
+    "【提速关键】read_file 读取文件，**始终用 `paths`（列表）参数**：只读 1 个文件也写成 `paths:[\"a.txt\"]`；"
+    "要读多个文件时一次性 `paths:[\"a.txt\",\"b.csv\",\"c.pdf\"]`，一次往返全部读完（结果用 `===== 文件 xxx =====` 分隔）。"
+    "**严禁为每个文件单独调用本工具 / 严禁反复单文件读取**——那会把 1 次往返变成 N 次，是「智枢比 Hermes 慢」的主因。"
+    "（标量 `path` 已废弃，不要用。）按需读取用户上传文档的唯一入口；"
     "支持 TXT/MD/CSV/TSV/JSON/代码/日志等文本，以及 Word(.docx)/Excel(.xlsx)/PPT(.pptx)/"
-    "OpenDocument(.odt/.ods/.odp)/RTF(.rtf)/EPUB(.epub)/PDF(.pdf)——前者用标准库零依赖提取。支持分页(page)、"
+    "OpenDocument(.odt/.ods/.odp)/RTF(.rtf)/EPUB(.epub)/PDF(.pdf)——标准库零依赖提取。支持分页(page)、"
     "行号(start_line/end_line)、字符预算(max_chars)。**如需读取文件末尾最近 N 行（如『最新100期』、日志尾部），"
     "直接用 tail 参数（tail:100），无需先知道总行数。** 用于附件或磁盘文件的按需解析，非一次性全量解析；"
     "请勿使用 parse_docx/parse_xlsx/parse_pdf（已废弃）。图片请作为视觉参考传入模型，系统不内置 OCR。",
     {"type": "object", "properties": {
-        "path": {"type": "string", "description": "单个文件路径：附件 stored_path、/media/ URL 或相对文件名（批量请用 paths）"},
-        "paths": {"type": "array", "description": "批量读取：多个文件路径列表，一次调用读取多个文件并带分隔头拼接返回（减少往返、提速关键）", "items": {"type": "string"}},
+        "paths": {"type": "array", "description": "【必用】文件路径列表：一次读取多个文件并带 `===== 文件 xxx =====` 分隔头拼接返回。即使只读 1 个文件也传列表，如 paths:[\"a.txt\"]", "items": {"type": "string"}},
         "page": {"type": "integer", "description": "页码，从 1 开始，默认 1"},
         "page_size": {"type": "integer", "description": "每页行数，默认 800"},
         "max_chars": {"type": "integer", "description": "返回字符预算上限，默认 24000"},
@@ -212,8 +212,9 @@ async def read_file(args: dict, ctx) -> str:
         return "\n\n".join(out)
     body = results[0] if results else "[read_file] 无有效文件"
     if _used_singular:
-        body += ("\n\n[提速提示] 本次只读了 1 个文件。若还需读取其它文件，请用 paths 列表一次读取"
-                 "（如 paths:[\"a.txt\",\"b.csv\"]），可少跑多次 LLM 往返、明显更快。")
+        body += ("\n\n[提速提示] 本次只读了 1 个文件（标量 path 已废弃）。处理文件任务时，请先想清楚一共要读哪几个文件，"
+                 "然后用一次 `read_file(paths:[\"a.txt\",\"b.csv\",\"c.pdf\"])` 全部读完——每多一次 read_file 调用就多一次 LLM 往返，"
+                 "这是速度不如 Hermes 的主因。下一轮请直接批量读。")
     return body
 
 

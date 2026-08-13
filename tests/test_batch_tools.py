@@ -204,12 +204,37 @@ async def check_speed_hints():
             f"{name} 的 description 未前置【提速关键】：{spec.description[:40]}")
 
 
+async def check_schema_forces_list():
+    """v1.0.25：从 read_file/terminal_run 的 JSON Schema 中移除标量 path/command 参数
+    （code_exec 因保留内部自愈回退路径而保留已废弃的 code），强制模型优先走列表参数
+    （paths/snippets/commands/files），从源头杜绝「逐文件/逐段单调用」。"""
+    from zhishu.core.tools.registry import ToolRegistry
+
+    # read_file / terminal_run：标量参数必须已移除，列表参数必须存在
+    checks = {
+        "read_file": ("path", "paths"),
+        "terminal_run": ("command", "commands"),
+    }
+    for name, (scalar, listp) in checks.items():
+        spec = ToolRegistry.get(name)
+        props = spec.parameters.get("properties", {})
+        assert scalar not in props, (
+            f"{name} 仍暴露标量参数 '{scalar}'，模型可能仍逐次单调用")
+        assert listp in props, (
+            f"{name} 缺少列表参数 '{listp}'")
+    # code_exec：snippets 必存在，且 code 标记为已废弃（不强制移除，因内部回退路径用）
+    ce = ToolRegistry.get("code_exec").parameters["properties"]
+    assert "snippets" in ce, "code_exec 缺少 snippets"
+    assert "已废弃" in ce.get("code", {}).get("description", ""), "code_exec 的 code 应标记为已废弃"
+
+
 async def main():
     await check_read_file()
     await check_terminal()
     await check_code_exec()
     await check_generate_excel()
     await check_speed_hints()
+    await check_schema_forces_list()
     print("ALL_TESTS_PASSED")
 
 

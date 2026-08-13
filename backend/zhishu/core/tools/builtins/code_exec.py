@@ -211,20 +211,20 @@ def _register_dynamic(tname: str, desc: str, code: str, params: dict,
 
 @tool(
     "code_exec",
-    "【提速关键】需要连续运行『多段』Python 时，必须用 snippets 列表一次提交"
-    "（例：snippets:[\"import pandas as pd\",\"df=pd.read_csv(TARGET_FILE)\",\"print(df.describe())\"]），"
-    "系统在单个子进程内顺序执行、共享解释器与变量、避免每段都冷启动一个 Python（显著提速）。仅跑单段才用 code。"
-    "运行 Python 代码（对标 Hermes 自创工具/自愈能力）。当 read_file 或解析器遇到不支持的文件格式、"
-    "或需要标准工具没有的处理逻辑时，可编写 Python 打印结果来解决。可选 path 参数会把文件绝对路径注入 "
-    "TARGET_FILE 环境变量，代码内用 os.environ['TARGET_FILE'] 读取。代码须把结果 print 到 stdout。"
-    "代码产生的新文件会【自动】落盘到媒体库并回传 /media/... 下载链接，无需额外参数；"
+    "【提速关键】code_exec 运行 Python，**始终用 `snippets`（列表）参数**：单段也写成 `snippets:[\"print(1)\"]`；"
+    "需要连续多段时用 `snippets:[\"import pandas as pd\",\"df=pd.read_csv(TARGET_FILE)\",\"print(df.describe())\"]`，"
+    "系统在单个子进程内顺序执行、共享解释器与变量、避免每段都冷启动一个 Python（显著提速）。"
+    "**严禁把多段处理拆成多次单段 code_exec 调用（如连跑 8 次）**——那会把 1 次往返变成 N 次，是「智枢比 Hermes 慢」的主因。"
+    "（标量 `code` 已废弃，不要用。）运行 Python（对标 Hermes 自愈能力）：当 read_file 不支持某格式或需自定义逻辑时用它。"
+    "可选 `path` 参数会把文件绝对路径注入 TARGET_FILE 环境变量，代码内用 os.environ['TARGET_FILE'] 读取。"
+    "代码须把结果 print 到 stdout。代码产生的新文件会【自动】落盘到媒体库并回传 /media/... 下载链接，无需额外参数；"
     "save_output=true 时额外收集 ZHISHU_OUTPUT_DIR 目录内的文件再发布一次。"
     "注意：这是模型自生成的代码，仅在内网可信部署下使用。",
     {
         "type": "object",
         "properties": {
-            "code": {"type": "string", "description": "要执行的 Python 代码（结果请 print 到 stdout）；与 snippets 二选一"},
-            "snippets": {"type": "array", "description": "批量代码段：多个 Python 代码片段列表，合并为一段在单个子进程内顺序执行（共享解释器与导入，变量跨段保留，消除多次冷启动、减少往返）", "items": {"type": "string"}},
+            "snippets": {"type": "array", "description": "【必用】Python 代码片段列表：合并为一段在单个子进程内顺序执行（共享解释器与导入，变量跨段保留，消除多次冷启动）。即使单段也传列表，如 snippets:[\"print(1)\"]", "items": {"type": "string"}},
+            "code": {"type": "string", "description": "【已废弃·勿用】单段 Python 源码。请改用 snippets（单段也写成 snippets:[\"...\"]）。保留此字段仅为兼容内部自愈回退路径。"},
             "path": {"type": "string", "description": "可选：目标文件 stored_path / /media/ URL，将作为 TARGET_FILE 环境变量供代码读取"},
             "timeout": {"type": "integer", "description": "超时秒数，默认取 security.code_exec_timeout，上限 120"},
             "save_output": {"type": "boolean", "description": "为 true 时收集代码生成的文件并落盘到媒体库，回传 /media/... 可下载链接"},
@@ -290,8 +290,9 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
         if _refs:
             result = append_unique_links(_ref_text, _refs)
     if _used_singular:
-        result += ("\n\n[提速提示] 本次只跑了 1 段 Python。若还需运行多段脚本（如先 import 再多次处理），"
-                   "请用 snippets 列表一次提交，系统在单个子进程内顺序执行、共享变量，避免每段都冷启动。")
+        result += ("\n\n[提速提示] 本次只跑了 1 段 Python（标量 code 已废弃）。处理任务时，请先规划好要跑哪几步，"
+                   "然后用一次 `code_exec(snippets:[\"步骤1\",\"步骤2\",...])` 全部提交——系统在单个子进程内顺序执行、共享变量，"
+                   "避免每段都冷启动一个 Python。每多一次 code_exec 调用就多一次 LLM 往返，这是速度不如 Hermes 的主因。下一轮请直接批量跑。")
     return result
 
 
