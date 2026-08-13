@@ -126,6 +126,55 @@ def _code_exec_final_directive(count: int) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# read_file 硬熔断（v1.0.30）
+#
+# 背景：read_file 早已支持 paths 列表批量读取（file.py:108），description 也强提示
+# 「严禁为每个文件单独调用」（file.py:98-99）；但国产网关模型仍逐文件调用——典型 trace：
+# 先 file_list 拿清单，再连发 8 次单文件 read_file，最后又零散补读，共 13 次 read_file。
+# 软提示（v1.0.27 合并提醒）对此完全无效，故复用 code_exec 的硬熔断思路：单文件读取超阈值后
+# 进入「熔断-放行」交替，偶数次单读被拦截、奇数次单读放行并追加批量强指令；paths 批量读取始终
+# 放行（既奖励正确行为，又保证模型永远有出路、不会死锁）。不改 JSON Schema，零回归风险。
+# ---------------------------------------------------------------------------
+_READ_FILE_HARD_LIMIT = 6
+
+
+def _read_file_is_batch(args: dict) -> bool:
+    """read_file 是否走 paths 批量模式（>=2 个文件）。批量读取永远放行，单文件读取才计入硬熔断。"""
+    paths = (args or {}).get("paths")
+    return isinstance(paths, list) and len(paths) >= 2
+
+
+def _read_file_breaker_message(count: int) -> str:
+    """read_file 超阈值且本次被熔断（不读取）时返回的系统消息，强制模型改用 paths 批量读取。
+
+    未超阈值（count <= _READ_FILE_HARD_LIMIT）返回空串。
+    """
+    if count <= _READ_FILE_HARD_LIMIT:
+        return ""
+    return (
+        f"[系统·熔断] 你已单次读取 {count} 个文件（每个文件一次 read_file），且未使用批量读取。"
+        f"为阻断无意义的 LLM 往返，本次不读取文件。\n"
+        f"请立即改用 paths 列表【一次性】读取所有剩余文件"
+        f"（如 paths:[\"a.txt\",\"b.csv\",\"c.pdf\"]）：一次 read_file 即可读取多个文件并带分隔头返回；"
+        f"后续若仍是逐个单文件读取，将继续被熔断拦截。"
+    )
+
+
+def _read_file_final_directive(count: int) -> str:
+    """read_file 超阈值、本次作为「最后一次单读机会」被执行时追加到结果的强指令。
+
+    未超阈值（count <= _READ_FILE_HARD_LIMIT）返回空串。
+    """
+    if count <= _READ_FILE_HARD_LIMIT:
+        return ""
+    return (
+        f"\n\n[系统·熔断] 本次是超过 {count} 次单文件读取后【被允许执行的最后一次单读】。"
+        f"若仍有其它文件要读，请在下一轮改用 paths 列表一次性读取（paths:[\"x\",\"y\",\"z\"]），"
+        f"不要再逐个调用 read_file。后续零散单读将被熔断拦截。"
+    )
+
+
 MAX_STEPS = 90  # 默认迭代预算（对齐 Hermes 父 Agent）；run() 优先用 cfg.agent.max_steps
 
 # ---------------------------------------------------------------------------
@@ -754,6 +803,9 @@ class Agent:
         _code_exec_count: int = 0
         # 超过硬阈值后，下一次调用允许执行（之后需再经一次熔断才放行），保证任务能推进、不形成死锁。
         _code_exec_final_granted: bool = True
+        # read_file 硬熔断（v1.0.30）：强制批量读取，打断逐文件读取循环。
+        _read_file_single_count: int = 0
+        _read_file_final_granted: bool = True
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
         # 仅按子智能体名去重（忽略 task 文本差异）——弱模型常把同一子智能体换个说法反复
         # 重派，若按 task 前缀去重会把「换汤不换药」的重派误判为新委派，导致 stall 计数永不
@@ -948,21 +1000,47 @@ class Agent:
                             else:
                                 _code_exec_final_granted = True
                                 _ce_refuse = True  # 本次熔断：不执行，强制整合
+                    # ---- read_file 硬熔断（v1.0.30）：强制批量读取，打断逐文件读取循环 ----
+                    # 超过 _READ_FILE_HARD_LIMIT 后进入「熔断-放行」交替：偶数次单文件读取被拦截
+                    # （不读、强令改用 paths 列表），奇数次单文件读取放行但追加「改用 paths 批量」强指令。
+                    # paths 批量读取（>=2 个文件）【始终放行】，既奖励正确行为，又保证模型永远有出路、不死锁。
+                    _rf_refuse = False
+                    _rf_final = False
+                    if name == "read_file":
+                        if _read_file_is_batch(args):
+                            pass  # 批量读取始终放行，奖励正确行为
+                        else:
+                            _read_file_single_count += 1
+                            if _read_file_single_count > _READ_FILE_HARD_LIMIT:
+                                if _read_file_final_granted:
+                                    _read_file_final_granted = False
+                                    _rf_final = True  # 本次放行，但追加批量强指令
+                                else:
+                                    _read_file_final_granted = True
+                                    _rf_refuse = True  # 本次熔断：不读取，强制改用 paths
                     # ---- 获取工具结果：并行分支直接取预取值，否则串行执行 ----
                     if _do_parallel:
                         if _ce_refuse:
                             result = _code_exec_breaker_message(_code_exec_count)
+                        elif _rf_refuse:
+                            result = _read_file_breaker_message(_read_file_single_count)
                         else:
                             result = _leaf_results[_li]
                             if _ce_final:
                                 result = result + _code_exec_final_directive(_code_exec_count)
+                            if _rf_final:
+                                result = result + _read_file_final_directive(_read_file_single_count)
                     else:
                         if _ce_refuse:
                             result = _code_exec_breaker_message(_code_exec_count)
+                        elif _rf_refuse:
+                            result = _read_file_breaker_message(_read_file_single_count)
                         else:
                             result = await ToolRegistry.execute(name, args, self.ctx)
                             if _ce_final:
                                 result = result + _code_exec_final_directive(_code_exec_count)
+                            if _rf_final:
+                                result = result + _read_file_final_directive(_read_file_single_count)
                     # ---- 反空转熔断计数（Task #395）：仅对失败/被拦截结果累计签名 ----
                     # 成功调用会使连续失败计数清零，但签名累计仍保留，从而能捕获
                     # 「成功/失败交替」的死循环（如 code_exec 装 Node 成功、terminal_run

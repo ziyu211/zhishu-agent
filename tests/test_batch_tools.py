@@ -349,6 +349,69 @@ async def check_code_exec_breaker():
     assert final_turns == [9, 11, 13, 15, 17, 19], final_turns
 
 
+async def check_read_file_breaker():
+    """v1.0.30：read_file 硬熔断——单文件读取超阈值进入「熔断-放行」交替，paths 批量读取始终放行。"""
+    from zhishu.core.agent.agent import (
+        _read_file_breaker_message, _read_file_final_directive,
+        _READ_FILE_HARD_LIMIT, _read_file_is_batch)
+
+    # _read_file_is_batch 真值表：仅 paths 列表（>=2 个）算批量
+    assert _read_file_is_batch({"paths": ["a.txt", "b.csv"]}) is True
+    assert _read_file_is_batch({"paths": ["a.txt"]}) is False
+    assert _read_file_is_batch({"path": "a.txt"}) is False
+    assert _read_file_is_batch({}) is False
+    assert _read_file_is_batch({"paths": "a.txt"}) is False  # 非列表
+
+    # 未超阈值：消息/指令均为空字符串
+    assert _read_file_breaker_message(_READ_FILE_HARD_LIMIT) == ""
+    assert _read_file_final_directive(_READ_FILE_HARD_LIMIT) == ""
+
+    # 超阈值熔断消息：含次数、引导改用 paths 批量
+    msg = _read_file_breaker_message(_READ_FILE_HARD_LIMIT + 5)
+    assert "熔断" in msg and "paths" in msg and "批量" in msg and "read_file" in msg
+
+    # 超阈值放行指令：含「最后一次单读」与 paths 批量指引
+    d = _read_file_final_directive(_READ_FILE_HARD_LIMIT + 7)
+    assert "最后一次" in d and "paths" in d
+
+    # 模拟运行期状态机（与 agent.py 内逻辑一致）：单文件读取前 LIMIT 次自由，
+    # 之后进入「放行(追加强指令)-熔断」交替；paths 批量读取永远不计入、直接放行。
+    single = 0
+    granted = True
+    refuse_turns, final_turns, free_turns = [], [], []
+
+    def _next(args):
+        nonlocal single, granted
+        if _read_file_is_batch(args):
+            return "batch"  # 永远放行
+        single += 1
+        if single <= _READ_FILE_HARD_LIMIT:
+            free_turns.append(single)
+            return "free"
+        if granted:
+            granted = False
+            final_turns.append(single)
+            return "final"
+        granted = True
+        refuse_turns.append(single)
+        return "refuse"
+
+    # 20 次全单文件读取：free 1..6，之后 7/9/11..放行、8/10/12..熔断
+    for _ in range(20):
+        _next({"path": "f.txt"})
+    assert free_turns == list(range(1, _READ_FILE_HARD_LIMIT + 1)), free_turns
+    assert refuse_turns == [8, 10, 12, 14, 16, 18, 20], refuse_turns
+    assert final_turns == [7, 9, 11, 13, 15, 17, 19], final_turns
+
+    # paths 批量读取始终放行，且不会把单文件计数清零（单读计数在整轮内单调）
+    outcomes = []
+    for args in [{"path": "a"}] * 6 + [{"paths": ["x", "y"]}] * 3 + [{"path": "b"}] * 3:
+        outcomes.append(_next(args))
+    assert outcomes[6:9] == ["batch", "batch", "batch"]
+    # 第 7 个单读（整体第 7 个 path 单读）触发 final，第 8 个触发 refuse，第 9 个 final
+    assert outcomes[9] == "final" and outcomes[10] == "refuse" and outcomes[11] == "final"
+
+
 async def main():
     await check_read_file()
     await check_terminal()
@@ -359,6 +422,7 @@ async def main():
     await check_schema_list_and_scalar()
     await check_consolidation_nudge()
     await check_code_exec_breaker()
+    await check_read_file_breaker()
     print("ALL_TESTS_PASSED")
 
 
@@ -388,6 +452,10 @@ def test_consolidation_nudge():
 
 def test_code_exec_breaker():
     asyncio.run(check_code_exec_breaker())
+
+
+def test_read_file_breaker():
+    asyncio.run(check_read_file_breaker())
 
 
 if __name__ == "__main__":
