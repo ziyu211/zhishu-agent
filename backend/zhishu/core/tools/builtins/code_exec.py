@@ -222,6 +222,11 @@ def _register_dynamic(tname: str, desc: str, code: str, params: dict,
     "TARGET_FILE 环境变量，代码内用 os.environ['TARGET_FILE'] 读取。代码须把结果 print 到 stdout。"
     "代码产生的新文件会【自动】落盘到媒体库并回传 /media/... 下载链接，无需额外参数；"
     "save_output=true 时额外收集 ZHISHU_OUTPUT_DIR 目录内的文件再发布一次。"
+    "若要把结果导出为 Excel：最稳妥的做法是在代码里把表格写成 CSV 文件"
+    "（例如 open('result.csv','w',encoding='utf-8').write(csv_text)），该文件会自动发布并返回 /media 链接；"
+    "随后调用 generate_excel(filename='结果.xlsx', from_file='<刚才的 /media 链接或沙箱文件名>') 即可生成合法 xlsx。"
+    "也可在代码里直接用 openpyxl 写 .xlsx（同样会自动发布）。"
+    "注意：切勿把表格只 print 出来却不落盘——那样 generate_excel 拿不到数据、只会报错。"
     "注意：这是模型自生成的代码，仅在内网可信部署下使用。",
     {
         "type": "object",

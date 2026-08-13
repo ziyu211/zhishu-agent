@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -192,6 +193,67 @@ async def check_generate_excel():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+async def check_generate_excel_from_file():
+    """v1.0.28：generate_excel 的 from_file 桥接 + 沙箱最近表格兜底 + 可操作报错。"""
+    from zhishu.core.tools.builtins.generate_excel import (
+        generate_excel, _resolve_from_file, _load_sheet_spec_from_file,
+        _find_recent_sandbox_table,
+    )
+    import openpyxl
+
+    tmp = tempfile.mkdtemp(prefix="zh_xf_")
+    try:
+        media = FakeMedia(os.path.join(tmp, "media"))
+        ctx = _make_ctx(media=media)
+
+        # 1) from_file 传 /media 链接（模拟 code_exec 自动发布的 CSV）
+        csv_path = os.path.join(tmp, "years.csv")
+        with open(csv_path, "w", encoding="utf-8") as f:
+            f.write("年份,事件\n1914年,美国股市曾关门停市\n1919年,可口可乐上市\n")
+        url = media.save_file(csv_path, kind="file", owner="tester")
+        out = await generate_excel({"filename": "years.xlsx", "from_file": url}, ctx)
+        assert "已生成标准 Excel 文件「years.xlsx」" in out, out
+        xlsx = [p for p in media.saved if p.endswith(".xlsx")][0]
+        wb = openpyxl.load_workbook(media.saved[xlsx])
+        vals = [r[0].value for r in wb.active.iter_rows()]
+        assert "1914年" in vals, vals
+
+        # 2) 单元：_find_recent_sandbox_table 找到刚写入的表格文件
+        from zhishu.core.tools.builtins.sandbox import sandbox_cwd_for
+        sb = sandbox_cwd_for("tester")
+        probe = os.path.join(sb, "probe.csv")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("a,b\n1,2\n")
+        try:
+            found = _find_recent_sandbox_table("tester")
+            assert found and os.path.basename(found) == "probe.csv", found
+            # 沙箱兜底 end-to-end：只传 filename，应自动采用该 csv
+            out2 = await generate_excel({"filename": "auto.xlsx"}, ctx)
+            assert "已生成标准 Excel 文件「auto.xlsx」" in out2, out2
+            assert "自动采用沙箱最近生成的表格文件" in out2, out2
+        finally:
+            if os.path.exists(probe):
+                os.remove(probe)
+
+        # 3) 既无数据也无文件：可操作报错（须含 from_file 指引，而非只报缺数据）
+        out3 = await generate_excel({"filename": "empty.xlsx"}, ctx)
+        assert "缺少表格数据" in out3 and "from_file" in out3, out3
+
+        # 4) 单元：_resolve_from_file / _load_sheet_spec_from_file 基础行为
+        assert _resolve_from_file(os.path.abspath(csv_path), media, "tester") is not None
+        assert _resolve_from_file("/no/such/file.csv", media, "tester") is None
+        spec = _load_sheet_spec_from_file(csv_path)
+        assert spec and spec[0]["csv"].startswith("年份,事件"), spec
+        # JSON list[dict] -> 自动表头
+        jp = os.path.join(tmp, "rows.json")
+        with open(jp, "w", encoding="utf-8") as f:
+            json.dump([{"年份": "2000年", "事件": "x"}, {"年份": "2001年", "事件": "y"}], f)
+        spec2 = _load_sheet_spec_from_file(jp)
+        assert spec2 and spec2[0]["header"] == ["年份", "事件"], spec2
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 async def check_speed_hints():
     """v1.0.24：4 个文件处理工具的顶层 description 须以【提速关键】开头，
     把「用批量参数压 N 次同类调用为 1 次」这条最可靠的提速手段直接钉在模型决策点。"""
@@ -255,6 +317,7 @@ async def main():
     await check_terminal()
     await check_code_exec()
     await check_generate_excel()
+    await check_generate_excel_from_file()
     await check_speed_hints()
     await check_schema_list_and_scalar()
     await check_consolidation_nudge()
@@ -275,6 +338,10 @@ def test_batch_code_exec():
 
 def test_batch_generate_excel():
     asyncio.run(check_generate_excel())
+
+
+def test_generate_excel_from_file():
+    asyncio.run(check_generate_excel_from_file())
 
 
 def test_consolidation_nudge():

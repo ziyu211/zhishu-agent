@@ -13,6 +13,8 @@
 
 > **2026-08-13 升级至 1.0.27**：继续压缩「智枢比 Hermes 慢」的体感差距——针对用户实测 19 次串行调用（read_file×4 / code_exec×13 / generate_excel×2）的路径。诊断：框架并行（asyncio.gather）、Provider 并行信号、批量参数、以及 v1.0.24 决策点 description 均已就位，但 qwen3.5/agnes1 等国产网关模型仍「单回合 1 个 tool_call + REPL 式增量」（连发 13 次不同代码的 code_exec 调试），既有 `_breaker_repeat` 仅拦截「相同参数」循环、对「不同参数但同工具反复调用」无效。本轮新增**同工具多次调用「合并提醒」**（agent.py `run()` 内，v1.0.27）：按工具名累计本轮调用次数（不同参数也算），达阈值（code_exec/read_file/terminal_run=3，generate_excel=2）即注入一次性系统提醒，引导把剩余工作合并为更少/批量调用。该机制**完全不改 JSON Schema**，与既有 `_fail_nudged`/`_repeat_nudged` 同源、零回归风险；并给 code_exec description 补「严禁 REPL 式逐步调试」反模式。注意：框架侧杠杆已基本用尽，更深提速取决于推理服务侧的工具调用微调（更好的 tool-parser / chat-template）。
 
+> **2026-08-13 升级至 1.0.28**：修复「生成 Excel 失败」的新故障——用户实测 generate_excel 只拿到 filename、拿不到数据，直接报错「缺少表格数据」。根因是工具链断裂：模型在 code_exec 里把表格只 print 成文本、没落盘成文件也没内联传给 generate_excel，数据卡在对话文本里。本轮给 generate_excel 增加 **from_file 桥接**（v1.0.28）：① 支持读取 code_exec 写出的 CSV/JSON 文件，入参可为绝对路径 / `/media` 链接 / 沙箱相对文件名（推荐：code_exec 写完 CSV 自动发布得到 /media 链接，再把它作为 from_file 传入即可生成合法 xlsx）；② 仅传 filename 时自动采用本用户沙箱最近生成的表格文件兜底；③ 仍无数据时返回带 from_file 指引的可操作报错。同步在 code_exec / generate_excel 的 description 把「提取→落盘文件→桥接」工作流钉死。回归测试 tests/test_batch_tools.py 新增 check_generate_excel_from_file（from_file 链接 / 沙箱兜底 / 报错 / JSON 表头）。
+
 ---
 
 ## 一、设计目标
@@ -350,10 +352,10 @@ cp deploy/zhishu.yaml.example deploy/zhishu.yaml
 
 ```bash
 # 标准（需 docker.io 可达）
-docker build -t zhishu-agent:1.0.27 -f deploy/Dockerfile .
+docker build -t zhishu-agent:1.0.28 -f deploy/Dockerfile .
 
 # 受限网络 / 国内零代理（推荐内网、本机）
-docker build -t zsagent:1.0.27 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.28 -f deploy/Dockerfile.local .
 ```
 
 ### 9.3 运行
@@ -363,7 +365,7 @@ docker run -d --name zsagent \
   -p 8080:8080 \
   -v zsagent_data:/app/backend/data \
   --restart unless-stopped \
-  zsagent:1.0.27
+  zsagent:1.0.28
 ```
 
 - `zsagent_data` 卷持久化：向量库、会话记忆、`providers.json`、用户库、媒体文件。
@@ -375,7 +377,7 @@ docker run -d --name zsagent \
 docker run -d --name zsagent -p 8080:8080 \
   -v "$(pwd)/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro" \
   -v zsagent_data:/app/backend/data \
-  --restart unless-stopped zsagent:1.0.27
+  --restart unless-stopped zsagent:1.0.28
 ```
 
 > 重建容器（`docker rm` + `run`）会丢弃可写层：请确保挂载的 `zhishu.yaml` 中 `security.secret` 与旧值一致（否则触发硬闸门或 Provider Key 失效），或启动时传 `-e ZHISHU_SECRET=<同值>`。
@@ -418,7 +420,7 @@ scp -P <port> zhishu-src.tar.gz root@<host>:/opt/zhishu-agent/
 ssh -p <port> root@<host> "cd /opt/zhishu-agent && tar xzf zhishu-src.tar.gz && rm -f zhishu-src.tar.gz"
 
 # 3. 远程构建镜像（耗时较长，建议 nohup 后台跑并 tail 日志）
-ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.27 -f deploy/Dockerfile.local . > build.log 2>&1 &"
+ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.28 -f deploy/Dockerfile.local . > build.log 2>&1 &"
 
 # 4. 生成生产配置：必须替换默认 secret 与 admin 口令，否则进程启动即 exit 2
 #    secret 用 64 位强随机；配置以只读挂载进容器，不烧进镜像
@@ -431,7 +433,7 @@ docker run -d --name zsagent --restart always \
   -p 8090:8080 \
   -v zsagent_data:/app/backend/data \
   -v /opt/zhishu-agent/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro \
-  zsagent:1.0.27
+  zsagent:1.0.28
 
 # 6. 回填 Provider Key（Key 与 secret 强耦合，不能直接拷贝旧密文，必须走 API 明文回填）
 curl -X POST http://127.0.0.1:8090/api/v1/providers -H "Authorization: Bearer $TOK" \
@@ -461,10 +463,10 @@ curl -X POST http://127.0.0.1:8090/api/v1/models/default -H "Authorization: Bear
 
 ```bash
 # x86_64 信创（海光 / 兆芯）—— 沿用现有镜像
-docker build -t zsagent:1.0.27 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.28 -f deploy/Dockerfile.local .
 
 # ARM64（鲲鹏 920 / 飞腾）—— 指定平台交叉构建
-docker build --platform linux/arm64 -t zsagent:1.0.27-arm64 -f deploy/Dockerfile.local .
+docker build --platform linux/arm64 -t zsagent:1.0.28-arm64 -f deploy/Dockerfile.local .
 ```
 
 - 纯 wheel 依赖意味着在 ARM64 / LoongArch 下 `pip install` 不会触发本地编译；**但生产务必在「目标架构的同源机器」上原生构建**（鲲鹏机上直接 `docker build`），避免 qemu 仿真带来的性能与稳定性损耗。
