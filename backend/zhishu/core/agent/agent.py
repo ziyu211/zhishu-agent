@@ -78,6 +78,54 @@ def _build_consolidation_nudge(name: str, count: int) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# code_exec 硬熔断（v1.0.29）
+#
+# 背景：v1.0.27 的「同工具合并提醒」仅注入一次（_consolidate_nudged 去重），对国产网关
+# 模型的 REPL 式增量循环（连发数十次 code_exec 逐步调试：写一段→跑一段→看输出→改下一段）
+# 完全无效——模型无视一次性提醒，一直循环到 37 次。这条 trace 正是如此。
+# 这里升级为「硬熔断」：code_exec 超过 _CODE_EXEC_HARD_LIMIT 后进入「熔断-放行」交替模式，
+# 每隔一次调用强制返回系统熔断消息（不执行代码），以此打断 REPL 节奏、逼迫模型把探索成果
+# 整合为【一个完整脚本】一次性产出交付物。不改任何 JSON Schema，零回归风险。
+# 设计取舍：与「反空转护栏」一致，绝不整体终止任务；熔断只是把「无摩擦的逐步调试」变成
+# 「每两步卡一次的强制整合」，既保留合法复杂任务所需的迭代空间（前 8 次完全自由），又在
+# 病理循环上强加摩擦。交替放行确保任务终能推进，不会死锁。
+# ---------------------------------------------------------------------------
+_CODE_EXEC_HARD_LIMIT = 8
+
+
+def _code_exec_breaker_message(count: int) -> str:
+    """code_exec 超阈值且本次被熔断（不执行）时返回的系统消息，强制模型整合而非继续增量。
+
+    未超阈值（count <= _CODE_EXEC_HARD_LIMIT）返回空串，调用方可据此判定不熔断。
+    """
+    if count <= _CODE_EXEC_HARD_LIMIT:
+        return ""
+    return (
+        f"[系统·熔断] 你已调用 code_exec {count} 次，且呈 REPL 式逐步调试循环。"
+        f"为阻断无意义的往返，本次不执行你的代码。\n"
+        f"请立即整合前面所有探索的结果，写出【一个完整、端到端】的脚本，在【下一次 code_exec】中"
+        f"一次性跑完并直接产出最终交付物：读取所需文件 → 处理数据 → 把结果写成 CSV/JSON 文件"
+        f"（自动获得 /media 下载链接）→ 调用 generate_excel(from_file=该链接) 生成 Excel。\n"
+        f"下一次 code_exec 将被允许执行这一次整合脚本；此后若仍是零散增量调用，将继续被熔断。"
+    )
+
+
+def _code_exec_final_directive(count: int) -> str:
+    """code_exec 超阈值、本次作为「最后一次增量机会」被执行时追加到结果的强指令。
+
+    未超阈值（count <= _CODE_EXEC_HARD_LIMIT）返回空串。
+    """
+    if count <= _CODE_EXEC_HARD_LIMIT:
+        return ""
+    return (
+        f"\n\n[系统·熔断] 这是超过 {count} 次 code_exec 后【被允许执行的最后一次增量调用】。"
+        f"若此次仍未产出最终交付物，请在下一轮直接写出【完整、端到端】的最终脚本"
+        f"（含读文件、处理、写 CSV、用 generate_excel from_file 生成 Excel 的全流程），"
+        f"不要再分步调试。后续零散调用将被熔断拦截。"
+    )
+
+
 MAX_STEPS = 90  # 默认迭代预算（对齐 Hermes 父 Agent）；run() 优先用 cfg.agent.max_steps
 
 # ---------------------------------------------------------------------------
@@ -702,6 +750,10 @@ class Agent:
         # 达到阈值即注入一次性系统提醒，引导模型把零散调用合并为更少/批量调用。
         _tool_accum: dict = {}
         _consolidate_nudged: set = set()
+        # code_exec 硬熔断（v1.0.29）：打断 REPL 式增量循环。
+        _code_exec_count: int = 0
+        # 超过硬阈值后，下一次调用允许执行（之后需再经一次熔断才放行），保证任务能推进、不形成死锁。
+        _code_exec_final_granted: bool = True
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
         # 仅按子智能体名去重（忽略 task 文本差异）——弱模型常把同一子智能体换个说法反复
         # 重派，若按 task 前缀去重会把「换汤不换药」的重派误判为新委派，导致 stall 计数永不
@@ -881,11 +933,36 @@ class Agent:
                             "content": result,
                         })
                         continue
+                    # ---- code_exec 硬熔断（v1.0.29）：打断 REPL 式增量循环 ----
+                    # 超过 _CODE_EXEC_HARD_LIMIT 后进入「熔断-放行」交替：奇数次调用（放行）执行
+                    # 并追加「最后一次机会」强指令，偶数次调用（熔断）不执行、强制整合。以此在病理
+                    # 循环上强加摩擦，逼迫模型一次性写出完整脚本；合法复杂任务的前若干次完全自由。
+                    _ce_refuse = False
+                    _ce_final = False
+                    if name == "code_exec":
+                        _code_exec_count += 1
+                        if _code_exec_count > _CODE_EXEC_HARD_LIMIT:
+                            if _code_exec_final_granted:
+                                _code_exec_final_granted = False
+                                _ce_final = True  # 本次放行，但追加「最后一次机会」强指令
+                            else:
+                                _code_exec_final_granted = True
+                                _ce_refuse = True  # 本次熔断：不执行，强制整合
                     # ---- 获取工具结果：并行分支直接取预取值，否则串行执行 ----
                     if _do_parallel:
-                        result = _leaf_results[_li]
+                        if _ce_refuse:
+                            result = _code_exec_breaker_message(_code_exec_count)
+                        else:
+                            result = _leaf_results[_li]
+                            if _ce_final:
+                                result = result + _code_exec_final_directive(_code_exec_count)
                     else:
-                        result = await ToolRegistry.execute(name, args, self.ctx)
+                        if _ce_refuse:
+                            result = _code_exec_breaker_message(_code_exec_count)
+                        else:
+                            result = await ToolRegistry.execute(name, args, self.ctx)
+                            if _ce_final:
+                                result = result + _code_exec_final_directive(_code_exec_count)
                     # ---- 反空转熔断计数（Task #395）：仅对失败/被拦截结果累计签名 ----
                     # 成功调用会使连续失败计数清零，但签名累计仍保留，从而能捕获
                     # 「成功/失败交替」的死循环（如 code_exec 装 Node 成功、terminal_run

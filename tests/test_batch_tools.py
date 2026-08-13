@@ -312,6 +312,43 @@ async def check_consolidation_nudge():
     assert _build_consolidation_nudge("unknown_tool", 99) is None
 
 
+async def check_code_exec_breaker():
+    """v1.0.29：code_exec 硬熔断——超阈值进入「熔断-放行」交替，打断 REPL 式增量循环。"""
+    from zhishu.core.agent.agent import (
+        _code_exec_breaker_message, _code_exec_final_directive, _CODE_EXEC_HARD_LIMIT)
+
+    # 未超阈值：消息/指令均为空字符串（调用方据此判定不熔断）
+    assert _code_exec_breaker_message(_CODE_EXEC_HARD_LIMIT) == ""
+    assert _code_exec_final_directive(_CODE_EXEC_HARD_LIMIT) == ""
+
+    # 超阈值熔断消息：含次数、引导整合为单脚本 + from_file 桥接
+    msg = _code_exec_breaker_message(_CODE_EXEC_HARD_LIMIT + 5)
+    assert "熔断" in msg and "code_exec" in msg and "整合" in msg and "from_file" in msg \
+        and "generate_excel" in msg
+
+    # 超阈值放行指令：含「最后一次机会」与完整脚本指引
+    d = _code_exec_final_directive(_CODE_EXEC_HARD_LIMIT + 7)
+    assert "最后一次" in d and "完整" in d and "generate_excel" in d
+
+    # 模拟交替状态机：前 8 次自由（不熔断），第 9 次放行、第 10 次熔断、第 11 次放行…
+    count = 0
+    granted = True
+    refuse_turns, final_turns, free_turns = [], [], []
+    for i in range(1, 21):
+        count += 1
+        if count <= _CODE_EXEC_HARD_LIMIT:
+            free_turns.append(i)
+        elif granted:
+            granted = False
+            final_turns.append(i)
+        else:
+            granted = True
+            refuse_turns.append(i)
+    assert free_turns == list(range(1, _CODE_EXEC_HARD_LIMIT + 1)), free_turns
+    assert refuse_turns == [10, 12, 14, 16, 18, 20], refuse_turns
+    assert final_turns == [9, 11, 13, 15, 17, 19], final_turns
+
+
 async def main():
     await check_read_file()
     await check_terminal()
@@ -321,6 +358,7 @@ async def main():
     await check_speed_hints()
     await check_schema_list_and_scalar()
     await check_consolidation_nudge()
+    await check_code_exec_breaker()
     print("ALL_TESTS_PASSED")
 
 
@@ -346,6 +384,10 @@ def test_generate_excel_from_file():
 
 def test_consolidation_nudge():
     asyncio.run(check_consolidation_nudge())
+
+
+def test_code_exec_breaker():
+    asyncio.run(check_code_exec_breaker())
 
 
 if __name__ == "__main__":
