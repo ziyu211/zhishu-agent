@@ -52,9 +52,8 @@ def _build_sheet(ws, spec: dict):
 
 @tool(
     "generate_excel",
-    "【提速关键】generate_excel 生成 Excel，**始终用 `files`（列表）参数**：单个工作簿也写成 `files:[{\"filename\":\"表.xlsx\",\"sheet\":{...}}]`；"
-    "多个工作簿时 `files:[{\"filename\":\"表1.xlsx\",\"sheet\":{...}},{\"filename\":\"表2.xlsx\",\"sheets\":[...]}]`，一次调用返回多个 /media 下载链接。"
-    "**严禁为每个工作簿单独调用本工具**——那会把 1 次往返变成 N 次。（标量 filename/sheet 已废弃，不要用。）"
+    "【提速关键】需要一次生成『多个』Excel 文件时，必须用 files 列表（每项含 filename 与 sheet/sheets），"
+    "一次调用返回多个 /media 下载链接（例：files:[{\"filename\":\"表1.xlsx\",\"sheet\":{...}},{\"filename\":\"表2.xlsx\",\"sheet\":{...}}]）。仅生成单文件才用 filename+sheet。"
     "生成真正合法的 Excel(.xlsx) 文件并返回 /media/... 可点击下载链接。"
     "当你需要『生成一张 Excel 表』（如销售表、库存表、导出数据、对比结果）时必须使用本工具，"
     "不要自己手写 xlsx 字节、不要拼 zip、也绝不要用 file_write 写 .xlsx（那会生成 Excel 打不开的损坏文件）。"

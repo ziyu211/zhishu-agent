@@ -204,28 +204,28 @@ async def check_speed_hints():
             f"{name} 的 description 未前置【提速关键】：{spec.description[:40]}")
 
 
-async def check_schema_forces_list():
-    """v1.0.25：从 read_file/terminal_run 的 JSON Schema 中移除标量 path/command 参数
-    （code_exec 因保留内部自愈回退路径而保留已废弃的 code），强制模型优先走列表参数
-    （paths/snippets/commands/files），从源头杜绝「逐文件/逐段单调用」。"""
+async def check_schema_list_and_scalar():
+    """v1.0.24 契约：4 个文件处理工具的 JSON Schema 同时暴露「标量主用 + 列表可选」两组参数
+    （read_file: path+paths / terminal_run: command+commands / code_exec: code+snippets /
+    generate_excel: filename+sheets+files）。标量参数保证模型以最可靠方式单调用（不诱发非法 JSON），
+    列表参数保留批量能力。两种形态都必须存在，缺一不可。"""
     from zhishu.core.tools.registry import ToolRegistry
 
-    # read_file / terminal_run：标量参数必须已移除，列表参数必须存在
     checks = {
-        "read_file": ("path", "paths"),
-        "terminal_run": ("command", "commands"),
+        "read_file": (("path", "paths"),),
+        "terminal_run": (("command", "commands"),),
+        "code_exec": (("code", "snippets"), "snippets"),
+        "generate_excel": (("filename", "files"),),
     }
-    for name, (scalar, listp) in checks.items():
+    for name, args in checks.items():
         spec = ToolRegistry.get(name)
         props = spec.parameters.get("properties", {})
-        assert scalar not in props, (
-            f"{name} 仍暴露标量参数 '{scalar}'，模型可能仍逐次单调用")
-        assert listp in props, (
-            f"{name} 缺少列表参数 '{listp}'")
-    # code_exec：snippets 必存在，且 code 标记为已废弃（不强制移除，因内部回退路径用）
+        for scalar, listp in args[0:1]:
+            assert scalar in props, f"{name} 缺少标量参数 '{scalar}'"
+            assert listp in props, f"{name} 缺少列表参数 '{listp}'"
+    # code_exec 必须同时有 code（标量主用）与 snippets（可选批量）
     ce = ToolRegistry.get("code_exec").parameters["properties"]
-    assert "snippets" in ce, "code_exec 缺少 snippets"
-    assert "已废弃" in ce.get("code", {}).get("description", ""), "code_exec 的 code 应标记为已废弃"
+    assert "code" in ce and "snippets" in ce, "code_exec 须同时暴露 code 与 snippets"
 
 
 async def main():
@@ -234,7 +234,7 @@ async def main():
     await check_code_exec()
     await check_generate_excel()
     await check_speed_hints()
-    await check_schema_forces_list()
+    await check_schema_list_and_scalar()
     print("ALL_TESTS_PASSED")
 
 

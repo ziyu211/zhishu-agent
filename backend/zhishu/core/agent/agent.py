@@ -748,16 +748,43 @@ class Agent:
                 # 流程）；否则当叶子工具≥2 时并发执行以缩短多工具步耗时（对标 Hermes 分段并行）。
                 _parsed: list = []
                 _any_delegate = False
+                _malformed_tc: list = []  # (tc, name) 参数非法 JSON，需就地修正并提示重试
                 for tc in tool_calls:
                     fn = tc.get("function", {})
                     name = fn.get("name", "")
+                    raw_args = fn.get("arguments", "{}")
+                    # 兼容性：个别 Provider 可能直接回传 dict，统一规整为 JSON 字符串
+                    if isinstance(raw_args, dict):
+                        fn["arguments"] = json.dumps(raw_args, ensure_ascii=False)
+                        raw_args = fn["arguments"]
                     try:
-                        args = json.loads(fn.get("arguments", "{}") or "{}")
-                    except json.JSONDecodeError:
+                        args = json.loads(raw_args or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        # 关键修复：模型生成的 arguments 非法 JSON 若不修正，回放给 Provider 会触发
+                        # HTTP 400（"Assistant tool call ... arguments must be valid JSON"），直接掐断
+                        # 整个对话。这里就地替换为合法 JSON 并标记，避免崩溃；同时注入重试引导，
+                        # 让模型以合法 JSON 重新调用，而非让错误传播成致命 400。
                         args = {}
+                        fn["arguments"] = "{}"
+                        _malformed_tc.append((tc, name))
                     if name == DELEGATE_TOOL_NAME and can_delegate:
                         _any_delegate = True
                     _parsed.append((tc, name, args))
+                # 模型上轮若有工具参数非法 JSON：注入系统提醒引导其以合法 JSON 重试，
+                # 同时 yield 一条 warning 便于前端/审计感知（不再以 400 掐断对话）。
+                if _malformed_tc:
+                    _bad = ", ".join(sorted({n or "?" for _, n in _malformed_tc}))
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"[系统] 你上一轮调用的工具（{_bad}）参数不是合法 JSON，"
+                            f"已被系统修正为空参数。请务必以合法 JSON 重新调用：数组/对象参数"
+                            f"（如 snippets、paths）中的字符串必须正确转义引号与换行，"
+                            f"不要混入未转义的双引号或裸换行。重新发起该工具调用即可。"
+                        ),
+                    })
+                    yield {"type": "warning",
+                           "message": f"检测到工具参数非法 JSON（{_bad}），已修正并提示模型重试。"}
                 _leaf_count = sum(
                     1 for _, n, _ in _parsed if not (n == DELEGATE_TOOL_NAME and can_delegate))
                 _do_parallel = (self.cfg.agent.parallel_tools and not _any_delegate and _leaf_count >= 2)

@@ -19,14 +19,14 @@ from ...shellguard import check_command, run_guarded
 
 @tool(
     "terminal_run",
-    "【提速关键】terminal_run 执行命令，**始终用 `commands`（列表）参数**：单条也写成 `commands:[\"ls -l\"]`；"
-    "多条时 `commands:[\"cd data\",\"python run.py\",\"ls -l\"]`，逐条过白名单/高危校验后合并为单次执行（减少往返与快照开销）。"
-    "**严禁为每条命令单独调用本工具**——那会把 1 次往返变成 N 次。（标量 `command` 已废弃，不要用。）"
+    "【提速关键】需要执行『多条』命令时必须用 commands 列表一次提交（例：commands:[\"cd data\",\"python run.py\",\"ls -l\"]），"
+    "逐条过白名单/高危校验后合并为单次执行，减少往返与快照开销。仅跑单条才用 command。"
     "执行本地 shell 命令（仅内网本机，命令受白名单与高危拦截约束）。",
     {
         "type": "object",
         "properties": {
-            "commands": {"type": "array", "description": "【必用】shell 命令列表：逐条经白名单/高危校验后合并为单次执行。即使单条也传列表，如 commands:[\"ls -l\"]", "items": {"type": "string"}},
+            "command": {"type": "string", "description": "单条要执行的命令（多条请用 commands 列表）"},
+            "commands": {"type": "array", "description": "批量命令：多条 shell 命令列表，逐条经白名单/高危校验后合并为单次执行（减少往返与快照开销）", "items": {"type": "string"}},
             "timeout": {"type": "integer", "description": "超时秒数，默认30"},
         },
         "required": [],
