@@ -11,6 +11,8 @@
 > **2026-08-13 升级至 1.0.25**：继续攻克「智枢比 Hermes 慢」——诊断确认框架并行机制与 Provider 并行信号（1.0.22/1.0.23）均完好，但用户实测 trace 仍 15 次串行单调用（read_file×4 / code_exec×8 / generate_excel×2 / file_write），说明国产网关模型「单回合只发 1 个 tool_call」的硬约束无法靠 parallel_tool_calls 信号扭转。故本轮把杠杆彻底压到「工具列表参数」本身：① 从 4 个工具的 JSON Schema 中**移除标量 path/code/command 参数**（保留 handler 兜底），description 改写为「始终用列表参数」并显式禁止逐文件/逐段调用；② 系统提示新增「先枚举再批量」强制规划规则，要求每种工具只发 1 次调用、把清单全部塞进列表参数；③ 强化 read_file/code_exec 单数调用的 [提速提示] 文案。即便模型仍 1 回合 1 调用，只要把多个目标合并进一次 paths/snippets/commands/files 列表调用，就能把 N 次往返压成 1 次。
 > **2026-08-13 升级至 1.0.26**：紧急修复 v1.0.25 引入的「模型参数非法 JSON 回放 400」致命缺陷（agnes1 等 OpenAI 兼容网关校验 assistant tool_call.arguments，破损参数会导致整轮对话 HTTP 400 掐断，报「所有 LLM Provider 均不可用」）。根因：agent 循环在 json.loads 失败时静默吃掉异常、却把破损 arguments 原样回放；v1.0.25 强制 snippets 列表（多段含引号/换行的代码）更易诱发模型产出非法 JSON，且使 code_exec 调用从 ×8 飙升到 ×18。修复：① agent.py 解析 tool_calls 时若 arguments 非法 JSON，就地替换为合法 `{}` 并注入「请以合法 JSON 重试」系统提醒（不再以 400 掐断）；② 回退 v1.0.25 强制列表参数，恢复 v1.0.24「标量主用 + 列表可选」可靠基线（code_exec 改推「把整个任务写成一个完整脚本一次跑完」以减少调用次数）。
 
+> **2026-08-13 升级至 1.0.27**：继续压缩「智枢比 Hermes 慢」的体感差距——针对用户实测 19 次串行调用（read_file×4 / code_exec×13 / generate_excel×2）的路径。诊断：框架并行（asyncio.gather）、Provider 并行信号、批量参数、以及 v1.0.24 决策点 description 均已就位，但 qwen3.5/agnes1 等国产网关模型仍「单回合 1 个 tool_call + REPL 式增量」（连发 13 次不同代码的 code_exec 调试），既有 `_breaker_repeat` 仅拦截「相同参数」循环、对「不同参数但同工具反复调用」无效。本轮新增**同工具多次调用「合并提醒」**（agent.py `run()` 内，v1.0.27）：按工具名累计本轮调用次数（不同参数也算），达阈值（code_exec/read_file/terminal_run=3，generate_excel=2）即注入一次性系统提醒，引导把剩余工作合并为更少/批量调用。该机制**完全不改 JSON Schema**，与既有 `_fail_nudged`/`_repeat_nudged` 同源、零回归风险；并给 code_exec description 补「严禁 REPL 式逐步调试」反模式。注意：框架侧杠杆已基本用尽，更深提速取决于推理服务侧的工具调用微调（更好的 tool-parser / chat-template）。
+
 ---
 
 ## 一、设计目标
@@ -348,10 +350,10 @@ cp deploy/zhishu.yaml.example deploy/zhishu.yaml
 
 ```bash
 # 标准（需 docker.io 可达）
-docker build -t zhishu-agent:1.0.26 -f deploy/Dockerfile .
+docker build -t zhishu-agent:1.0.27 -f deploy/Dockerfile .
 
 # 受限网络 / 国内零代理（推荐内网、本机）
-docker build -t zsagent:1.0.26 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.27 -f deploy/Dockerfile.local .
 ```
 
 ### 9.3 运行
@@ -361,7 +363,7 @@ docker run -d --name zsagent \
   -p 8080:8080 \
   -v zsagent_data:/app/backend/data \
   --restart unless-stopped \
-  zsagent:1.0.26
+  zsagent:1.0.27
 ```
 
 - `zsagent_data` 卷持久化：向量库、会话记忆、`providers.json`、用户库、媒体文件。
@@ -373,7 +375,7 @@ docker run -d --name zsagent \
 docker run -d --name zsagent -p 8080:8080 \
   -v "$(pwd)/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro" \
   -v zsagent_data:/app/backend/data \
-  --restart unless-stopped zsagent:1.0.26
+  --restart unless-stopped zsagent:1.0.27
 ```
 
 > 重建容器（`docker rm` + `run`）会丢弃可写层：请确保挂载的 `zhishu.yaml` 中 `security.secret` 与旧值一致（否则触发硬闸门或 Provider Key 失效），或启动时传 `-e ZHISHU_SECRET=<同值>`。
@@ -416,7 +418,7 @@ scp -P <port> zhishu-src.tar.gz root@<host>:/opt/zhishu-agent/
 ssh -p <port> root@<host> "cd /opt/zhishu-agent && tar xzf zhishu-src.tar.gz && rm -f zhishu-src.tar.gz"
 
 # 3. 远程构建镜像（耗时较长，建议 nohup 后台跑并 tail 日志）
-ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.26 -f deploy/Dockerfile.local . > build.log 2>&1 &"
+ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.27 -f deploy/Dockerfile.local . > build.log 2>&1 &"
 
 # 4. 生成生产配置：必须替换默认 secret 与 admin 口令，否则进程启动即 exit 2
 #    secret 用 64 位强随机；配置以只读挂载进容器，不烧进镜像
@@ -429,7 +431,7 @@ docker run -d --name zsagent --restart always \
   -p 8090:8080 \
   -v zsagent_data:/app/backend/data \
   -v /opt/zhishu-agent/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro \
-  zsagent:1.0.26
+  zsagent:1.0.27
 
 # 6. 回填 Provider Key（Key 与 secret 强耦合，不能直接拷贝旧密文，必须走 API 明文回填）
 curl -X POST http://127.0.0.1:8090/api/v1/providers -H "Authorization: Bearer $TOK" \
@@ -459,10 +461,10 @@ curl -X POST http://127.0.0.1:8090/api/v1/models/default -H "Authorization: Bear
 
 ```bash
 # x86_64 信创（海光 / 兆芯）—— 沿用现有镜像
-docker build -t zsagent:1.0.26 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.27 -f deploy/Dockerfile.local .
 
 # ARM64（鲲鹏 920 / 飞腾）—— 指定平台交叉构建
-docker build --platform linux/arm64 -t zsagent:1.0.26-arm64 -f deploy/Dockerfile.local .
+docker build --platform linux/arm64 -t zsagent:1.0.27-arm64 -f deploy/Dockerfile.local .
 ```
 
 - 纯 wheel 依赖意味着在 ARM64 / LoongArch 下 `pip install` 不会触发本地编译；**但生产务必在「目标架构的同源机器」上原生构建**（鲲鹏机上直接 `docker build`），避免 qemu 仿真带来的性能与稳定性损耗。

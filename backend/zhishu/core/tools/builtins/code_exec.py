@@ -213,7 +213,8 @@ def _register_dynamic(tname: str, desc: str, code: str, params: dict,
     "code_exec",
     "【提速关键】优先把『整个任务』写成一个完整 Python 脚本，用 code 参数一次性 code_exec 跑完"
     "（读取文件/处理/生成产物全在一个脚本里），能少跑多次 LLM 往返、明显更快；"
-    "不要把一个任务拆成多次零散的 code_exec 调用（如连跑 8 次），那正是「智枢比 Hermes 慢」的主因。"
+    "不要把一个任务拆成多次零散的 code_exec 调用（如连跑 8 次），那正是「智枢比 Hermes 慢」的主因；"
+    "严禁 REPL 式逐步调试（写一段跑一段、看输出再改下一段），请一次性规划完整脚本。"
     "需要分段时也可用 snippets 列表（例：snippets:[\"import pandas as pd\",\"df=pd.read_csv(TARGET_FILE)\",\"print(df.describe())\"]），"
     "系统在单个子进程内顺序执行、共享变量（与 code 等价，可选）。"
     "运行 Python 代码（对标 Hermes 自创工具/自愈能力）。当 read_file 或解析器遇到不支持的文件格式、"

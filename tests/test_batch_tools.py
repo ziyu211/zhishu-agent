@@ -228,6 +228,28 @@ async def check_schema_list_and_scalar():
     assert "code" in ce and "snippets" in ce, "code_exec 须同时暴露 code 与 snippets"
 
 
+async def check_consolidation_nudge():
+    """v1.0.27：同工具多次调用「合并提醒」阈值与文案正确（不改 schema，零回归）。"""
+    from zhishu.core.agent.agent import _build_consolidation_nudge
+
+    # 未达阈值：返回 None，不注入
+    assert _build_consolidation_nudge("code_exec", 1) is None
+    assert _build_consolidation_nudge("code_exec", 2) is None
+    assert _build_consolidation_nudge("read_file", 2) is None
+    assert _build_consolidation_nudge("generate_excel", 1) is None
+    # 达阈值：返回一次性系统提醒，且含工具名与合并指引
+    n = _build_consolidation_nudge("code_exec", 3)
+    assert n is not None and "code_exec" in n and "合并" in n
+    n2 = _build_consolidation_nudge("generate_excel", 2)
+    assert n2 is not None and "generate_excel" in n2 and "files" in n2
+    n3 = _build_consolidation_nudge("read_file", 3)
+    assert n3 is not None and "paths" in n3
+    n4 = _build_consolidation_nudge("terminal_run", 3)
+    assert n4 is not None and "commands" in n4
+    # 非目标工具永不提醒
+    assert _build_consolidation_nudge("unknown_tool", 99) is None
+
+
 async def main():
     await check_read_file()
     await check_terminal()
@@ -235,6 +257,7 @@ async def main():
     await check_generate_excel()
     await check_speed_hints()
     await check_schema_list_and_scalar()
+    await check_consolidation_nudge()
     print("ALL_TESTS_PASSED")
 
 
@@ -252,6 +275,10 @@ def test_batch_code_exec():
 
 def test_batch_generate_excel():
     asyncio.run(check_generate_excel())
+
+
+def test_consolidation_nudge():
+    asyncio.run(check_consolidation_nudge())
 
 
 if __name__ == "__main__":

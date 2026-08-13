@@ -49,6 +49,35 @@ from .context_engine import NoOpContextEngine, ContextEngine, CompressionContext
 from ..modules.skills import maybe_learn, maybe_reflect
 from .. import image_routing
 
+# 同工具多次调用「合并提醒」阈值与文案（v1.0.27，攻击「单回合单调用 + REPL 式增量」硬约束）。
+# 当某工具在本轮被调用次数（不同参数也算）达到阈值，注入一次性系统提醒，引导模型把剩余
+# 工作合并为更少/批量调用，减少 LLM 往返。仅按工具名计数，schema 不变，零回归风险。
+_CONSOLIDATE_THRESHOLD = {
+    "code_exec": 3,
+    "read_file": 3,
+    "generate_excel": 2,
+    "terminal_run": 3,
+}
+_CONSOLIDATE_MSG = {
+    "code_exec": "请把剩余工作合并成一个完整 Python 脚本，用一次 code_exec 跑完"
+                "（读取/处理/生成产物全在一个脚本里）；禁止 REPL 式逐步调试：写一段、跑一段、看输出、再改。",
+    "read_file": "请用 paths 列表一次读取多个文件（如 paths:[\"a.txt\",\"b.csv\"]），"
+                "不要为每个文件各发一次 read_file。",
+    "generate_excel": "请用 files 列表一次生成（多文件/多工作表），不要为每个产物各发一次 generate_excel。",
+    "terminal_run": "请把多条命令合并进一次 terminal_run 的 commands 列表，不要逐条发送。",
+}
+
+
+def _build_consolidation_nudge(name: str, count: int) -> Optional[str]:
+    """当 name 达到合并阈值时返回一次性系统提醒文本，否则 None。纯函数，便于单测。"""
+    if name in _CONSOLIDATE_THRESHOLD and count >= _CONSOLIDATE_THRESHOLD[name]:
+        return (
+            f"[系统·提速] 你在本轮已调用 `{name}` {count} 次（且多为不同参数）。"
+            f"{_CONSOLIDATE_MSG[name]}这能显著减少 LLM 往返、缩短整体耗时。"
+        )
+    return None
+
+
 MAX_STEPS = 90  # 默认迭代预算（对齐 Hermes 父 Agent）；run() 优先用 cfg.agent.max_steps
 
 # ---------------------------------------------------------------------------
@@ -669,6 +698,10 @@ class Agent:
         # 收尾提醒（grace call，对标 Hermes _budget_grace_call）去重：预算耗尽前仅注入一次，
         # 提示 Agent 给出最终结论而非半路被截断。
         _finalize_nudged: bool = False
+        # 同工具多次调用「合并提醒」（v1.0.27）：按工具名累计本轮调用次数（不同参数也算），
+        # 达到阈值即注入一次性系统提醒，引导模型把零散调用合并为更少/批量调用。
+        _tool_accum: dict = {}
+        _consolidate_nudged: set = set()
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
         # 仅按子智能体名去重（忽略 task 文本差异）——弱模型常把同一子智能体换个说法反复
         # 重派，若按 task 前缀去重会把「换汤不换药」的重派误判为新委派，导致 stall 计数永不
@@ -954,6 +987,15 @@ class Agent:
                         except Exception:
                             pass
                     tool_total += 1
+                    # ---- 同工具多次调用「合并提醒」（v1.0.27）----
+                    # 攻击模型「单回合单调用 + REPL 式增量」硬约束：当同一工具被反复调用
+                    # （即便参数不同）达阈值，注入一次性系统提醒，引导合并为更少/批量调用。
+                    # 不改 schema，零回归风险（与 _fail_nudged/_repeat_nudged 同源机制）。
+                    _tool_accum[name] = _tool_accum.get(name, 0) + 1
+                    _cn = _build_consolidation_nudge(name, _tool_accum[name])
+                    if _cn and name not in _consolidate_nudged:
+                        _consolidate_nudged.add(name)
+                        messages.append({"role": "system", "content": _cn})
                     traj_tools.append({"name": name, "args": args, "result": result[:300]})
                     # ---- 反空转护栏（对标 Hermes IterationBudget：预算内自由运行，不硬杀任务）----
                     # 设计哲学：运行在「迭代预算」(max_steps，默认 90，对齐 Hermes 父 Agent) 内自由
