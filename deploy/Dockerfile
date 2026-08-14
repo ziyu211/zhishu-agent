@@ -21,7 +21,8 @@ WORKDIR /app
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple
 
 # 安装文档/图片处理引擎（无头 LibreOffice 转换旧版 OLE 文档 + Tesseract 中文 OCR）
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -i 's|deb\.debian\.org|mirrors.tencent.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+    apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-writer libreoffice-calc libreoffice-impress \
     fonts-noto-cjk \
     tesseract-ocr tesseract-ocr-chi-sim \

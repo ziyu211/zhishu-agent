@@ -620,6 +620,12 @@ def _looks_like_zip(raw: bytes) -> bool:
 # 绝不能走通用压缩包解包分支（否则会吐出原始 XML 标签噪声）。
 _ZIP_BASED_DOC_EXTS = (".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub")
 
+# 这些扩展名已明确标识一种我们支持的文档类型，绝不被嗅探器覆盖
+# （尤其旧版 OLE：.doc/.xls/.ppt 内部流名不统一，嗅探极易把真实 .xls/.ppt
+# 误判成 .doc；既然扩展名已明示类型，直接按扩展名派发即可，纠错交给 LibreOffice）。
+_TRUSTED_EXTS = _ZIP_BASED_DOC_EXTS + (".doc", ".xls", ".ppt", ".pdf",
+                                       ".rtf", ".epub", ".odt", ".ods", ".odp")
+
 
 def _sniff_office_ext(raw: bytes) -> str | None:
     """通过 magic bytes + 容器结构嗅探办公文档真实类型，纠错错配/缺失的扩展名。
@@ -875,9 +881,11 @@ def read_file_text(filename: str, raw: bytes,
     无法解析时抛出 ValueError（带友好中文说明）。
     """
     ext = _ext(filename)
-    # 纠错：扩展名缺失/错配但 magic bytes 表明是办公文档时，按真实类型派发，
-    # 避免被下方通用压缩包分支当成 ZIP 吐出原始 XML。
-    if ext not in _ZIP_BASED_DOC_EXTS and ext != ".zip":
+    # 纠错：扩展名缺失/错配（如 .txt 实为 zip、无扩展名的 OLE）但 magic bytes 表明是办公文档时，
+    # 按真实类型派发，避免被下方通用压缩包分支当成 ZIP 吐出原始 XML。
+    # 但「已明确标识文档类型」的扩展名（_TRUSTED_EXTS）不被覆盖——旧版 OLE 的
+    # .doc/.xls/.ppt 内部流名不统一，嗅探极易误判，直接信任扩展名、把纠错交给 LibreOffice。
+    if ext not in _TRUSTED_EXTS and ext != ".zip":
         sniffed = _sniff_office_ext(raw)
         if sniffed:
             ext = sniffed
