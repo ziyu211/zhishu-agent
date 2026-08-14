@@ -29,9 +29,6 @@ async def file_read(args: dict, ctx) -> str:
         return f.read()
 
 
-# 图片扩展名（read_file 据此判断是否为图片；图片仅作视觉参考，不提取文字）
-_IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff", ".svg"}
-
 # 二进制文件扩展名：file_write 是「文本模式写入」，绝不可用来生成这些文件，
 # 否则会把内容当 UTF-8 文本写进二进制容器，生成 Excel/Word/PDF/图片等无法打开的损坏文件。
 # .xlsx 等 Office 文件应走 generate_excel（或 code_exec + openpyxl）；其余走 code_exec。
@@ -98,11 +95,13 @@ def _resolve_read_path(path: str, owner: str | None = None,
     "【提速关键】读取『多个』文件时必须用 paths 列表一次读取（例：paths:[\"a.txt\",\"b.csv\",\"c.pdf\"]），"
     "严禁为每个文件单独调用本工具——每多一次调用就多一次 LLM 往返，这是处理变慢的主因。仅读单个文件才用 path。"
     "按需读取文件内容（对标 hermes 解耦/按需哲学），是读取用户上传文档的唯一入口；"
-    "支持 TXT/MD/CSV/TSV/JSON/代码/日志等文本，以及 Word(.docx)/Excel(.xlsx)/PPT(.pptx)/"
-    "OpenDocument(.odt/.ods/.odp)/RTF(.rtf)/EPUB(.epub)/PDF(.pdf)——前者用标准库零依赖提取。支持分页(page)、"
+    "支持 TXT/MD/CSV/TSV/JSON/代码/日志等文本，以及 Word(.doc/.docx)/Excel(.xls/.xlsx)/PPT(.ppt/.pptx)/"
+    "OpenDocument(.odt/.ods/.odp)/RTF(.rtf)/EPUB(.epub)/PDF(.pdf)——前者用标准库零依赖提取；"
+    "旧版 .doc/.xls/.ppt 经 LibreOffice 无头转换后解析（无需用户另存）。支持分页(page)、"
     "行号(start_line/end_line)、字符预算(max_chars)。**如需读取文件末尾最近 N 行（如『最新100期』、日志尾部），"
     "直接用 tail 参数（tail:100），无需先知道总行数。** 用于附件或磁盘文件的按需解析，非一次性全量解析；"
-    "请勿使用 parse_docx/parse_xlsx/parse_pdf（已废弃）。图片请作为视觉参考传入模型，系统不内置 OCR。",
+    "请勿使用 parse_docx/parse_xlsx/parse_pdf（已废弃）。图片与扫描 PDF 自动 OCR 提取中文文字；"
+    "若图片/扫描件无文字，请作为视觉参考(vision)传入模型以获得内容理解。",
     {"type": "object", "properties": {
         "path": {"type": "string", "description": "单个文件路径：附件 stored_path、/media/ URL 或相对文件名（批量请用 paths）"},
         "paths": {"type": "array", "description": "批量读取：多个文件路径列表，一次调用读取多个文件并带分隔头拼接返回（减少往返、提速关键）", "items": {"type": "string"}},
@@ -170,11 +169,8 @@ async def read_file(args: dict, ctx) -> str:
             return f"[read_file] 文件不存在或越权: {path}"
         filename = os.path.basename(abs_path)
         ext = os.path.splitext(filename)[1].lower()
-        # ── 图片：仅作视觉参考，系统不内置 OCR ──
-        if ext in _IMG_EXTS:
-            return (f"[read_file] {filename} 是图片。请作为视觉参考(vision)传入模型；"
-                    f"系统不内置 OCR，无法提取图片内文字。")
-        # ── 文档：零依赖标准库提取（read_file_text 内部优先 stdlib）──
+        # ── 文档 / 图片：统一走 read_file_text（文档零依赖提取；图片自动 OCR 提取文字，
+        #    无文字则提示作为视觉参考；旧版 .doc/.xls/.ppt 经 LibreOffice 无头转换后解析）──
         try:
             with open(abs_path, "rb") as f:
                 raw = f.read()

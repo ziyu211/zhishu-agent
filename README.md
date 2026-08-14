@@ -21,6 +21,8 @@
 
 > **2026-08-14 升级至 1.0.31**：严格代码审查 + 全链路业务闭环审计（C1–C15 回归脚本 `backend/tests/test_closure_audit.py` 96 项、`http_closure_check.py` 24 项、`test_batch_tools.py` 全绿）+ 修复「创建技能报错」。诊断：用户要求创建 WDPB 技能时，agent 误在 `code_exec` 沙箱脚本里调用对话层工具 `create_tool` 而报错——根因是 `code_exec` 是独立 Python 子进程，沙箱内无 `ToolRegistry`/`create_tool`/`ctx`，进程隔离层面不可能（设计如此，非 bug）；`create_tool` 在对话层经 `ToolRegistry.execute` 闸门调用、注册 `dyn_` 工具后下一轮即对 LLM 可见可调用（已实测跑通）。本轮在 `code_exec` 的 description 补明确护栏：「脚本内只能写纯 Python，不能调用 create_tool 等其他工具，它们由对话层 tool_call 直接调用」；并明确正确路径——可复用工具直接发 `create_tool` tool_call，一次性文档处理直接 `code_exec` 跑 python-docx。不改 JSON Schema、零回归。
 
+> **2026-08-14 升级至 1.0.32**：全面补强「文档与图片处理」能力（用户反馈 .doc 无法解析）。诊断：① 旧版 OLE 二进制 **.doc/.xls/.ppt 此前完全无法结构化解析**（.doc/.xls 仅「尽力而为」字节扫描、常提为空；**.ppt 连分支都没有，直接掉通用报错**），且 OLE 嗅探器会把 .ppt 误判成 .doc；② 图片与扫描 PDF **全仓无 OCR**，图片只当视觉参考、扫描 PDF 只渲染成图。本轮在双 Dockerfile 注入 LibreOffice 无头转换（writer/calc/impress）+ 中文字体（fonts-noto-cjk）+ Tesseract 中文 OCR（chi_sim+eng），`requirements.txt` 加 `pytesseract`；`rag.py` 新增 `_libreoffice_convert`（全局 threading 锁串行化 soffice，转换后递归走既有提取器）把 .doc/.xls/.ppt 转新格式解析，新增 `_ocr_image_bytes`/`_ocr_pdf` 为图片与扫描 PDF 自动 OCR（无引擎则优雅降级）；修正 OLE 嗅探器区分 .ppt。覆盖旧格式文档「零用户操作」自动解析、图片/扫描件中文提取，与已有零依赖解析器互补、不重复造轮子。
+
 ---
 
 ## 一、设计目标
@@ -358,10 +360,10 @@ cp deploy/zhishu.yaml.example deploy/zhishu.yaml
 
 ```bash
 # 标准（需 docker.io 可达）
-docker build -t zhishu-agent:1.0.31 -f deploy/Dockerfile .
+docker build -t zhishu-agent:1.0.32 -f deploy/Dockerfile .
 
 # 受限网络 / 国内零代理（推荐内网、本机）
-docker build -t zsagent:1.0.31 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.32 -f deploy/Dockerfile.local .
 ```
 
 ### 9.3 运行
@@ -371,7 +373,7 @@ docker run -d --name zsagent \
   -p 8080:8080 \
   -v zsagent_data:/app/backend/data \
   --restart unless-stopped \
-  zsagent:1.0.31
+  zsagent:1.0.32
 ```
 
 - `zsagent_data` 卷持久化：向量库、会话记忆、`providers.json`、用户库、媒体文件。
@@ -383,7 +385,7 @@ docker run -d --name zsagent \
 docker run -d --name zsagent -p 8080:8080 \
   -v "$(pwd)/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro" \
   -v zsagent_data:/app/backend/data \
-  --restart unless-stopped zsagent:1.0.31
+  --restart unless-stopped zsagent:1.0.32
 ```
 
 > 重建容器（`docker rm` + `run`）会丢弃可写层：请确保挂载的 `zhishu.yaml` 中 `security.secret` 与旧值一致（否则触发硬闸门或 Provider Key 失效），或启动时传 `-e ZHISHU_SECRET=<同值>`。
@@ -426,7 +428,7 @@ scp -P <port> zhishu-src.tar.gz root@<host>:/opt/zhishu-agent/
 ssh -p <port> root@<host> "cd /opt/zhishu-agent && tar xzf zhishu-src.tar.gz && rm -f zhishu-src.tar.gz"
 
 # 3. 远程构建镜像（耗时较长，建议 nohup 后台跑并 tail 日志）
-ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.31 -f deploy/Dockerfile.local . > build.log 2>&1 &"
+ssh -p <port> root@<host> "cd /opt/zhishu-agent && nohup docker build -t zsagent:1.0.32 -f deploy/Dockerfile.local . > build.log 2>&1 &"
 
 # 4. 生成生产配置：必须替换默认 secret 与 admin 口令，否则进程启动即 exit 2
 #    secret 用 64 位强随机；配置以只读挂载进容器，不烧进镜像
@@ -439,7 +441,7 @@ docker run -d --name zsagent --restart always \
   -p 8090:8080 \
   -v zsagent_data:/app/backend/data \
   -v /opt/zhishu-agent/deploy/zhishu.yaml:/app/deploy/zhishu.yaml:ro \
-  zsagent:1.0.31
+  zsagent:1.0.32
 
 # 6. 回填 Provider Key（Key 与 secret 强耦合，不能直接拷贝旧密文，必须走 API 明文回填）
 curl -X POST http://127.0.0.1:8090/api/v1/providers -H "Authorization: Bearer $TOK" \
@@ -469,10 +471,10 @@ curl -X POST http://127.0.0.1:8090/api/v1/models/default -H "Authorization: Bear
 
 ```bash
 # x86_64 信创（海光 / 兆芯）—— 沿用现有镜像
-docker build -t zsagent:1.0.31 -f deploy/Dockerfile.local .
+docker build -t zsagent:1.0.32 -f deploy/Dockerfile.local .
 
 # ARM64（鲲鹏 920 / 飞腾）—— 指定平台交叉构建
-docker build --platform linux/arm64 -t zsagent:1.0.31-arm64 -f deploy/Dockerfile.local .
+docker build --platform linux/arm64 -t zsagent:1.0.32-arm64 -f deploy/Dockerfile.local .
 ```
 
 - 纯 wheel 依赖意味着在 ARM64 / LoongArch 下 `pip install` 不会触发本地编译；**但生产务必在「目标架构的同源机器」上原生构建**（鲲鹏机上直接 `docker build`），避免 qemu 仿真带来的性能与稳定性损耗。

@@ -18,8 +18,12 @@ import re
 import io
 import uuid
 import zipfile
+import shutil
+import subprocess
+import tempfile
+import threading
 import xml.etree.ElementTree as ET
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .embedding import EmbeddingEngine
 from .vector_store import VectorStore
@@ -625,8 +629,10 @@ def _sniff_office_ext(raw: bytes) -> str | None:
     """
     if not raw:
         return None
-    # 旧版 OLE 二进制（.doc / .xls），非 ZIP
+    # 旧版 OLE 二进制（.doc / .xls / .ppt），非 ZIP
     if raw[:4] == b"\xd0\xcf\x11\xe0":
+        if b"PowerPoint Document" in raw or b"PowerPoint" in raw:
+            return ".ppt"
         if b"WordDocument" in raw:
             return ".doc"
         if b"Workbook" in raw or b"Book" in raw:
@@ -766,6 +772,100 @@ def _extract_pdf(raw: bytes) -> str:
     return ""
 
 
+# ── 图片 / 扫描件 OCR（Tesseract，需系统安装 tesseract-ocr + tesseract-ocr-chi-sim）──
+# 缺失引擎时函数返回空串，调用方降级（图片→提示视觉参考；扫描 PDF→渲染为图）。
+_IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff", ".tif", ".svg"}
+
+# LibreOffice 无头转换全局串行锁：soffice 不允许并发实例（UserInstallation 配置目录锁），
+# 多上传并发时必须串行化，否则后到者会直接失败。
+_LO_LOCK = threading.Lock()
+# 单次 OCR / 转换的页数上限（防超大扫描件长时间阻塞事件循环）
+_OCR_MAX_PAGES = 30
+
+
+def _libreoffice_convert(raw: bytes, filename: str, target_ext: str,
+                         media_dir=None, owner=None) -> Tuple[str, str] | None:
+    """用 LibreOffice 无头模式把旧版 OLE 文档(.doc/.xls/.ppt) 转成新格式再解析。
+
+    返回 (text, file_type) 或 None（无 soffice / 转换失败）。转换成功后递归调用
+    read_file_text 走既有标准库/第三方提取器，零额外解析逻辑、不重复造轮子。
+    全局 threading.Lock 串行化，避免 soffice 实例锁冲突。
+    """
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        return None
+    tmp = tempfile.mkdtemp(prefix="zhishu_lo_")
+    try:
+        in_path = os.path.join(tmp, os.path.basename(filename) or "input")
+        with open(in_path, "wb") as f:
+            f.write(raw)
+        out_dir = os.path.join(tmp, "out")
+        os.makedirs(out_dir, exist_ok=True)
+        prof = os.path.join(tmp, "profile")
+        os.makedirs(prof, exist_ok=True)
+        cmd = [
+            soffice, "--headless", "--norestore", "--nofirststartwizard",
+            f"-env:UserInstallation=file://{prof}",
+            "--convert-to", target_ext.lstrip("."), "--outdir", out_dir, in_path,
+        ]
+        with _LO_LOCK:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if proc.returncode != 0:
+            return None
+        out_files = [os.path.join(out_dir, f) for f in os.listdir(out_dir)
+                     if f.lower().endswith(target_ext.lower())]
+        if not out_files:
+            return None
+        with open(out_files[0], "rb") as f:
+            out_raw = f.read()
+        # 递归解析转换后的新格式（.docx/.xlsx/.pptx），不触发二次转换
+        return read_file_text(os.path.basename(out_files[0]), out_raw, media_dir, owner)
+    except Exception:
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _ocr_image_bytes(raw: bytes, lang: str = "chi_sim+eng") -> str:
+    """对图片二进制做 OCR（需 tesseract + 中文包）。失败/未安装返回空串。"""
+    try:
+        from PIL import Image
+        import pytesseract
+    except Exception:
+        return ""
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img = img.convert("RGB")
+        return pytesseract.image_to_string(img, lang=lang).strip()
+    except Exception:
+        return ""
+
+
+def _ocr_pdf(raw: bytes, lang: str = "chi_sim+eng", max_pages: int = _OCR_MAX_PAGES) -> str:
+    """对扫描型 PDF（无文字层）逐页渲染后 OCR。失败/未安装返回空串。"""
+    try:
+        import fitz  # type: ignore
+        from PIL import Image
+        import pytesseract
+    except Exception:
+        return ""
+    try:
+        doc = fitz.open(stream=io.BytesIO(raw), filetype="pdf")
+        parts: list = []
+        for i, pg in enumerate(doc):
+            if i >= max_pages:
+                break
+            pix = pg.get_pixmap(dpi=200)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            t = pytesseract.image_to_string(img, lang=lang).strip()
+            if t:
+                parts.append(t)
+        doc.close()
+        return "\n\n".join(parts).strip()
+    except Exception:
+        return ""
+
+
 def read_file_text(filename: str, raw: bytes,
                    media_dir: str | None = None,
                    owner: str | None = None) -> tuple[str, str]:
@@ -802,8 +902,11 @@ def read_file_text(filename: str, raw: bytes,
     if ext == ".pdf":
         text = _extract_pdf(raw)
         if not text.strip():
-            # 扫描件（无文字层）：系统不内置 OCR（跨平台一致性考虑），
-            # 改为将各页渲染为图片，让用户至少可见内容，避免「无结果」死路。
+            # 文本层为空：先尝试 OCR（扫描件/图片型 PDF，需系统 tesseract + 中文包）
+            ocr = _ocr_pdf(raw)
+            if ocr.strip():
+                return ocr, "PDF(OCR)"
+            # OCR 也失败：扫描件渲染为图片，至少可见内容，避免「无结果」死路。
             try:
                 import fitz  # type: ignore
                 doc = fitz.open(stream=io.BytesIO(raw), filetype="pdf")
@@ -847,13 +950,17 @@ def read_file_text(filename: str, raw: bytes,
 
     if ext in (".docx", ".doc"):
         if ext == ".doc":
-            # 旧版 .doc 为 OLE 二进制，标准库无法结构化解析；先尽力而为扫描文本，
-            # 成功则直接返回（模型可据此总结），失败再引导 code_exec / 转 docx。
+            # 旧版 .doc 为 OLE 二进制：优先 LibreOffice 无头转 docx（保真高），
+            # 失败再尽力而为字节扫描，仍失败才引导转存。
+            conv = _libreoffice_convert(raw, filename, ".docx", media_dir, owner)
+            if conv and conv[0].strip():
+                return conv[0], "DOC"
             text = _extract_legacy_best_effort(raw)
             if text.strip():
                 return text, "DOC"
             raise ValueError(
-                "暂不支持旧版 .doc 格式（OLE 二进制结构，非 zip，标准库无法完整解析）。"
+                "暂不支持旧版 .doc 格式（OLE 二进制结构，标准库无法完整解析）。"
+                "已尝试 LibreOffice 转换与字节扫描，均未获得有效文本。"
                 "可选方案：① 请用户另存为 .docx 后重新上传以获得完整解析；"
                 "② 或调用 code_exec 对文件做「尽力而为」的文本提取（扫描 UTF-16LE / 可打印字符，"
                 "可能仅恢复部分正文），路径通过 os.environ['TARGET_FILE'] 读取。"
@@ -861,7 +968,7 @@ def read_file_text(filename: str, raw: bytes,
         # 优先零依赖标准库解析；为空再回退第三方库；仍为空则视为图片型文档
         text = _extract_docx_stdlib(raw) or _extract_docx_library(raw)
         if not text.strip():
-            raise ValueError("Word 文档未提取到文本（可能是图片型文档；系统不内置 OCR，无法提取图片内文字，请转换为文本型文档）。")
+            raise ValueError("Word 文档未提取到文本（可能是图片型文档；可尝试 OCR，但当前未提取到文字，请转换为文本型文档）。")
         return text, "DOCX"
 
     if ext in (".xlsx",):
@@ -872,15 +979,29 @@ def read_file_text(filename: str, raw: bytes,
         return text, "XLSX"
 
     if ext == ".xls":
-        # 旧版 .xls 为 OLE 二进制，先尽力而为扫描文本（标签/中文常可找回）
+        # 旧版 .xls 为 OLE 二进制：优先 LibreOffice 无头转 xlsx，失败再字节扫描
+        conv = _libreoffice_convert(raw, filename, ".xlsx", media_dir, owner)
+        if conv and conv[0].strip():
+            return conv[0], "XLS"
         text = _extract_legacy_best_effort(raw)
         if text.strip():
             return text, "XLS"
         raise ValueError(
             "暂不支持旧版 .xls 格式（OLE 二进制结构，非 zip，标准库无法解析）。"
+            "已尝试 LibreOffice 转换与字节扫描，均未获得有效文本。"
             "可选方案：① 请用户另存为 .xlsx 后重新上传以获得完整解析；"
             "② 或调用 code_exec 对文件做「尽力而为」的文本提取（扫描可打印字符），"
             "路径通过 os.environ['TARGET_FILE'] 读取。"
+        )
+
+    if ext == ".ppt":
+        # 旧版 .ppt 为 OLE 二进制：LibreOffice 无头转 pptx 后按新格式解析
+        conv = _libreoffice_convert(raw, filename, ".pptx", media_dir, owner)
+        if conv and conv[0].strip():
+            return conv[0], "PPT"
+        raise ValueError(
+            "暂不支持旧版 .ppt 格式（OLE 二进制结构，非 zip，标准库无法解析）。"
+            "已尝试 LibreOffice 转换未成功。可选方案：请用户另存为 .pptx 后重新上传以获得完整解析。"
         )
 
     if ext == ".pptx":
@@ -906,6 +1027,16 @@ def read_file_text(filename: str, raw: bytes,
         if not text.strip():
             raise ValueError("EPUB 未提取到文本")
         return text, "EPUB"
+
+    if ext in _IMG_EXTS:
+        # 图片：OCR 提取文字（需系统 tesseract + 中文包）；无文字则提示作为视觉参考
+        ocr = _ocr_image_bytes(raw)
+        if ocr.strip():
+            return ocr, "IMAGE(OCR)"
+        raise ValueError(
+            f"图片「{filename}」未识别到文字（可能是无文字的图表/照片）。"
+            "已尝试 OCR 但未提取到文本；请作为视觉参考(vision)传入模型以获得内容理解。"
+        )
 
     # 兜底：高可读性字节流直接当文本；GBK/GB18030 兜底；否则给出可操作的 code_exec 自愈指令
     if _looks_like_text(raw):

@@ -1,12 +1,21 @@
 # 智枢智能体 —— 本机专用镜像（零代理依赖，适配受限/离线网络）
 # 前端产物已预构建并提交到 backend/zhishu/static/，本镜像直接 COPY。
-# 构建：docker build -t zsagent:1.0.31 -f deploy/Dockerfile.local .
+# 构建：docker build -t zsagent:1.0.32 -f deploy/Dockerfile.local .
 
 FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim
 WORKDIR /app
 
 # 使用国内 pip 镜像（直连可达）
 RUN pip config set global.index-url https://mirrors.cloud.tencent.com/pypi/simple
+
+# 安装文档/图片处理引擎（无头 LibreOffice 转换旧版 OLE 文档 + Tesseract 中文 OCR）
+# 解决：旧版 .doc/.xls/.ppt 无法解析；图片/扫描 PDF 无法提取文字。
+# Debian 12 源可达（已验证 deb.debian.org 可连），故直接 apt 安装。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-writer libreoffice-calc libreoffice-impress \
+    fonts-noto-cjk \
+    tesseract-ocr tesseract-ocr-chi-sim \
+    && rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖（requirements.txt 在项目根，需一并复制进 backend/）
 COPY backend/ ./backend/

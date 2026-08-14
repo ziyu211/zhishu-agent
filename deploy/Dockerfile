@@ -1,5 +1,5 @@
 # 智枢智能体 —— 单容器镜像（国产基础镜像 + 国内源，适配受限/离线网络）
-# 构建：在 zhishu-agent/ 目录下执行  docker build -t zhishu-agent:1.0.31 -f deploy/Dockerfile .
+# 构建：在 zhishu-agent/ 目录下执行  docker build -t zhishu-agent:1.0.32 -f deploy/Dockerfile .
 # 说明：去掉了原架构的 Node BFF，前端构建产物直接由 Python 托管。
 # 基础镜像走华为云 SWR ddn-k8s（直连可达，不经 docker.io/代理）；配置用 example（不含密钥，运行时应挂载真实 zhishu.yaml）。
 
@@ -19,6 +19,13 @@ WORKDIR /app
 
 # 使用国内 pip 镜像（离线环境可改为私有源或离线 wheels 目录）
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple
+
+# 安装文档/图片处理引擎（无头 LibreOffice 转换旧版 OLE 文档 + Tesseract 中文 OCR）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-writer libreoffice-calc libreoffice-impress \
+    fonts-noto-cjk \
+    tesseract-ocr tesseract-ocr-chi-sim \
+    && rm -rf /var/lib/apt/lists/*
 
 # 安装 Python 依赖（requirements.txt 在项目根，需一并复制进 backend/）
 COPY backend/ ./backend/

@@ -27,6 +27,7 @@ openpyxl>=3.1         # .xlsx 第三方回退解析器（标准库提取为空�
 python-pptx>=0.6.23   # .pptx 增强解析（heading/备注），标准库解析器仍为主路径
 xlrd>=2.0             # 旧版 .xls（OLE）结构化解析增强
 Pillow>=10.0          # 图片缩放/转码（image_routing），缺失则降级为原样透传
+pytesseract>=0.3.10   # 图片 / 扫描 PDF 中文 OCR（依赖系统 tesseract-ocr + tesseract-ocr-chi-sim）
 
 # ---- 知识图谱：中文分词（关键词共现网络，离线零 token）----
 jieba>=0.42            # 中文分词 + 词性标注；缺失则退化为正则切词（效果较弱）
