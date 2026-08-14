@@ -21,7 +21,9 @@ WORKDIR /app
 RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple
 
 # 安装文档/图片处理引擎（无头 LibreOffice 转换旧版 OLE 文档 + Tesseract 中文 OCR）
-RUN sed -i 's|deb\.debian\.org|mirrors.tencent.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
+# 关键：强制 https（sed 把 http(s)://deb.debian.org 整体替换为 https://mirrors.tencent.com），
+# 否则部分环境下 http 包下载会被本地代理拦截失败。
+RUN sed -i -E 's#(https?://)deb\.debian\.org#https://mirrors.tencent.com#g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true; \
     apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-writer libreoffice-calc libreoffice-impress \
     fonts-noto-cjk \
