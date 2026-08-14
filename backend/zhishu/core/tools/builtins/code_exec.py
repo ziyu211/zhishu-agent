@@ -227,6 +227,10 @@ def _register_dynamic(tname: str, desc: str, code: str, params: dict,
     "随后调用 generate_excel(filename='结果.xlsx', from_file='<刚才的 /media 链接或沙箱文件名>') 即可生成合法 xlsx。"
     "也可在代码里直接用 openpyxl 写 .xlsx（同样会自动发布）。"
     "注意：切勿把表格只 print 出来却不落盘——那样 generate_excel 拿不到数据、只会报错。"
+    "注意：本工具的脚本运行在【独立 Python 子进程】里，只能写纯 Python（可 import 标准库与已装依赖），"
+    "【不能】在其中调用智枢的其他工具（如 create_tool / read_file / generate_excel 等）——那些是对话层工具，"
+    "由模型以 tool_call 形式直接调用，沙箱子进程内并不存在它们；若想在代码里注册可复用工具，"
+    "请在对话层直接发 create_tool tool_call，而非在脚本里调用 create_tool。"
     "注意：这是模型自生成的代码，仅在内网可信部署下使用。",
     {
         "type": "object",
