@@ -43,8 +43,8 @@ TOOLSETS: dict[str, Toolset] = {
     ),
     "skills": Toolset(
         name="skills",
-        description="技能渐进披露工具（按需读取 SKILL.md 全文）",
-        tools=["read_skill"],
+        description="技能渐进披露工具（按需读取 SKILL.md 全文 / 持久化保存技能）",
+        tools=["read_skill", "create_skill"],
     ),
     "sessions": Toolset(
         name="sessions",

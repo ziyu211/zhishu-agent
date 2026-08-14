@@ -311,6 +311,8 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
     "create_tool",
     "把一段 Python 注册为可复用的动态工具（对标 Hermes 自创持久工具）。"
     "注册后可直接以工具名调用，适合对某种文件/任务的稳定处理逻辑反复使用。"
+    "⚠️ 注意：本工具注册的是『当前会话内临时』的 dyn_ 动态工具——进程重启后清空，且**不会**出现在前端「功能模块技能」列表。"
+    "若用户要『保存/创建技能』并希望长期留存、在技能列表中可见，请改用 create_skill 工具（写入磁盘技能库）。"
     "代码须把结果 print 到 stdout；调用时传入的参数会以 JSON 字符串注入环境变量 "
     "TOOL_ARGS_JSON，代码中用 json.loads(os.environ['TOOL_ARGS_JSON']) 读取。"
     "工具名将自动加 'dyn_' 前缀。",
