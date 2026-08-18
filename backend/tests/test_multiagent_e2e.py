@@ -91,6 +91,11 @@ class FakeLLM:
             if FAKE_HANG:
                 await asyncio.sleep(3600)  # 永不返回 → 触发委派超时熔断
             return _resp_text("收到任务：请用三句话介绍上海。")
+        if "rewrite a user's latest message into" in sys_c:
+            # —— 记忆 query_rewrite 分支（v1.0.35+）：Agent.run 的 prefetch 会先调用一次
+            # LLM 做检索问句改写。必须返回纯文本（而非工具调用），否则会消耗主管首轮
+            # 的 _calls 计数，导致主管首轮被误判为第二轮、直接返回纯文本而不委派。——
+            return _resp_text("What prior user context would help answer the latest message?")
         # —— 主管分支：首轮委派，次轮收尾 ——
         self._calls += 1
         if self._calls == 1:
@@ -307,6 +312,10 @@ class _RoutingFakeLLM(FakeLLM):
 
     async def chat(self, messages, model=None, tools=None, max_tokens=None,
                    tool_choice=None):
+        sys_c = (messages[0].get("content", "") if messages else "")
+        if "rewrite a user's latest message into" in sys_c:
+            # 记忆 query_rewrite（tools=None）：返回纯文本，不污染 saw_delegate_tool 判定
+            return _resp_text("What prior user context would help answer the latest message?")
         names = [t["function"]["name"] for t in (tools or [])]
         if self.saw_delegate_tool is None:
             self.saw_delegate_tool = "delegate_to_agent" in names

@@ -24,6 +24,16 @@ from .core.agent import Agent, build_context_engine
 from .core.cron import CronScheduler
 
 
+# 运行时覆盖文件的 schema 版本。
+# 历史上存在「override 覆盖陷阱」：老版本（或手写）override.json 把 memory.vector_enabled
+# 持久化为 false，且在 YAML 显式开启记忆基线后，启动期 _apply_override 仍把它静默降级为 false，
+# 导致 v1.0.35 远程部署的记忆能力实际未生效。自 v1.0.36 起，override 文件带 "_v" 版本戳；
+# 任何 _v 不匹配当前版本的覆盖文件一律视为「陈旧」——丢弃其 memory/security 块，cfg 维持
+# YAML 基线，并就地重写为当前版本（含 YAML 真实值），使后续启动能正常识别、管理员经 UI 的
+# 显式切换也能持久化。这从根上避免陈旧 override 复活。
+OVERRIDE_VERSION = 2
+
+
 class AppContext:
     def __init__(self, cfg: ZhishuConfig):
         self.cfg = cfg
@@ -103,14 +113,51 @@ class AppContext:
         注意：本方法在 __init__ 早期调用，此时 self.audit / self.redactor 尚未构建，
         因此仅把数值并入 cfg（二者随后会从 cfg 初始化）；即时生效逻辑仅用于
         apply_settings 运行期路径。
+
+        防「override 覆盖陷阱」：override 文件带 "_v" 版本戳；_v 与当前版本不符的
+        陈旧文件一律丢弃其 memory/security 块（cfg 维持 YAML 基线），并就地重写为当前
+        版本（含 YAML 真实值），使下次启动能正常识别、管理员经 UI 的显式切换也能持久化。
         """
         try:
             if not os.path.exists(self._override_path):
                 return
             with open(self._override_path, "r", encoding="utf-8") as f:
                 ov = json.load(f) or {}
-            self._apply_memory_cfg(ov.get("memory") or {})
-            self._apply_security_cfg(ov.get("security") or {})
+        except Exception:
+            return
+        if ov.get("_v") != OVERRIDE_VERSION:
+            # 陈旧 override：不套用其 memory/security 块（避免把 YAML 已显式开启的记忆
+            # 静默降级为 false），并以 YAML 当前 cfg 值重写一份带版本戳的 override。
+            self._rewrite_override_from_cfg()
+            return
+        self._apply_memory_cfg(ov.get("memory") or {})
+        self._apply_security_cfg(ov.get("security") or {})
+
+    def _rewrite_override_from_cfg(self) -> None:
+        """以当前 cfg（YAML 基线）为准，重写 config.override.json 并打上版本戳。
+
+        用于在检测到陈旧 override 时把 cfg 真实值固化下来，避免反复被陈旧文件覆盖，
+        同时让后续启动的 _apply_override 能正常识别（_v 匹配）。
+        """
+        try:
+            ov = {
+                "_v": OVERRIDE_VERSION,
+                "memory": {
+                    "vector_enabled": self.cfg.memory.vector_enabled,
+                    "vector_top_k": self.cfg.memory.vector_top_k,
+                    "query_rewrite_enabled": self.cfg.memory.query_rewrite_enabled,
+                    "extraction_enabled": self.cfg.memory.extraction_enabled,
+                    "extraction_interval": self.cfg.memory.extraction_interval,
+                    "extraction_model": self.cfg.memory.extraction_model,
+                },
+                "security": {
+                    k: getattr(self.cfg.security, k)
+                    for k in self._SECURITY_OVERRIDE_FIELDS
+                },
+            }
+            os.makedirs(os.path.dirname(self._override_path), exist_ok=True)
+            with open(self._override_path, "w", encoding="utf-8") as f:
+                json.dump(ov, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
@@ -179,6 +226,7 @@ class AppContext:
             if os.path.exists(self._override_path):
                 with open(self._override_path, "r", encoding="utf-8") as f:
                     ov = json.load(f) or {}
+            ov["_v"] = OVERRIDE_VERSION
             if "memory" in patch:
                 ov["memory"] = {
                     "vector_enabled": self.cfg.memory.vector_enabled,

@@ -512,6 +512,8 @@ class Agent:
         media: Optional = None,
         context_engine: Optional[ContextEngine] = None,
         memory_manager: Optional[MemoryManager] = None,
+        *,
+        memory_read_only: bool = False,
     ):
         self.cfg = cfg
         self.llm = llm
@@ -530,9 +532,14 @@ class Agent:
         self.context_engine = context_engine or NoOpContextEngine()
         # 外部长期记忆（向量 provider，opt-in）。为 None 时 prefetch/sync 全为 no-op，零回归。
         self.memory_manager = memory_manager
+        # 记忆只读模式（委派子智能体专用）：允许 prefetch 召回主会话长期记忆注入上下文，
+        # 但禁止把子智能体自身的对话回写用户长期记忆（避免污染；主管最终回答已涵盖子任务结论）。
+        self._memory_read_only = bool(memory_read_only)
         # 注入 LLM 调用（供记忆 query_rewrite 与抽取式长期记忆使用；
         # 抽取/改写经事件循环 run_coroutine_threadsafe 在后台线程同步取回，绝不阻塞主流程）。
-        if self.memory_manager is not None:
+        # 只读子智能体复用共享 MemoryManager 的已注入 LLM，不再覆盖其绑定（避免把
+        # 共享 manager 的 LLM 回调改写成子智能体的未收窄实例，影响其它会话抽取）。
+        if self.memory_manager is not None and not self._memory_read_only:
             try:
                 self.memory_manager.set_llm(self._memory_llm_call)
             except Exception:
@@ -634,7 +641,8 @@ class Agent:
             history = await self.context_engine.compress_history(session, history, model)
             # 记忆压缩前抽取（on_pre_compress）：把即将被压缩的对话里抽取出的长期事实，
             # 回填成一条 system 摘要，使压缩摘要保留这些洞察（对标 Hermes）。
-            if self.memory_manager is not None:
+            # 只读模式（委派子智能体）下跳过：不抽取、不回写用户长期记忆。
+            if self.memory_manager is not None and not self._memory_read_only:
                 try:
                     mem_pre = self.memory_manager.on_pre_compress(
                         history, session_id=session, owner=owner)
@@ -1810,7 +1818,13 @@ class Agent:
 
     def _sync_memory(self, owner: Optional[str], role: str, content: str,
                      session: str = "") -> None:
-        """把一轮对话非阻塞地同步给记忆 provider（后台线程，绝不阻塞主流程）。"""
+        """把一轮对话非阻塞地同步给记忆 provider（后台线程，绝不阻塞主流程）。
+
+        只读模式（委派子智能体）下全为 no-op：子智能体只召回主会话长期记忆，
+        不把自身对话回写用户长期记忆，避免污染（主管最终回答已涵盖子任务结论）。
+        """
+        if self._memory_read_only:
+            return
         if self.memory_manager is None:
             return
         try:
@@ -1935,9 +1949,12 @@ class Agent:
             user=owner or "anonymous", session=scratch_session,
             is_admin=is_admin, user_role=user_role or "", agent_name=name,
         )
-        # memory_manager=None：子智能体输出不写用户长期记忆（避免污染；主管最终回答已涵盖）
+        # memory_manager=共享实例 + memory_read_only=True：子智能体可召回主会话长期记忆
+        # （prefetch_all 注入其上下文，继承用户已沉淀的事实/偏好），但不把自身对话回写
+        # 用户长期记忆（避免污染；主管最终回答已涵盖子任务结论）。
         sub = Agent(g.cfg, g.llm, g.kb, g.memory, sub_ctx, media=g.media,
-                    context_engine=self.context_engine, memory_manager=None)
+                    context_engine=self.context_engine,
+                    memory_manager=self.memory_manager, memory_read_only=True)
 
         # 整体超时熔断（P1-1）：用队列在后台消费子智能体事件流，主协程按「整体超时」
         # 抽取并实时转发；超时即取消消费任务并返回错误，避免子智能体卡死拖挂主 SSE 流。

@@ -35,6 +35,18 @@ vector_store:
   backend: sqlite          # sqlite | milvus | pgvector | dm
   path: data/zhishu_vector.db
 
+# 长期记忆（对标 Hermes MemoryManager）：向量抽取式长期记忆 + 检索改写。
+# 镜像内默认基线即开启（v1.0.36 起）；embedding 不可用时后端自动降级 hash，
+# 不会中断对话。管理员可经「设置」界面关闭（写入 override，带 _v 版本戳防陈旧覆盖）。
+memory:
+  vector_enabled: true
+  vector_top_k: 5
+  backend: builtin
+  query_rewrite_enabled: true
+  extraction_enabled: true
+  extraction_interval: 6
+  extraction_model: ''
+
 # 仅列出需要启用的厂商（其余预设自动包含）。api_key 留空即不鉴权（本地模型无需 Key）
 providers:
   qwen:
