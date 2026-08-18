@@ -530,6 +530,13 @@ class Agent:
         self.context_engine = context_engine or NoOpContextEngine()
         # 外部长期记忆（向量 provider，opt-in）。为 None 时 prefetch/sync 全为 no-op，零回归。
         self.memory_manager = memory_manager
+        # 注入 LLM 调用（供记忆 query_rewrite 与抽取式长期记忆使用；
+        # 抽取/改写经事件循环 run_coroutine_threadsafe 在后台线程同步取回，绝不阻塞主流程）。
+        if self.memory_manager is not None:
+            try:
+                self.memory_manager.set_llm(self._memory_llm_call)
+            except Exception:
+                pass
         # create_team 成功后，把团队清单作为醒目前缀拼到主管最终回复开头。
         self._team_roster_preface = ""
 
@@ -604,12 +611,14 @@ class Agent:
             yield {"type": "done"}
             return
 
-        # 长期记忆召回（向量记忆 opt-in；无外部 provider 时返回空串，零回归）。
+        # 长期记忆召回（向量抽取式记忆 opt-in；无外部 provider 时返回空串，零回归）。
         # 放在系统提示末尾作为 volatile 上下文，不污染身份（stable）部分。
+        # 内部含 trivial 门控 + 检索问句改写 + 上下文围栏（对标 Hermes MemoryManager）。
         if self.memory_manager is not None:
             try:
                 mem_ctx = await asyncio.to_thread(
-                    self.memory_manager.prefetch, owner, user_message
+                    self.memory_manager.prefetch_all, user_message,
+                    owner=owner, session_id=session,
                 )
             except Exception:
                 mem_ctx = ""
@@ -623,6 +632,19 @@ class Agent:
             # compress_history 为异步方法（会调用 LLM 摘要），必须在事件循环中 await。
             # 传入本轮实际模型，使「模型管理」里配置的 context_length 生效于历史裁剪。
             history = await self.context_engine.compress_history(session, history, model)
+            # 记忆压缩前抽取（on_pre_compress）：把即将被压缩的对话里抽取出的长期事实，
+            # 回填成一条 system 摘要，使压缩摘要保留这些洞察（对标 Hermes）。
+            if self.memory_manager is not None:
+                try:
+                    mem_pre = self.memory_manager.on_pre_compress(
+                        history, session_id=session, owner=owner)
+                    if mem_pre:
+                        history.insert(0, {
+                            "role": "system",
+                            "content": f"[长期记忆·会话压缩前抽取]\n{mem_pre}",
+                        })
+                except Exception:
+                    pass
             for h in history:
                 c = h["content"]
                 # 历史消息若含视觉图片部件（列表型 content），仅保留文本部分，
@@ -648,7 +670,7 @@ class Agent:
         if self.memory:
             self.memory.append(session, "user", user_message)
         if self.memory_manager is not None:
-            await self._sync_memory(owner, "user", user_message)
+            self._sync_memory(owner, "user", user_message, session=session)
 
         # ---- LLM 可用性兜底：无可用 Provider / 未配置模型 → 优雅报错而非掐断 SSE ----
         # 否则异常会冲出 SSE 生成器，导致响应流被中断，浏览器侧表现为「network error」。
@@ -735,7 +757,7 @@ class Agent:
             if self.memory:
                 self.memory.append(session, "assistant", answer)
             if self.memory_manager is not None:
-                await self._sync_memory(owner, "assistant", answer)
+                self._sync_memory(owner, "assistant", answer, session=session)
             yield {"type": "done"}
             return
 
@@ -1571,7 +1593,7 @@ class Agent:
                         self.memory.append(session, "assistant", summary)
                     if self.memory_manager is not None:
                         try:
-                            await self._sync_memory(owner, "assistant", summary)
+                            self._sync_memory(owner, "assistant", summary, session=session)
                         except Exception:
                             pass
                     yield {"type": "done"}
@@ -1644,7 +1666,7 @@ class Agent:
             if self.memory:
                 self.memory.append(session, "assistant", answer)
             if self.memory_manager is not None:
-                await self._sync_memory(owner, "assistant", answer)
+                self._sync_memory(owner, "assistant", answer, session=session)
             # 技能自进化闭环：复杂任务（步数/工具数达标）完成后，异步由 LLM 蒸馏沉淀为技能文件。
             # 用 create_task 触发，不阻塞流式 done 事件；内部自带阈值/异常兜底。
             if self.cfg.agent.skills_auto_learn and tool_total >= self.cfg.agent.skills_auto_learn_min_tools:
@@ -1776,14 +1798,29 @@ class Agent:
         return "\n".join(all_text) if all_text else (user_text or "")
 
     # =====================================================================
-    # 长期记忆同步（向量 provider，opt-in；memory_manager 为 None 时全 no-op）
+    # 长期记忆同步（向量抽取式 provider，opt-in；memory_manager 为 None 时全 no-op）
     # =====================================================================
-    async def _sync_memory(self, owner: Optional[str], role: str, content: str) -> None:
+    async def _memory_llm_call(self, messages, model: Optional[str] = None) -> str:
+        """注入给 MemoryManager 的 async LLM 调用（供 query_rewrite 与抽取使用）。"""
+        try:
+            return await self.llm.chat(messages, model=model or self.cfg.default_model)
+        except Exception as e:
+            logger.debug("memory llm call failed: %s", e)
+            return ""
+
+    def _sync_memory(self, owner: Optional[str], role: str, content: str,
+                     session: str = "") -> None:
+        """把一轮对话非阻塞地同步给记忆 provider（后台线程，绝不阻塞主流程）。"""
         if self.memory_manager is None:
             return
         try:
-            # MemoryManager.sync_turn 内部仅在存在外部 provider 时落库，否则直接返回
-            await self.memory_manager.sync_turn(owner, role, content)
+            # MemoryManager.schedule_sync 内部仅在存在外部 provider 时落库/抽取，
+            # 否则直接返回；写入在单 worker 后台线程里串行执行（含 LLM 抽取）。
+            self.memory_manager.schedule_sync(
+                user_content=content if role == "user" else "",
+                assistant_content=content if role == "assistant" else "",
+                owner=owner, session_id=session,
+            )
         except Exception:
             pass
 

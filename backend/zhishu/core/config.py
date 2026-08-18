@@ -306,9 +306,14 @@ class AgentConfig:
 @dataclass
 class MemoryConfig:
     """长期记忆后端（对标 Hermes MemoryProvider）。"""
-    vector_enabled: bool = False            # 向量长期记忆（跨会话语义召回）
+    vector_enabled: bool = False            # 向量长期记忆（跨会话语义召回 + LLM 抽取）
     vector_top_k: int = 5                   # 召回条数
     backend: str = "builtin"                # 可插拔记忆后端：builtin | mem0（默认 builtin，零回归）
+    # —— 以下为对齐 Hermes 记忆编排的增强开关（全默认开启，零回归） ——
+    query_rewrite_enabled: bool = True      # 检索前把用户最新一句改写为检索问句（提升召回质量）
+    extraction_enabled: bool = True         # 用 LLM 从对话中抽取结构化长期事实入库
+    extraction_interval: int = 6            # 每累计 N 轮对话触发一次周期性抽取
+    extraction_model: Optional[str] = None  # 抽取所用模型（默认跟随 default_model）
 
 
 @dataclass

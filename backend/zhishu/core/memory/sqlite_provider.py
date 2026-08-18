@@ -100,12 +100,39 @@ class MemoryStore:
 
 
 class SQLiteMemoryProvider(MemoryProvider):
-    """内置会话记忆 Provider：包装 MemoryStore。"""
+    """内置会话记忆 Provider：包装 MemoryStore。
+
+    注意：会话流水（turns）由 Agent 直接经 ``self.memory``（同一 MemoryStore）
+    追加与管理，因此本 provider 的 ``sync_turn`` 为 no-op —— 交由 MemoryManager
+    编排的外部 provider 去抽取/落库，避免同一轮对话在内置库里被重复写入两次。
+    """
+
+    name = "builtin"
 
     def __init__(self, path: str = "data/zhishu_memory.db", store: Optional[MemoryStore] = None):
         self.store = store or MemoryStore(path)
 
-    async def sync_turn(self, owner: Optional[str] = None, role: str = "",
-                        content: str = "") -> None:
-        session = owner or "default"
-        self.store.append(session, role, content)
+    def is_available(self) -> bool:
+        return True
+
+    def initialize(self, session_id: str = "", **kwargs) -> None:
+        pass
+
+    def prefetch(self, query: str, *, owner: Optional[str] = None,
+                 session_id: str = "") -> str:
+        return ""
+
+    def system_prompt_block(self, owner: Optional[str] = None) -> str:
+        return ""
+
+    def sync_turn(self, user_content: str, assistant_content: str = "", *,
+                  owner: Optional[str] = None, session_id: str = "",
+                  messages: Optional[list] = None) -> None:
+        # 会话流水由 Agent 直接经 MemoryStore 管理（见 agent.py），此处不重复落库。
+        return None
+
+    def get_tool_schemas(self, owner: Optional[str] = None) -> list:
+        return []
+
+    def shutdown(self) -> None:
+        return None

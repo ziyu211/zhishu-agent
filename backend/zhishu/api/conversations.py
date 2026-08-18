@@ -115,5 +115,14 @@ async def delete_conversation(cid: str, user=require_auth("chat")):
             shutil.rmtree(att_root, ignore_errors=True)
     except Exception:
         pass
+    # 会话级记忆抽取：删除对话时触发外部记忆 provider 对该会话做全量事实抽取
+    # （后台非阻塞，避免拖慢删除接口；无外部 provider 时直接 no-op）。
+    try:
+        conv = ctx.conversations.get_for(cid, owner, user.get("r", ""))
+        msgs = conv.get("messages") if isinstance(conv, dict) else None
+        if msgs and ctx.memory_manager is not None:
+            ctx.memory_manager.on_session_end(msgs, session_id=cid, owner=owner)
+    except Exception:
+        pass
     ctx.audit.log(owner, "delete_conversation", f"删除对话 {cid}")
     return {"ok": True}

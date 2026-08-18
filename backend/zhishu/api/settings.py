@@ -18,9 +18,14 @@ router = APIRouter(prefix="/api/v1/settings", tags=["settings"])
 
 
 def _memory_view(ctx) -> dict:
+    m = ctx.cfg.memory
     return {
-        "vector_enabled": ctx.cfg.memory.vector_enabled,
-        "vector_top_k": ctx.cfg.memory.vector_top_k,
+        "vector_enabled": m.vector_enabled,
+        "vector_top_k": m.vector_top_k,
+        "query_rewrite_enabled": m.query_rewrite_enabled,
+        "extraction_enabled": m.extraction_enabled,
+        "extraction_interval": m.extraction_interval,
+        "extraction_model": m.extraction_model,
     }
 
 
@@ -63,11 +68,22 @@ async def update_settings(
     ctx = get_ctx()
     patch: dict = {}
     mem = body.get("memory") or {}
-    if isinstance(mem.get("vector_enabled"), bool) or isinstance(mem.get("vector_top_k"), int):
-        patch["memory"] = {
-            "vector_enabled": mem.get("vector_enabled"),
-            "vector_top_k": mem.get("vector_top_k"),
-        }
+    # 仅收集类型合法且确实提供的字段（避免把 None 误写进 override）
+    mem_part: dict = {}
+    if isinstance(mem.get("vector_enabled"), bool):
+        mem_part["vector_enabled"] = mem["vector_enabled"]
+    if isinstance(mem.get("vector_top_k"), int) and mem["vector_top_k"] > 0:
+        mem_part["vector_top_k"] = mem["vector_top_k"]
+    if isinstance(mem.get("query_rewrite_enabled"), bool):
+        mem_part["query_rewrite_enabled"] = mem["query_rewrite_enabled"]
+    if isinstance(mem.get("extraction_enabled"), bool):
+        mem_part["extraction_enabled"] = mem["extraction_enabled"]
+    if isinstance(mem.get("extraction_interval"), int) and mem["extraction_interval"] > 0:
+        mem_part["extraction_interval"] = mem["extraction_interval"]
+    if mem.get("extraction_model") is None or isinstance(mem.get("extraction_model"), str):
+        mem_part["extraction_model"] = mem.get("extraction_model") or None
+    if mem_part:
+        patch["memory"] = mem_part
     sec = body.get("security") or {}
     sec_part: dict = {}
     for k in _SECURITY_FIELDS:

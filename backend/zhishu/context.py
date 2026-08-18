@@ -119,6 +119,14 @@ class AppContext:
             self.cfg.memory.vector_enabled = mem["vector_enabled"]
         if isinstance(mem.get("vector_top_k"), int) and mem["vector_top_k"] > 0:
             self.cfg.memory.vector_top_k = mem["vector_top_k"]
+        if isinstance(mem.get("query_rewrite_enabled"), bool):
+            self.cfg.memory.query_rewrite_enabled = mem["query_rewrite_enabled"]
+        if isinstance(mem.get("extraction_enabled"), bool):
+            self.cfg.memory.extraction_enabled = mem["extraction_enabled"]
+        if isinstance(mem.get("extraction_interval"), int) and mem["extraction_interval"] > 0:
+            self.cfg.memory.extraction_interval = mem["extraction_interval"]
+        if mem.get("extraction_model") is None or isinstance(mem.get("extraction_model"), str):
+            self.cfg.memory.extraction_model = mem.get("extraction_model") or None
 
     def _apply_security_cfg(self, sec: dict) -> None:
         for k, typ in self._SECURITY_OVERRIDE_FIELDS.items():
@@ -175,6 +183,10 @@ class AppContext:
                 ov["memory"] = {
                     "vector_enabled": self.cfg.memory.vector_enabled,
                     "vector_top_k": self.cfg.memory.vector_top_k,
+                    "query_rewrite_enabled": self.cfg.memory.query_rewrite_enabled,
+                    "extraction_enabled": self.cfg.memory.extraction_enabled,
+                    "extraction_interval": self.cfg.memory.extraction_interval,
+                    "extraction_model": self.cfg.memory.extraction_model,
                 }
             if "security" in patch:
                 ov["security"] = {
@@ -190,6 +202,10 @@ class AppContext:
             "memory": {
                 "vector_enabled": self.cfg.memory.vector_enabled,
                 "vector_top_k": self.cfg.memory.vector_top_k,
+                "query_rewrite_enabled": self.cfg.memory.query_rewrite_enabled,
+                "extraction_enabled": self.cfg.memory.extraction_enabled,
+                "extraction_interval": self.cfg.memory.extraction_interval,
+                "extraction_model": self.cfg.memory.extraction_model,
             },
             "security": {
                 k: getattr(self.cfg.security, k)
