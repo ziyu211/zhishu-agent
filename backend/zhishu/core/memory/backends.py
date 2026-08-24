@@ -6,14 +6,38 @@
     * Mem0MemoryBackend    —— 委托 mem0ai（需自行配置 LLM/向量库），懒加载，缺失时回退。
 
   通过 cfg.memory.backend 选择（默认 builtin），做到「默认零回归、可选升级」。
+
+  v1.0.39 插件化：注册表 register_memory_backend(name, factory) 允许第三方后端
+  以 ``cfg.memory.backend = "<name>"`` 接入，对齐 Hermes 的 provider 插件体系；
+  未注册 / 构造失败自动回退 builtin，绝不崩服务。
 """
 from __future__ import annotations
 
 import logging
 import uuid
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger("zhishu.memory")
+
+# 后端注册表：name -> factory(cfg, data_dir) -> MemoryBackend
+_BACKEND_REGISTRY: Dict[str, Callable] = {}
+
+
+def register_memory_backend(name: str, factory: Callable) -> None:
+    """注册一个可插拔记忆后端工厂（进程级注册表）。
+
+    factory 签名：``factory(cfg, data_dir) -> MemoryBackend``。
+    注册后即可通过 ``cfg.memory.backend = name`` 启用；构造失败自动回退 builtin。
+    """
+    if not name or not callable(factory):
+        return
+    _BACKEND_REGISTRY[str(name).strip().lower()] = factory
+    logger.info("memory backend registered: %s", name)
+
+
+def registered_backends() -> Dict[str, Callable]:
+    """返回当前已注册的后端工厂（复制，防外部篡改）。"""
+    return dict(_BACKEND_REGISTRY)
 
 
 class MemoryBackend:
@@ -158,11 +182,23 @@ class Mem0MemoryBackend(MemoryBackend):
 
 
 def create_memory_backend(cfg, data_dir: str) -> MemoryBackend:
-    """按 cfg.memory.backend 创建后端；mem0 不可用或失败时回退 builtin。"""
-    kind = getattr(cfg.memory, "backend", "builtin") or "builtin"
+    """按 cfg.memory.backend 创建后端；未注册/失败时回退 builtin。
+
+    优先级：内置 mem0（旧配置兼容）> 注册表插件 > builtin 默认。
+    """
+    kind = (getattr(cfg.memory, "backend", "builtin") or "builtin").strip().lower()
     if kind == "mem0":
         try:
             return Mem0MemoryBackend()
         except Exception as e:  # noqa: BLE001
             logger.warning("mem0 后端不可用，回退 builtin：%s", e)
+    # 注册表插件（v1.0.39）：第三方后端经 register_memory_backend 接入
+    factory = _BACKEND_REGISTRY.get(kind)
+    if factory is not None:
+        try:
+            backend = factory(cfg, data_dir)
+            if backend is not None:
+                return backend
+        except Exception as e:  # noqa: BLE001
+            logger.warning("记忆后端 '%s' 初始化失败，回退 builtin：%s", kind, e)
     return BuiltinMemoryBackend(cfg, data_dir)

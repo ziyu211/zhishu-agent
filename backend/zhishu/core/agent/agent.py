@@ -40,6 +40,7 @@ from ..config import ZhishuConfig, classify_model
 from .system_prompt import build_system_prompt
 from .download_guard import (
     guard_download_links,
+    process_media_tags,
     extract_media_links,
     find_leaked_paths,
     strip_evasion,
@@ -1491,6 +1492,21 @@ class Agent:
                 continue
 
             final = choice.get("content", "")
+            # MEDIA: 发布协议（v1.0.39）：模型在回复里输出 MEDIA:/abs/path 即声明
+            # 该文件需交付 → 自动发布为 /media 下载链接并替换标签（对标 Hermes extract_media）。
+            try:
+                if final and self.media is not None and "MEDIA:" in final:
+                    _media_root = os.path.join(self.cfg.server.data_dir, self.cfg.media.store_dir)
+                    final, _pub = process_media_tags(
+                        final, self.media, self.ctx.user or "anonymous",
+                        media_root=_media_root,
+                        sandbox_root=getattr(self, "_sandbox_root", "") or "",
+                    )
+                    if _pub:
+                        self._turn_media_links = list(self._turn_media_links or []) + \
+                            [u for _, u in _pub]
+            except Exception:
+                pass
             # 下载链接护栏：本轮工具已产出 /media 链接、但模型未透传且搪塞时，强制补回
             _guarded = False
             _turn_links = getattr(self, "_turn_media_links", None) or []

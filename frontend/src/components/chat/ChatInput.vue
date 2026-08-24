@@ -218,7 +218,7 @@ onMounted(() => textareaRef.value?.focus())
         type="file"
         multiple
         class="file-hidden"
-        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.rtf,.epub,.txt,.md,.csv,.tsv,.json,.log,.yaml,.yml,.xml,.zip,image/*"
+        accept="*"
         @change="handleFileChange"
       />
 

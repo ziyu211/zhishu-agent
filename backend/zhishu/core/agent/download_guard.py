@@ -10,15 +10,24 @@
 既没有透传任何链接、又含有搪塞特征时，自动清除搪塞语句，并把真实链接强制补回，
 确保用户一定能拿到可点击下载链接。
 
+v1.0.39 新增 **MEDIA: 发布协议**（对标 Hermes extract_media）：模型在回复中输出
+``MEDIA:/abs/path`` 标签即声明「该文件需要交付给用户」，本模块解析标签、把真实存在的
+文件发布为 /media 链接并替换标签——任何模型显式声明的路径（含写在 cwd 之外、快照
+差分捕获不到的）都能交付，模型侧零学习成本。
+
 设计为纯函数，无外部依赖，便于单元测试。
 """
 from __future__ import annotations
 
+import os
 import re
-from typing import List
+from typing import List, Tuple
 
 # /media/... 链接（相对 URL，前端会基于当前 origin 拼接）
 _MEDIA_RE = re.compile(r"/media/[^\s)\]\"'<>]+", re.IGNORECASE)
+
+# MEDIA: 发布协议标签（对标 Hermes）：MEDIA:/abs/path
+_MEDIA_TAG_RE = re.compile(r"(?i)\bMEDIA:\s*([^\s)\]\"'<>]+)")
 
 # 搪塞特征：模型把内网 /media 链接误读为需要公网 / 外网而推脱。
 # 注意：这些模式使用普通字符串拼接（非 f-string / .format），因为模式内部含
@@ -241,3 +250,76 @@ def strip_leaked_paths(text: str) -> str:
 def strip_evasion(text: str) -> str:
     """删除含搪塞特征的整句（公开封装，供护栏在剥离泄漏路径前清理话术）。"""
     return _clean_evasion_sentences(text or "")
+
+
+# ── MEDIA: 发布协议（v1.0.39，对标 Hermes extract_media）────────────────
+# 模型在回复中输出 MEDIA:/abs/path 标签即声明「该文件要交付给用户」。本函数把标签
+# 替换为 /media 下载链接（文件真实存在时发布；已落在媒体根则直接改写；不存在则
+# 保留原文并附说明，绝不编造链接）。
+
+
+def extract_media_tags(text: str) -> List[str]:
+    """提取回复中的所有 MEDIA: 路径（去重保序）。"""
+    seen: List[str] = []
+    for m in _MEDIA_TAG_RE.finditer(text or ""):
+        p = m.group(1).strip()
+        if p and p not in seen:
+            seen.append(p)
+    return seen
+
+
+def process_media_tags(
+    text: str,
+    media,
+    owner: str,
+    *,
+    media_root: str = "",
+    sandbox_root: str = "",
+) -> Tuple[str, List[Tuple[str, str]]]:
+    """把回复中的 MEDIA:/path 标签替换为 /media 下载链接。
+
+    返回 (new_text, [(文件名, /media/... URL), ...])。
+      * 路径已落在媒体根（media_root）→ 直接改写为 /media 链接（零拷贝）；
+      * 其它真实存在的路径 → 拷贝发布（media.save_file）；
+      * 不存在 / 无媒体库 → 保留原文（绝不编造链接）。
+    """
+    if not text or media is None:
+        return text or "", []
+    media_root = os.path.abspath(media_root) if media_root else ""
+    replaced = text
+    published: List[Tuple[str, str]] = []
+    seen_urls: set = set()
+
+    for path in extract_media_tags(replaced):
+        ap = os.path.abspath(path)
+        try:
+            is_file = os.path.isfile(ap)
+            fsize = os.path.getsize(ap) if is_file else 0
+        except OSError:
+            is_file, fsize = False, 0
+        if not is_file or fsize == 0:
+            # 不存在：替换标签为说明文本，避免把死路径回显给用户
+            replaced = replaced.replace(
+                f"MEDIA:{path}", f"[文件不存在，未生成下载链接: {path}]", 1)
+            replaced = replaced.replace(
+                f"MEDIA: {path}", f"[文件不存在，未生成下载链接: {path}]", 1)
+            continue
+        # (a) 已在媒体根 → 直接改写
+        if media_root and (ap == media_root or ap.startswith(media_root + os.sep)):
+            rel = os.path.relpath(ap, media_root).replace(os.sep, "/")
+            url = "/media/" + rel
+        else:
+            # (b) 拷贝发布
+            try:
+                url = media.save_file(ap, kind="file", owner=owner or None)
+            except Exception as e:  # noqa: BLE001
+                replaced = replaced.replace(
+                    f"MEDIA:{path}", f"[发布失败: {e}]", 1)
+                continue
+        if url not in seen_urls:
+            seen_urls.add(url)
+            published.append((os.path.basename(ap), url))
+        link = f"[{os.path.basename(ap)}]({url})"
+        replaced = replaced.replace(f"MEDIA:{path}", link, 1)
+        replaced = replaced.replace(f"MEDIA: {path}", link, 1)
+    return replaced, published
