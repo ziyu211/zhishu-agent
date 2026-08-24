@@ -29,7 +29,8 @@ from typing import Optional
 
 from ..base import tool, Tool, ToolContext
 from .. import registry as _registry
-from .artifacts import snapshot, publish_diff, publish_referenced_paths, append_unique_links
+from .artifacts import (snapshot, publish_diff, publish_referenced_paths,
+                        append_unique_links, persist_long_output)
 from .sandbox import sandbox_cwd_for, SANDBOX_ROOT
 
 # 全局动态工具登记（进程级）。键为工具名，值为 (描述, 代码, 参数schema, 会话)
@@ -108,7 +109,8 @@ def _preexec(mem_limit_mb: int):
 
 
 async def _run_python(code: str, timeout: int, extra_env: dict, cwd: str,
-                      mem_limit_mb: int = 0, block_network: bool = True) -> str:
+                      mem_limit_mb: int = 0, block_network: bool = True,
+                      max_output: int = MAX_OUTPUT) -> str:
     timeout = max(1, min(int(timeout or 30), MAX_TIMEOUT))
     full = (_NETWORK_BLOCK if block_network else "") + "\n" + code
     fd, path = tempfile.mkstemp(suffix=".py", prefix="zh_code_")
@@ -144,7 +146,7 @@ async def _run_python(code: str, timeout: int, extra_env: dict, cwd: str,
         # traceback 原样回显给模型。
         if proc.returncode not in (0, None) and "已禁用网络" in text:
             text = "[code_exec] 已禁用网络访问（内网隔离），代码未执行出网操作。"
-        return text[:MAX_OUTPUT].strip()
+        return text[:max_output].strip()
     except Exception as e:  # noqa: BLE001
         return f"[code_exec 错误] {e}"
     finally:
@@ -282,7 +284,12 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
     result = await _run_python(
         code, args.get("timeout", default_to), extra_env, cwd,
         mem_limit_mb=mem, block_network=_block_network(ctx),
+        # 主工具取全文（大上限），超长输出由 persist_long_output 落盘为 /media 链接，
+        # 而非在此截断丢信息（对标 Hermes maybe_persist_tool_result）。
+        max_output=1_000_000,
     )
+    # 大结果自动落盘：输出超 16K 字符 → 预览 + 全文下载链接，避免上下文被撑爆
+    result = persist_long_output(result, media, owner)
     if media is not None:
         # 自动发布工作区内本次新增/修改的文件（核心修复：不再依赖模型传参）
         result += publish_diff(cwd, before, media, owner)

@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from ..base import tool
 from .sandbox import sandbox_cwd_for, SANDBOX_ROOT
-from .artifacts import snapshot, publish_diff, publish_referenced_paths, append_unique_links
+from .artifacts import (snapshot, publish_diff, publish_referenced_paths,
+                        append_unique_links, persist_long_output)
 from ...shellguard import check_command, run_guarded
 
 
@@ -79,9 +80,11 @@ async def terminal_run(args: dict, ctx) -> str:
     # 执行前快照工作区，自动发布本次新增/修改的文件为下载链接
     before = snapshot(cwd) if media is not None else {}
     result = await run_guarded(
-        cmd, cwd=cwd, timeout=timeout, max_output=8000,
+        cmd, cwd=cwd, timeout=timeout, max_output=1_000_000,
         mem_mb=int(getattr(sec, "shell_mem_limit_mb", 1024) or 0) if sec else 1024,
     )
+    # 大结果自动落盘：命令输出超 16K 字符 → 预览 + 全文下载链接（对标 Hermes maybe_persist_tool_result）
+    result = persist_long_output(result, media, owner)
     if media is not None:
         result += publish_diff(cwd, before, media, owner)
         # 兜底：捕获模型写到 cwd 之外、却把内部绝对路径回显给用户的真实产物

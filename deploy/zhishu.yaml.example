@@ -91,7 +91,7 @@ agent:
   skills_auto_learn_min_steps: 8     # 至少消耗步数
   skills_auto_learn_min_tools: 3     # 至少调用工具次数
   nudge_interval: 8                  # 每完成 N 次工具调用注入「该存记忆/造技能」内部提醒；0=关闭
-  reflection_enabled: false         # 后台记忆反思：每轮后 fork 廉价 LLM 把用户事实沉淀进 MEMORY.md（opt-in）
+  reflection_enabled: true          # 后台记忆反思：每轮蒸馏用户事实进 MEMORY.md（v1.0.37 起默认开启）
 
   # —— 企业级多用户保护（并发 / 配额 / 委派熔断）——
   # 0 = 不限制（单用户/本地可保持 0）。多用户部署建议显式开启并发上限以保护 GPU/API 额度，

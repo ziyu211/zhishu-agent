@@ -514,9 +514,13 @@ def paginate_text(text: str, page: int = 1, page_size: int = 200,
             f"{s + i:0{width}d}: {ln}" for i, ln in enumerate(slice_lines)
         ) or "(该范围为空)"
         truncated = False
+        next_offset = None
         if len(numbered) > max_chars:
-            numbered = numbered[:max_chars].rstrip() + "\n…(已按字符预算截断，调大 max_chars)"
+            numbered = numbered[:max_chars].rstrip() + "\n…(已按字符预算截断)"
             truncated = True
+            # 续读行号：从被截断的行位置（去掉行号前缀的字符后）推下一行
+            consumed = s - 1 + numbered.count("\n")
+            next_offset = min(consumed + 1, total_lines + 1)
         return {
             "block": numbered,
             "total_lines": total_lines,
@@ -525,6 +529,7 @@ def paginate_text(text: str, page: int = 1, page_size: int = 200,
             "page_lines": len(slice_lines),
             "truncated": truncated,
             "range": (s, e),
+            "next_offset": next_offset,
         }
 
     # ── 分页模式 ──
@@ -537,9 +542,13 @@ def paginate_text(text: str, page: int = 1, page_size: int = 200,
         f"{start + i + 1:0{width}d}: {ln}" for i, ln in enumerate(page_lines)
     ) or "(本页为空)"
     truncated = False
+    next_offset = None
     if len(numbered) > max_chars:
-        numbered = numbered[:max_chars].rstrip() + "\n…(已按字符预算截断，调大 max_chars 或翻页)"
+        numbered = numbered[:max_chars].rstrip() + "\n…(已按字符预算截断)"
         truncated = True
+        # 续读行号：分页模式下，截断发生在页内第 N 行 → 下一行 = 页首行号 + N
+        consumed = start + numbered.count("\n")
+        next_offset = min(consumed + 1, total_lines + 1)
     page_total = max(1, (total_lines + page_size - 1) // page_size)
     return {
         "block": numbered,
@@ -548,6 +557,7 @@ def paginate_text(text: str, page: int = 1, page_size: int = 200,
         "page_total": page_total,
         "page_lines": len(page_lines),
         "truncated": truncated,
+        "next_offset": next_offset,
     }
 
 
@@ -564,7 +574,16 @@ def format_read(filename: str, ftype: str, pg: dict) -> str:
             f"第 {pg['page']}/{pg['page_total']} 页 | 本页 {pg['page_lines']} 行"
         )
     tail = ""
-    if pg["truncated"] or pg.get("range") or pg["page"] < pg["page_total"]:
+    if pg.get("truncated"):
+        # 预算截断 → 给模型明确的续读指针（对标 Hermes next_offset 续读）
+        no = pg.get("next_offset")
+        if no:
+            tail = (f"\n（内容较长，已按字符预算截断：继续读取请用 "
+                    f"read_file(path=\"{filename}\", start_line={no}, end_line={no + 799})，"
+                    f"或调大 max_chars）")
+        else:
+            tail = "\n（内容较长：用 start_line/end_line 或 page 参数定位，max_chars 控制返回长度）"
+    elif pg.get("range") or pg["page"] < pg["page_total"]:
         tail = "\n（内容较长：用 start_line/end_line 或 page 参数定位，max_chars 控制返回长度）"
     return head + "\n" + "-" * 40 + "\n" + pg["block"] + tail
 

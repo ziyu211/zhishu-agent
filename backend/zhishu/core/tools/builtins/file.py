@@ -121,7 +121,9 @@ async def read_file(args: dict, ctx) -> str:
     # 兼容模型五花八门的参数名（尤其把 read_file 当「按行范围读取」工具时）
     page = int(args.get("page") or args.get("page_number") or 1)
     page_size = int(args.get("page_size") or args.get("lines_per_page") or 800)
-    max_chars = int(args.get("max_chars") or 24000)
+    # 字符预算默认 100K（对标 Hermes file_read_max_chars=100_000），覆盖长日志/整本书/
+    # 大表格；超预算截断并返回 next_offset 续读提示（v1.0.37 防呆与省往返）。
+    max_chars = int(args.get("max_chars") or 100000)
     # 行范围（start_line/end_line 优先于分页，符合模型常见用法）
     start_line = args.get("start_line") or args.get("line_start") or args.get("line_begin")
     end_line = args.get("end_line") or args.get("line_end") or args.get("line_stop")

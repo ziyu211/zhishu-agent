@@ -238,8 +238,9 @@ class AgentConfig:
     nudge_interval: int = 8
     # 后台记忆反思（对标 Hermes background_review）：每轮成功回答后，fork 一次廉价 LLM
     # 调用，从本轮对话中蒸馏出值得长期记住的用户事实/偏好，追加进 MEMORY.md / USER.md。
-    # 默认关闭（避免意外 token 消耗与记忆污染），由运维按需开启。
-    reflection_enabled: bool = False
+    # v1.0.37 起默认开启（Hermes 式「主动记忆」是本系统记忆能力的关键一环；maybe_reflect
+    # 自带 trivial 门控、去重与异常安全，实际 token 开销小——每轮仅一次极短对话抽取）。
+    reflection_enabled: bool = True
     # 单次生成的最大输出 token 数（LLMClient.chat/stream 的 max_tokens 上限）。
     # 此前默认 2048，导致「全面分析/长文总结」等复杂任务的最终回答被静默截断
     # （表现为「回复内容不完整」）。上调到 8192 以容纳较长的结构化分析/报告；

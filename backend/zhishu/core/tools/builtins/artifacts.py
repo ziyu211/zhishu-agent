@@ -240,3 +240,61 @@ def append_unique_links(
     for n, u in new_pairs[:max_total]:
         lines.append(f"- [{n}]({u})")
     return (text + "\n".join(lines)).strip()
+
+
+# ── 大结果落盘（对标 Hermes maybe_persist_tool_result）─────────────────
+# 背景：工具（code_exec / terminal_run / read_file）输出过长时，直接把全文塞进上下文
+# 会撑爆 token 预算、拖慢对话（甚至触发网关 400）。Hermes 的做法是把超预算输出落盘到
+# /tmp/hermes-results/ 并返回预览 + 续读提示。本函数等价实现：把长文本写入媒体库
+# （/media/... 可下载链接），返回「预览片段 + 全文下载链接 + 续读建议」，模型无需
+# 重新执行工具即可拿到全文。
+
+# 触发落盘的输出长度阈值（字符）：超过则截断返回预览并落盘全文。
+_PERSIST_THRESHOLD = 16_000
+# 落盘后返回给模型的预览长度（字符）。
+_PERSIST_PREVIEW = 4_000
+
+
+def persist_long_output(
+    text: str,
+    media: Optional[MediaStore],
+    owner: str,
+    *,
+    stem: str = "tool_output",
+    threshold: int = _PERSIST_THRESHOLD,
+    preview: int = _PERSIST_PREVIEW,
+) -> str:
+    """把超长工具输出落盘到媒体库，返回「预览 + 全文下载链接 + 续读建议」。
+
+    规则：
+      * text 长度 <= threshold → 原样返回（不落盘，零开销）；
+      * text 超阈值但无媒体库（未注入 media）→ 截断到 preview 返回（尽力兜底）；
+      * 落盘成功 → 返回 [预览片段] + /media/... 下载链接 + 「全文已存盘，可下载或
+        用 read_file 续读」提示；落盘失败仍返回截断预览（不抛错、不中断工具）。
+    """
+    if not text:
+        return ""
+    if len(text) <= threshold:
+        return text
+    clip = text[:preview].rstrip() + "\n…(输出过长已截断)"
+    if media is None:
+        return clip + f"\n（完整输出 {len(text)} 字符，可用 read_file 分页读取）"
+    try:
+        import tempfile
+
+        # 写临时文件 → 媒体库保留可读文件名（save_file 自动去重/防穿越）
+        fd, tmp = tempfile.mkstemp(suffix=".txt", prefix="zh_result_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            url = media.save_file(tmp, kind="file", owner=owner or None)
+        finally:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+        return (clip +
+                f"\n\n[完整输出已存盘]（{len(text)} 字符）: [{os.path.basename(url)}]({url})"
+                f"\n可直接下载；或继续用 read_file 读取该文件（start_line/end_line 分页）")
+    except Exception as e:  # noqa: BLE001
+        return clip + f"\n（完整输出 {len(text)} 字符，落盘失败：{e}，可用 read_file 分页读取）"
