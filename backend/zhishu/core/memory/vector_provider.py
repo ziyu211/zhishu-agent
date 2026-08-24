@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from ..config import ZhishuConfig
 from .provider import MemoryProvider
 from .backends import create_memory_backend, MemoryBackend
+from .quality_store import MemoryQualityStore, _content_hash
 
 logger = logging.getLogger("zhishu.memory")
 
@@ -33,6 +35,9 @@ _EXTRACT_SYSTEM_PROMPT = """你是一个长期记忆抽取器。请从下面的�
 对话：
 """
 
+# 反馈工具名（对标 Hermes fact_feedback）
+FEEDBACK_TOOL = "memory_feedback"
+
 
 class VectorMemoryProvider(MemoryProvider):
     name = "vector"
@@ -46,6 +51,9 @@ class VectorMemoryProvider(MemoryProvider):
         self.extraction_model = extraction_model
         # 向量化完全委托给可插拔记忆后端（默认 builtin，可选 mem0 等）
         self.backend: MemoryBackend = create_memory_backend(cfg, data_dir)
+        # 记忆质量演化层（trust / 时效衰减 / 矛盾检测，v1.0.38 新增）
+        self.quality: MemoryQualityStore = MemoryQualityStore(
+            os.path.join(data_dir, "zhishu_memory_quality.db"))
 
         # 抽取状态（由 set_llm 注入 LLM 调用）
         self._async_llm: Optional[Callable] = None
@@ -86,10 +94,40 @@ class VectorMemoryProvider(MemoryProvider):
     # -- 工具 ----------------------------------------------------------------
 
     def get_tool_schemas(self, owner: Optional[str] = None) -> list:
-        return []
+        # 记忆质量反馈工具（对标 Hermes fact_feedback）：模型可在用户对某条记忆
+        # 表示「有用/没用」时调用，训练记忆信任分，使记忆越用越准。
+        return [{
+            "name": FEEDBACK_TOOL,
+            "description": (
+                "给一条长期记忆打分（记忆质量反馈训练）。当用户明确说某条记忆"
+                "「有用/对/记住了」时用 helpful=true；当用户说「不对/过时了/别记这个」"
+                "时用 helpful=false。内容请尽量引用记忆原文（或关键词），系统会调整"
+                "该记忆的信任分：帮助 +0.05、误导 −0.10，并据此影响后续召回排序。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string",
+                                "description": "要反馈的记忆内容（原文或关键词）"},
+                    "helpful": {"type": "boolean",
+                                "description": "true=有帮助 / false=误导或过时"},
+                },
+                "required": ["content", "helpful"],
+            },
+        }]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-        raise NotImplementedError(f"vector provider 不处理工具 {tool_name}")
+        if tool_name != FEEDBACK_TOOL:
+            raise NotImplementedError(f"vector provider 不处理工具 {tool_name}")
+        content = (args.get("content") or "").strip()
+        helpful = bool(args.get("helpful"))
+        if not content:
+            return '{"ok": false, "error": "缺少 content"}'
+        owner = kwargs.get("owner") or kwargs.get("user")
+        trust = self.quality.feedback(owner, content, helpful=helpful)
+        if trust is None:
+            return ('{"ok": false, "error": "未找到该记忆（可能已被清理），未调整分数"}')
+        return '{"ok": true, "trust": %.3f}' % trust
 
     # -- 预召回 --------------------------------------------------------------
 
@@ -98,11 +136,18 @@ class VectorMemoryProvider(MemoryProvider):
         if not query:
             return ""
         try:
-            hits = self.backend.search(owner, query, top_k=self.top_k)
+            hits = self.backend.search(owner, query, top_k=self.top_k * 3)
         except Exception:
             return ""
         if not hits:
             return ""
+        # 质量重排：trust 优先 + 时效衰减（v1.0.38）；并登记命中热度
+        hits = self.quality.rank(owner, hits, self.top_k)
+        for h in hits:
+            try:
+                self.quality.bump_hit(owner, h)
+            except Exception:
+                pass
         lines = [f"[记忆 {i+1}] {h}" for i, h in enumerate(hits)]
         return "【长期记忆召回】\n" + "\n\n".join(lines)
 
@@ -120,6 +165,7 @@ class VectorMemoryProvider(MemoryProvider):
                     "title": f"mem_{owner_key}",
                     "source": f"mem_{owner_key}",
                 })
+                self.quality.record(owner, raw, meta={"source": "raw"})
             except Exception:
                 pass
 
@@ -144,10 +190,17 @@ class VectorMemoryProvider(MemoryProvider):
             self._last_extract[owner_key] = "\n".join(f"- {f}" for f in facts)
             for f in facts:
                 try:
+                    # 矛盾检测（v1.0.38）：与已有记忆高相似且内容不同 → 视为新说法
+                    # 覆盖旧记忆，跳过写入（避免矛盾记忆互相打架），保留旧条目由
+                    # 用户反馈降权。保守策略：宁漏勿误。
+                    existing = self.backend.search(owner_key, f, top_k=3)
+                    if self.quality.contradict(owner_key, f, existing):
+                        continue
                     self.backend.add(owner_key, f, meta={
                         "title": f"抽取·{owner_key}",
                         "source": "extraction",
                     })
+                    self.quality.record(owner_key, f, meta={"source": "extraction"})
                 except Exception:
                     pass
 
@@ -197,10 +250,14 @@ class VectorMemoryProvider(MemoryProvider):
             self._last_extract[owner_key] = "\n".join(f"- {f}" for f in facts)
             for f in facts:
                 try:
+                    existing = self.backend.search(owner_key, f, top_k=3)
+                    if self.quality.contradict(owner_key, f, existing):
+                        continue
                     self.backend.add(owner, f, meta={
                         "title": f"抽取·{owner_key}",
                         "source": "extraction",
                     })
+                    self.quality.record(owner, f, meta={"source": "extraction"})
                 except Exception:
                     pass
 
@@ -214,18 +271,33 @@ class VectorMemoryProvider(MemoryProvider):
         return ""
 
     def shutdown(self) -> None:
+        try:
+            self.quality.close()
+        except Exception:
+            pass
         return None
 
     # -- 可观测性（兼容旧接口） ----------------------------------------------
 
     def stats(self, owner: Optional[str] = None) -> dict:
+        base = {"backend": None, "count": 0, "owner": owner or "*"}
         if self.backend:
-            return self.backend.stats(owner)
-        return {"backend": None, "count": 0, "owner": owner or "*"}
+            base = self.backend.stats(owner)
+        try:
+            q = self.quality.stats(owner)
+            base["quality"] = q
+        except Exception:
+            pass
+        return base
 
     def clear(self, owner: Optional[str] = None) -> int:
         self._buffers.pop(owner or "anon", None)
         self._last_extract.pop(owner or "anon", None)
+        n = 0
         if self.backend:
-            return self.backend.clear(owner)
-        return 0
+            n = self.backend.clear(owner)
+        try:
+            self.quality.clear(owner)
+        except Exception:
+            pass
+        return n

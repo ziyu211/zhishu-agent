@@ -187,6 +187,46 @@ def _file_to_data_url(path: str):
 # --------------------------------------------------------------------------
 # 图片输入模式决策
 # --------------------------------------------------------------------------
+# 视觉能力关键词（用于 aux 模式探测可用的多模态 Provider）：命中模型名即视为可看图
+_VISION_KEYWORDS = (
+    "gpt-4o", "gpt-4.1", "gpt-4-vision", "gpt-4v", "claude", "qwen-vl", "qwen2-vl",
+    "qwen2.5-vl", "qwen2.5vl", "glm-4v", "gemini", "vision", "llava", "moondream",
+    "internvl", "minicpm", "yi-vl", "step-1v", "hunyuan-vision", "doubao-vision",
+)
+
+
+def _model_name_looks_vision(mdl: str) -> bool:
+    low = (mdl or "").lower()
+    return any(k in low for k in _VISION_KEYWORDS)
+
+
+def find_vision_provider(cfg):
+    """在已配置且可用的 Provider 里找一个视觉模型（aux 回退用）。
+
+    返回 (provider_config, model_name)；找不到返回 (None, None)。
+    仅在「主模型不支持视觉」时由调用方使用，避免把视觉请求发给无视觉能力的主模型。
+    """
+    try:
+        ordered = cfg.ordered_providers()
+    except Exception:  # noqa: BLE001
+        ordered = []
+    for pc in ordered:
+        if not getattr(pc, "enabled", True):
+            continue
+        # 云端无 Key 必失败，跳过（与 LLMClient._build_chain 口径一致）
+        if not pc.api_key and not _is_local_url(pc.base_url):
+            continue
+        for m in getattr(pc, "models", None) or []:
+            if _model_name_looks_vision(m):
+                return pc, m
+    return None, None
+
+
+def _is_local_url(base_url: Optional[str]) -> bool:
+    u = (base_url or "").lower()
+    return any(seg in u for seg in ("127.0.0.1", "localhost", "0.0.0.0", "::1"))
+
+
 def decide_image_input_mode(cfg, model_name: Optional[str]) -> str:
     """对标 Hermes ``decide_image_input_mode``，返回 'native' 或 'text'。
 
@@ -200,6 +240,28 @@ def decide_image_input_mode(cfg, model_name: Optional[str]) -> str:
     if mode == "text":
         return "text"
     return "native"
+
+
+def build_aux_vision_prompt(user_text: str, n_images: int) -> str:
+    """aux 视觉回退的描述提示（发给辅助视觉模型，让其为非视觉主模型"看图"）。"""
+    return (
+        f"你是图片描述器。下面有 {n_images} 张图片，请用中文逐张简洁描述它们的"
+        f"关键内容（是什么、主体、文字、数字、图表要点等），供一个不支持视觉的"
+        f"助手据此回答用户问题。不要猜测不存在的内容。\n"
+        f"用户的问题/消息：{(user_text or '')[:400]}\n"
+        f"请按『图1：…』的格式逐张输出。"
+    )
+
+
+def format_aux_descriptions(descriptions: list[str]) -> str:
+    """把 aux 视觉描述整理为注入主模型的文本块。"""
+    if not descriptions:
+        return ""
+    body = "\n".join(f"- {d}" for d in descriptions if d and d.strip())
+    if not body:
+        return ""
+    return ("[图片内容（由辅助视觉模型描述，供参考）]\n" + body +
+            "\n[请基于以上描述回答用户，不要声称自己不能看图。]")
 
 
 # --------------------------------------------------------------------------

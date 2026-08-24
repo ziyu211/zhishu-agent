@@ -619,8 +619,12 @@ class Agent:
             return
 
         # 长期记忆召回（向量抽取式记忆 opt-in；无外部 provider 时返回空串，零回归）。
-        # 放在系统提示末尾作为 volatile 上下文，不污染身份（stable）部分。
+        # v1.0.38 起注入位置迁移：从 system prompt volatile 段 → **user message 尾部**
+        # （带 memory-context 围栏）。对齐 Hermes：① 记忆是「参考数据」而非「指令」，
+        # 不与系统身份混杂，弱模型不易把记忆当命令执行；② 记忆变化不再导致 system
+        # prompt 整体变化，提示缓存字节稳定，降低 token 成本。
         # 内部含 trivial 门控 + 检索问句改写 + 上下文围栏（对标 Hermes MemoryManager）。
+        mem_ctx = ""
         if self.memory_manager is not None:
             try:
                 mem_ctx = await asyncio.to_thread(
@@ -629,8 +633,6 @@ class Agent:
                 )
             except Exception:
                 mem_ctx = ""
-            if mem_ctx:
-                system = system + "\n\n" + mem_ctx
 
         messages = [{"role": "system", "content": system}]
         if self.memory:
@@ -665,7 +667,7 @@ class Agent:
         user_content = user_message
         if attachments and kind == "text":
             try:
-                user_content = self._build_multimodal_content(
+                user_content = await self._build_multimodal_content(
                     user_message, attachments, mdl)
             except Exception as e:
                 # 图片/附件多模态内容组装异常（转码、读取等）若冲出生成器会掐断 SSE
@@ -674,6 +676,20 @@ class Agent:
                 yield {"type": "done"}
                 return
         messages.append({"role": "user", "content": user_content})
+
+        # 记忆上下文追加到 user message 尾部（v1.0.38 注入迁移）：
+        # 多模态 content 列表 → 追加一个 text part；纯文本 → 字符串拼接。
+        # 记忆块自带 <memory-context> 围栏，流式输出端 StreamingContextScrubber 会
+        # 清洗任何「记忆内容泄漏进回复」的片段，双保险防污染。
+        if mem_ctx:
+            try:
+                if isinstance(user_content, list):
+                    messages[-1]["content"] = list(user_content) + [
+                        {"type": "text", "text": "\n\n" + mem_ctx}]
+                else:
+                    messages[-1]["content"] = (user_content or "") + "\n\n" + mem_ctx
+            except Exception:
+                pass
 
         if self.memory:
             self.memory.append(session, "user", user_message)
@@ -1715,7 +1731,45 @@ class Agent:
     # =====================================================================
     # 多模态附件组装（对标 Hermes 图片 / PDF 处理，零 OCR）
     # =====================================================================
-    def _build_multimodal_content(self, user_text: str, attachments: list, model_name: str):
+    async def _try_aux_vision(self, img_paths: list, user_text: str) -> str:
+        """aux 视觉回退（v1.0.38）：主模型不支持视觉时，用可用的视觉 Provider
+        描述图片，把文本描述注入主模型上下文（对标 Hermes image_routing 的
+        aux 视觉后端描述回退）。
+
+        返回注入用的文本块；无视觉 Provider / 调用失败返回空串（调用方降级提示）。
+        """
+        try:
+            pc, mdl = image_routing.find_vision_provider(self.cfg)
+            if pc is None or not mdl:
+                return ""
+            parts, sk = image_routing.build_native_content_parts(img_paths)
+            if not parts:
+                return ""
+            from ..providers.client import LLMClient
+            aux_llm = LLMClient(self.cfg, api_mode=getattr(self.llm, "api_mode", "openai"))
+            prompt_text = image_routing.build_aux_vision_prompt(user_text, len(parts))
+            resp = await aux_llm.chat(
+                [{"role": "user", "content": [
+                    {"type": "text", "text": prompt_text}, *parts]}],
+                model=mdl, temperature=0.2, max_tokens=1200,
+            )
+            content = ""
+            try:
+                content = resp["choices"][0]["message"].get("content") or ""
+            except Exception:
+                content = ""
+            if isinstance(content, list):
+                content = "".join(
+                    p.get("text", "") for p in content
+                    if isinstance(p, dict) and isinstance(p.get("text"), str))
+            if not content.strip():
+                return ""
+            return image_routing.format_aux_descriptions([content])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("aux vision describe failed: %s", e)
+            return ""
+
+    async def _build_multimodal_content(self, user_text: str, attachments: list, model_name: str):
         """把本轮流附件组装为发给模型的 content（str 或 content 列表）。
 
         - 图片：image_input_mode=native 时转 base64 vision part + [Image attached at:] 提示；
@@ -1749,9 +1803,30 @@ class Agent:
                 else:
                     skipped.append(f"{att.get('title', '图片')}: 找不到本地文件")
             else:
+                # 非视觉主模型：不放弃图片，先尝试 aux 视觉回退（v1.0.38）。
+                # 有可用视觉 Provider 时由辅助模型描述图片并注入文本上下文；
+                # 无视觉 Provider 才降级为「无法分析」提示。
+                fpath = image_routing.resolve_attachment_file(att, data_dir, store_dir)
+                if fpath:
+                    img_paths.append(fpath)
+                else:
+                    skipped.append(f"{att.get('title', '图片')}: 找不到本地文件")
+        # ---- aux 视觉回退（text 模式）----
+        aux_desc: list[str] = []
+        if image_mode != "native" and img_paths:
+            aux_block = await self._try_aux_vision(img_paths, user_text)
+            if aux_block:
+                notes.append(aux_block)
+                img_paths = []  # 已由 aux 描述消化，不再走 native 部件
+        if image_mode != "native" and img_paths:
+            # 无视觉 Provider / aux 失败：保留「无法分析」提示（不静默丢弃）
+            for att in attachments:
+                if not att.get("is_image"):
+                    continue
                 notes.append(
                     f"[Note] 图片「{att.get('title', '')}」已上传，但当前模型未启用视觉能力"
                     f"（image_input_mode=text），无法分析其内容。")
+            img_paths = []
         if img_paths:
             parts, sk = image_routing.build_native_content_parts(img_paths)
             image_parts.extend(parts)
