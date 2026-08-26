@@ -13,6 +13,7 @@ import asyncio
 import json
 import random
 import threading
+import time
 from typing import Any, AsyncIterator, Optional
 
 import httpx
@@ -21,6 +22,7 @@ from ..config import ZhishuConfig, ProviderConfig
 from . import compat
 from .registry import get_transport
 from .prompt_cache import apply_prompt_cache
+from .failover import classify_llm_error, AllProvidersFailedError, RATE_LIMIT
 
 
 # OpenAI 兼容消息 / 工具结构（仅类型约定，运行时用 dict）
@@ -65,6 +67,12 @@ _TRANSIENT_STATUS = {408, 429, 500, 502, 503, 504, 529}
 _LLM_MAX_RETRIES = 5
 _LLM_RETRY_BASE = 1.5
 _LLM_RETRY_MAX = 15.0
+
+# 整条回退链全部失败后的冷却：避免「所有 Provider 同时挂掉」时，agent 每个 step 都重跑
+# 完整的 5 次退避重试链（极其缓慢且无效）。冷却期内再次调用则不再退避、直接快失败。
+# 对标 Hermes 的 _FALLBACK_EXHAUSTED_COOLDOWN_S，但智枢把冷却语义下沉到客户端（更稳）。
+_FALLBACK_EXHAUSTED_COOLDOWN_S = 6.0
+_CHAIN_EXHAUSTED_AT: float = 0.0
 
 
 def _retry_after_seconds(exc: Exception) -> Optional[float]:
@@ -236,6 +244,16 @@ class LLMClient:
     def __init__(self, cfg: ZhishuConfig, api_mode: str = "openai"):
         self.cfg = cfg
         self.api_mode = api_mode
+        # 回退链切换记录：本次 chat/stream 调用过程中，因某 Provider 故障而自动切到
+        # 备用 Provider 时追加中文提示，供 agent 层以 warning 事件透传给用户（对标
+        # Hermes 的 _pending_fallback_notice 一次性提示）。每次调用开始都会被清空。
+        self._fallback_log: list[str] = []
+
+    def consume_fallback_messages(self) -> list[str]:
+        """取出并清空本次调用累计的回退提示（agent 层在拿到回复后调用一次）。"""
+        msgs = self._fallback_log
+        self._fallback_log = []
+        return msgs
 
     @property
     def _http(self) -> httpx.AsyncClient:
@@ -269,29 +287,57 @@ class LLMClient:
                 messages, model=model, tools=tools,
                 temperature=temperature, max_tokens=max_tokens,
             )
+        self._fallback_log = []
         chain = self._build_chain(model)
         last_err: Optional[Exception] = None
-        for pc, mdl in chain:
-            for attempt in range(_LLM_MAX_RETRIES + 1):
+        last_hint: str = ""
+        tried: list[str] = []
+        prev_name: Optional[str] = None
+        # 冷却期内：整条链上次全败，本次不再做退避重试，直接快失败，避免 agent 每个 step
+        # 都重跑完整的重试链（那样会非常卡）。
+        global _CHAIN_EXHAUSTED_AT
+        in_cooldown = (time.monotonic() - _CHAIN_EXHAUSTED_AT) < _FALLBACK_EXHAUSTED_COOLDOWN_S
+        for idx, (pc, mdl) in enumerate(chain):
+            tried.append(pc.name)
+            # 切到非首个 Provider 时，记录「已自动切换备用」提示（Eager-fallback 发生后）
+            if idx > 0 and prev_name:
+                self._fallback_log.append(
+                    f"主用 Provider「{prev_name}」不可用（{last_hint or '故障'}），"
+                    f"已自动切换到备用「{pc.name}」继续。")
+            max_retries = 0 if in_cooldown else _LLM_MAX_RETRIES
+            for attempt in range(max_retries + 1):
                 try:
                     return await self._chat_once(pc, mdl, messages, tools,
                                                  temperature, max_tokens, tool_choice)
                 except Exception as e:  # noqa: BLE001
                     last_err = e
-                    if attempt >= _LLM_MAX_RETRIES or not _is_transient(e):
-                        break  # 永久性错误（401/400/模型不存在）→ 立刻切下一个 Provider
+                    info = classify_llm_error(e)
+                    last_hint = info.user_hint
+                    if attempt >= max_retries:
+                        break
+                    # 非网络抖动类故障（限流/鉴权/模型不可用/空响应/5xx）：本 Provider 不
+                    # 再重试，立刻切下一个备用 —— 这正是消除「卡死/自动中断」体感的关键。
+                    if not info.transient:
+                        break
+                    # 限流/空响应等：最多原地重试 1 次确认非偶发，随后也 eager 切备用。
+                    if info.eager_fallback and attempt >= 1:
+                        break
                     delay = _retry_after_seconds(e)
                     if delay is None:
                         # 指数退避 + 抖动，避免多个子智能体同步重试再次撞满限流窗口
                         delay = min(_LLM_RETRY_BASE * (2 ** attempt), _LLM_RETRY_MAX)
                         delay *= (0.7 + random.random() * 0.6)
                     await asyncio.sleep(delay)
-        if getattr(getattr(last_err, "response", None), "status_code", None) == 429:
-            raise RuntimeError(
-                f"模型服务持续限流（HTTP 429），已重试 {_LLM_MAX_RETRIES} 次仍失败。"
-                "多智能体编排会在短时间内密集调用模型，请降低并发/减少子智能体数量，"
-                "或在「模型管理」中再配置一个 Provider 作为回退。")
-        raise RuntimeError(f"所有 LLM Provider 均不可用：{last_err}")
+            prev_name = pc.name
+        # 整条回退链都失败：记录冷却时间戳，并给出比「所有 Provider 均不可用」更友好的提示。
+        _CHAIN_EXHAUSTED_AT = time.monotonic()
+        if last_err is not None and classify_llm_error(last_err).reason == RATE_LIMIT:
+            hint = ("多智能体编排会在短时间内密集调用模型导致持续限流；请降低并发/减少子智能体"
+                    "数量，或在「模型管理」中再配置一个 Provider 作为回退。")
+        else:
+            hint = ("请检查 LLM Provider 配置（API Key / base_url）或本地推理服务"
+                    "（Ollama / vLLM）是否可用。")
+        raise AllProvidersFailedError(tried, last_err or RuntimeError("未知错误"), hint=hint)
 
     @staticmethod
     def _is_local(base_url: str) -> bool:
@@ -306,16 +352,21 @@ class LLMClient:
         # 否则缺 Key 的默认模型会被强制注入链首，发出无 Authorization 头的请求，
         # 被网关以 401 拒绝，从而把「缺 Key」这一根因掩盖成「所有 Provider 均不可用」。
         candidates: list[tuple] = []
+        added: set[str] = set()  # 已入链的 Provider 名，避免重复追加（尤其 default_model 路径）
         if prefer:
             pc, mdl = self.cfg.resolve_model(prefer)
             candidates.append((pc, mdl))
-            ordered = [p for p in ordered if p.name != pc.name]
+            added.add(pc.name)
         if model_override := (self.cfg.default_model if not prefer else None):
             pc, mdl = self.cfg.resolve_model(model_override)
-            if (pc, mdl) not in candidates:
+            if pc.name not in added:
                 candidates.append((pc, mdl))
+                added.add(pc.name)
         for pc in ordered:
+            if pc.name in added:
+                continue
             candidates.append((pc, pc.models[0] if pc.models else "local-model"))
+            added.add(pc.name)
 
         chain = []
         missing_keys: list[tuple] = []  # (provider name, base_url) 缺 Key 的云端 Provider
@@ -455,17 +506,30 @@ class LLMClient:
             ):
                 yield piece
             return
+        self._fallback_log = []
         chain = self._build_chain(model)
         last_err = None
-        for pc, mdl in chain:
+        last_hint = ""
+        tried: list[str] = []
+        prev_name: Optional[str] = None
+        for idx, (pc, mdl) in enumerate(chain):
+            tried.append(pc.name)
+            if idx > 0 and prev_name:
+                self._fallback_log.append(
+                    f"主用 Provider「{prev_name}」不可用（{last_hint or '故障'}），"
+                    f"已自动切换到备用「{pc.name}」继续。")
             try:
                 async for piece in self._stream_once(pc, mdl, messages, tools, temperature, max_tokens):
                     yield piece
                 return
             except Exception as e:
                 last_err = e
+                last_hint = classify_llm_error(e).user_hint
+                # 流式下不原地重试（避免半截流），直接切下一个备用 Provider（eager 切换）
                 continue
-        raise RuntimeError(f"所有 LLM Provider 均不可用：{last_err}")
+            prev_name = pc.name
+        hint = "请检查 LLM Provider 配置（API Key / base_url）或本地推理服务（Ollama / vLLM）是否可用。"
+        raise AllProvidersFailedError(tried, last_err or RuntimeError("未知错误"), hint=hint)
 
     async def _stream_once(self, pc, model, messages, tools, temperature, max_tokens):
         transport = get_transport(self.api_mode)

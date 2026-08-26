@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import hashlib
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Tuple
 
@@ -807,6 +808,13 @@ _LO_LOCK = threading.Lock()
 # 单次 OCR / 转换的页数上限（防超大扫描件长时间阻塞事件循环）
 _OCR_MAX_PAGES = 30
 
+# LibreOffice 无头转换结果缓存：转换输出完全由 raw 字节 + target_ext 决定。命中缓存
+# 可跳过 soffice 启动（秒级开销），对 reparse_document / 重复 read_file 同一文档收益最大。
+# Hermes 未做此缓存，此为智枢反超点。进程级（容器重启清空），上限防内存膨胀。
+_LO_CONVERT_CACHE: dict[tuple[str, str], Tuple[str, str]] = {}
+_LO_CONVERT_CACHE_LOCK = threading.Lock()
+_LO_CONVERT_CACHE_MAX = 512
+
 
 def _libreoffice_convert(raw: bytes, filename: str, target_ext: str,
                          media_dir=None, owner=None) -> Tuple[str, str] | None:
@@ -814,12 +822,21 @@ def _libreoffice_convert(raw: bytes, filename: str, target_ext: str,
 
     返回 (text, file_type) 或 None（无 soffice / 转换失败）。转换成功后递归调用
     read_file_text 走既有标准库/第三方提取器，零额外解析逻辑、不重复造轮子。
-    全局 threading.Lock 串行化，避免 soffice 实例锁冲突。
+    全局 threading.Lock 串行化，避免 soffice 实例锁冲突。结果按内容哈希缓存，
+    避免同一文档重复启动 soffice。
     """
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
         return None
+    # 结果缓存：raw 字节 + target_ext 唯一决定输出，命中即跳过 soffice 启动。
+    cache_key = (hashlib.sha1(raw).hexdigest(), target_ext)
+    with _LO_CONVERT_CACHE_LOCK:
+        hit = _LO_CONVERT_CACHE.get(cache_key)
+    if hit is not None:
+        return hit
+
     tmp = tempfile.mkdtemp(prefix="zhishu_lo_")
+    result: Tuple[str, str] | None = None
     try:
         in_path = os.path.join(tmp, os.path.basename(filename) or "input")
         with open(in_path, "wb") as f:
@@ -844,11 +861,18 @@ def _libreoffice_convert(raw: bytes, filename: str, target_ext: str,
         with open(out_files[0], "rb") as f:
             out_raw = f.read()
         # 递归解析转换后的新格式（.docx/.xlsx/.pptx），不触发二次转换
-        return read_file_text(os.path.basename(out_files[0]), out_raw, media_dir, owner)
+        result = read_file_text(os.path.basename(out_files[0]), out_raw, media_dir, owner)
     except Exception:
         return None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+    if result is not None:
+        with _LO_CONVERT_CACHE_LOCK:
+            if len(_LO_CONVERT_CACHE) >= _LO_CONVERT_CACHE_MAX:
+                _LO_CONVERT_CACHE.clear()
+            _LO_CONVERT_CACHE[cache_key] = result
+    return result
 
 
 def _ocr_image_bytes(raw: bytes, lang: str = "chi_sim+eng") -> str:

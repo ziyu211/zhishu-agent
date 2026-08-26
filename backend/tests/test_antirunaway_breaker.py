@@ -298,8 +298,10 @@ async def test_success_repeat_loop():
     fired = _breaker_fired(events)
     tool_texts = [e.get("result", "") for e in events if e.get("type") == "tool_result"]
     # 前 7 次为正常执行结果；第 8 次起被替换为「跳过重复执行」提示，循环被打破而不终止整轮
-    check(tool_texts[:7] == ["ok"] * 7, "前 7 次重复调用仍正常执行并返回结果")
-    check(any("已为你跳过重复执行" in t for t in tool_texts), "达阈值后转为「跳过重复执行」提示，重复循环被打破")
+    # 注：read_file 单读有独立硬熔断（_READ_FILE_HARD_LIMIT=6），会在通用重复循环阈值前介入，
+    # 故前 6 次正常执行、第 7 次起转为熔断/强指令，而非整轮被掐断。
+    check(tool_texts[:6] == ["ok"] * 6, "前 6 次重复调用（read_file 硬熔断阈值之前）仍正常执行")
+    check(any("系统·熔断" in t for t in tool_texts), "达 read_file 硬熔断阈值后转为熔断/强指令（而非整轮被掐断）")
     # 关键回归：纯成功重复不再把整个任务掐断——运行继续，直至迭代预算兜底收尾
     check(n_tool == 12, f"运行未被重复熔断提前掐断（产出 {n_tool} 个工具步骤，直至预算兜底，而非 7）")
     check(not fired, "最终由迭代预算收尾，而非「anti-runaway breaker triggered」早杀")
@@ -352,6 +354,122 @@ async def test_grace_finalize():
     check(_ended_by_budget(events), "结束 note 为 iteration budget reached（温和收尾）")
 
 
+# ---------------------------------------------------------------------------
+# 用例 8（P0-C）：硬熔断消息携带中文「自愈提示」，引导模型换思路而非原样重试
+# ---------------------------------------------------------------------------
+async def test_breaker_message_has_self_heal_hint():
+    print("\n[8] P0-C：code_exec / read_file 硬熔断消息注入中文自愈提示")
+    cfg = ZhishuConfig()
+    cfg.agent.max_steps = 60
+    agent = _make_agent(cfg)
+
+    # code_exec 走 REPL 式增量循环：连续 11 次调用（>_CODE_EXEC_HARD_LIMIT=8），
+    # 交替放行/熔断 —— 任意一次被熔断返回的消息都应含 [自愈提示] 且指向 code_exec 的修复路径。
+    def rf(n):
+        if n < 11:
+            return _tool_resp("code_exec", {"code": f"print({n})  # 逐步调试"})
+        return _text_resp("已整合为完整脚本并产出交付物。")
+
+    events = await _collect(agent, rf)
+    # 仅取「本次不执行」的熔断消息（区别于「最后一次机会」放行强指令）
+    breaker_texts = [e.get("result", "") for e in events
+                     if e.get("type") == "tool_result"
+                     and "系统·熔断" in (e.get("result") or "")
+                     and "本次不执行" in (e.get("result") or "")]
+    check(len(breaker_texts) > 0, "确实触发了 code_exec 硬熔断消息（本次不执行）")
+    check(all("自愈提示" in t for t in breaker_texts),
+          "所有 code_exec 熔断消息均含「自愈提示」")
+    check(all("generate_excel" in t for t in breaker_texts),
+          "code_exec 自愈提示指向整合脚本 + generate_excel 出交付物")
+
+    # read_file 走逐文件循环：连续 9 次单读（>_READ_FILE_HARD_LIMIT=6），
+    # 被熔断消息应含 [自愈提示] 且指向 paths 批量读取。
+    cfg2 = ZhishuConfig()
+    cfg2.agent.max_steps = 60
+    agent2 = _make_agent(cfg2)
+
+    def rf2(n):
+        if n < 9:
+            return _tool_resp("read_file", {"path": f"/data/doc-{n}.md"})
+        return _text_resp("已改用 paths 批量读取并汇总。")
+
+    events2 = await _collect(agent2, rf2)
+    rf_breaker = [e.get("result", "") for e in events2
+                  if e.get("type") == "tool_result"
+                  and "系统·熔断" in (e.get("result") or "")
+                  and "本次不读取" in (e.get("result") or "")]
+    check(len(rf_breaker) > 0, "确实触发了 read_file 硬熔断消息（本次不读取）")
+    check(all("自愈提示" in t for t in rf_breaker),
+          "所有 read_file 熔断消息均含「自愈提示」")
+    check(all("paths" in t for t in rf_breaker),
+          "read_file 自愈提示指向 paths 批量读取")
+
+
+# ---------------------------------------------------------------------------
+# 用例 9（P0-C）：幂等无进展检测——同一工具连续返回相同结果（参数可不同）注入自愈引导
+# ---------------------------------------------------------------------------
+async def test_idempotent_no_progress_nudge():
+    print("\n[9] P0-C：幂等无进展检测——连续相同结果（如反复 pwd）触发自愈引导，不终止")
+    # 自愈引导注入到内部 messages（不随事件流透出），故用调用记录器验证确实被调用。
+    calls = []
+    _orig = agent_mod._self_heal_hint
+
+    def _rec(name):
+        calls.append(name)
+        return _orig(name)
+    agent_mod._self_heal_hint = _rec
+    try:
+        cfg = ZhishuConfig()
+        cfg.agent.tool_fail_break = 100
+        cfg.agent.tool_cycle_break = 100
+        cfg.agent.max_steps = 12
+        agent = _make_agent(cfg)
+
+        def rf(n):
+            # 参数每次略异（模拟反复 pwd / ls 当前目录），但结果恒定相同 → 成功但无进展
+            return _tool_resp("ok_tool", {"x": f"pwd #{n}"})
+
+        events = await _collect(agent, rf)
+        n_tool = _tool_result_count(events)
+        # 兜底：仍由迭代预算收尾，不早杀
+        check(n_tool == 12, f"幂等无进展循环持续推进至预算（实际 {n_tool} == 12，未早杀）")
+        check(_ended_by_budget(events), "由迭代预算兜底结束")
+        # 关键新增：连续相同结果后，_self_heal_hint("ok_tool") 被调用（注入自愈引导）
+        check("ok_tool" in calls,
+              "连续相同结果触发「成功但无进展」自愈引导（非仅失败才提醒）")
+    finally:
+        agent_mod._self_heal_hint = _orig
+
+
+# ---------------------------------------------------------------------------
+# 用例 10（P0-C）：失败软提醒也带自愈提示（terminal_run 被拦场景）
+# ---------------------------------------------------------------------------
+async def test_failure_nudge_has_self_heal_hint():
+    print("\n[10] P0-C：连续失败软提醒携带自愈提示（terminal_run 被白名单拦截）")
+    calls = []
+    _orig = agent_mod._self_heal_hint
+
+    def _rec(name):
+        calls.append(name)
+        return _orig(name)
+    agent_mod._self_heal_hint = _rec
+    try:
+        cfg = ZhishuConfig()
+        cfg.agent.tool_fail_break = 3
+        cfg.agent.tool_cycle_break = 4
+        cfg.agent.max_steps = 12
+        agent = _make_agent(cfg)
+
+        def rf(n):
+            return _tool_resp("terminal_run", {"command": f"apt-get install -y nodejs #{n}"})
+
+        events = await _collect(agent, rf)
+        check("terminal_run" in calls,
+              "连续失败软提醒调用 _self_heal_hint('terminal_run') 注入自愈提示")
+    finally:
+        agent_mod._self_heal_hint = _orig
+
+
 def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -362,6 +480,9 @@ def main():
     loop.run_until_complete(test_deterministic_block_continues())
     loop.run_until_complete(test_success_repeat_loop())
     loop.run_until_complete(test_grace_finalize())
+    loop.run_until_complete(test_breaker_message_has_self_heal_hint())
+    loop.run_until_complete(test_idempotent_no_progress_nudge())
+    loop.run_until_complete(test_failure_nudge_has_self_heal_hint())
     print(f"\n=== 通过 {PASS} / 失败 {len(FAIL)} ===")
     if FAIL:
         print("失败项:", FAIL)

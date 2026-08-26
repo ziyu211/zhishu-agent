@@ -61,3 +61,6 @@ Thumbs.db
 
 # ===== 前端校验脚本的临时构建产物（渲染冒烟测试）=====
 frontend/scripts/.render-out/
+
+# ===== 推介物料（本地 PPT 构建产物，含 8.6MB 二进制，不入库；部署 tar 亦排除）=====
+ppt-promo/

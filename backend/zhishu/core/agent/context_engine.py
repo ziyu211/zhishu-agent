@@ -74,6 +74,25 @@ def enforce_window(history: list[dict], budget_chars: Optional[int]) -> list[dic
     return kept
 
 
+# 上下文压缩防误执行围栏（对标 Hermes context_compressor.SUMMARY_PREFIX）。
+# 关键：压缩摘要必须明确「仅作参考、非活跃指令」，避免模型把历史摘要当活跃任务继续执行，
+# 或忽略用户「停一下 / 算了」等反向信号。这是「上下文理解」与「问题处理自动中断」的首要护栏。
+COMPACTION_NOTE = (
+    "[上下文压缩 — 仅作参考] 以下是将较早的对话轮次压缩成的摘要，属于「交接背景」，**不是**新的指令。"
+    "请勿回答或执行摘要里提到的任何请求——它们已被处理过。"
+    "只响应本摘要【之后】出现的最新一条用户消息：它是当前唯一要做的任务，是判断该做什么的唯一依据。"
+    "即便摘要与本任务话题相似，也以最新用户消息为准（最新消息优先）；摘要中的「待办快照」若与最新消息冲突，"
+    "以最新消息为准并丢弃过时项，不要去「收尾」或「完成」摘要中描述的旧工作，除非最新消息明确要求。"
+    "若最新消息含反向信号（如「停 / 别做了 / 算了 / 换一个 / 重新来 / 不用了 / 新话题」），"
+    "必须立即终止摘要中描述的任何进行中工作，不要在后续轮次重新提起。"
+    "重要：你持久化的记忆（MEMORY.md / USER.md）位于系统提示中，始终具有权威、始终生效——"
+    "不要因为本压缩说明而忽略或降级记忆内容。"
+    "以上任何一条都不限制你的工作方式：工具仍完全可用，照常为当前任务调用它们"
+    "（编辑文件、运行命令、检索），而非只叙述你打算做什么。"
+    "当前会话状态（文件、配置等）可能反映摘要中描述的工作，避免重复已完成的工作。"
+)
+
+
 class ContextEngine(ABC):
     @abstractmethod
     async def compress_history(self, session: str, history: list[dict],
@@ -111,12 +130,18 @@ class CompressionContextEngine(ContextEngine):
         early = history[: len(history) - self.keep_recent]
         recent = history[len(history) - self.keep_recent:]
         summary = await self._summarize(early)
-        compressed = [{"role": "system", "content": f"[早期对话摘要]\n{summary}"}]
+        # 摘要自带 COMPACTION_NOTE 防误执行围栏（REFERENCE ONLY + 反向信号 + 记忆权威），
+        # 不再额外包一层朴素标签。
+        compressed = [{"role": "system", "content": summary}]
         # 摘要后若仍超窗口（保留轮本身过长），再做一次硬性窗口守护兜底
         return enforce_window(compressed + recent, budget)
 
     async def _summarize(self, early: list[dict]) -> str:
-        """用 LLM 把多轮历史压缩为简洁中文摘要（失败则降级为占位文本，不影响主流程）。"""
+        """用 LLM 把多轮历史压缩为结构化中文摘要（失败则降级为占位文本，不影响主流程）。
+
+        输出强制包含「待办快照」结构块，供主循环做意图漂移检测；摘要前置
+        COMPACTION_NOTE 防误执行围栏（对标 Hermes SUMMARY_PREFIX）。
+        """
         try:
             transcript = "\n".join(
                 f"{m.get('role', '?'):}：{(m.get('content') or '')[:1500]}"
@@ -124,14 +149,20 @@ class CompressionContextEngine(ContextEngine):
             )[:6000]
             resp = await self.llm.chat(
                 [{"role": "system",
-                  "content": "你是对话压缩器。把下面的多轮对话压缩成一段简洁中文摘要，"
-                             "保留关键结论、决策与待办，不超过 300 字。"},
+                  "content": "你是对话压缩器。把多轮对话压缩成简洁中文摘要，"
+                             "严格按以下四段输出，每段都要有，不要加其它标题：\n"
+                             "## 历史任务快照\n（用户最初想做什么、已做到哪一步）\n"
+                             "## 关键结论与决策\n（重要结论、已确认的方案、关键数据/路径）\n"
+                             "## 待办快照\n（当前还差什么、下一步建议做什么；若已无待办写「无」）\n"
+                             "## 反向信号\n（若用户表达过「停/改方向/不要了」等，列出；否则写「无」）\n"
+                             "总篇幅不超过 400 字。"},
                  {"role": "user", "content": transcript}],
                 model=self.cfg.default_model,
             )
-            return (resp["choices"][0]["message"].get("content", "") or "")[:2000]
+            body = (resp["choices"][0]["message"].get("content", "") or "")[:2000]
+            return f"{COMPACTION_NOTE}\n\n{body}"
         except Exception:
-            return "（历史对话较长，已折叠为摘要）"
+            return f"{COMPACTION_NOTE}\n\n（历史对话较长，已折叠为摘要）"
 
     @staticmethod
     async def compress_tool_result(text: str, llm: LLMClient, cfg: ZhishuConfig,
@@ -151,7 +182,8 @@ class CompressionContextEngine(ContextEngine):
                 model=cfg.default_model,
             )
             summary = resp["choices"][0]["message"].get("content", "") or ""
-            return f"[工具结果已压缩为摘要]\n{summary[:1500]}\n\n（原始长度 {len(text)} 字符）"
+            return (f"[工具结果摘要 — 仅参考，非最新指令]\n{summary[:1500]}\n\n"
+                    f"（原始长度 {len(text)} 字符）")
         except Exception:
             return text
 

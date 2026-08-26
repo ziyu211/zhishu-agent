@@ -17,7 +17,7 @@ logger = logging.getLogger("zhishu.memory")
 TASK_KEY = "memory_query_rewrite"
 
 _MAX_INPUT_CHARS = 4_000
-_MAX_QUERY_CHARS = 320
+_MAX_QUERY_CHARS = 240
 _OUTPUT_PREFIX_RE = re.compile(
     r"^(?:retrieval\s+query|memory\s+query|query|question)\s*:\s*",
     re.IGNORECASE,

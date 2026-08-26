@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Optional
 
 from ..config import ZhishuConfig
@@ -106,7 +107,8 @@ def _read_memory_files(cfg: ZhishuConfig, owner: str | None = None) -> list[str]
     for key, fn in (("memory", "MEMORY.md"), ("user", "USER.md"), ("soul", "SOUL.md")):
         p = os.path.join(base, fn)
         if os.path.isfile(p):
-            txt = open(p, encoding="utf-8").read().strip()
+            with open(p, encoding="utf-8") as fh:
+                txt = fh.read().strip()
             if txt:
                 out.append(f"【长期记忆 {key}】\n{txt}")
     return out
@@ -114,7 +116,8 @@ def _read_memory_files(cfg: ZhishuConfig, owner: str | None = None) -> list[str]
 
 def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None,
                                is_admin: bool = False,
-                               user_role: Optional[str] = None) -> str:
+                               user_role: Optional[str] = None,
+                               *, include_memory: bool = True) -> str:
     """组装注入系统提示的 volatile 部分：已启用技能 + 长期记忆文件。
 
     开启 cfg.agent.skills_progressive 时改为「技能清单」模式（渐进披露）。
@@ -137,7 +140,8 @@ def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None,
             if blocks:
                 parts.append("【已启用技能 Skills】\n" + "\n\n".join(blocks))
 
-    parts.extend(_read_memory_files(cfg, owner))
+    if include_memory:
+        parts.extend(_read_memory_files(cfg, owner))
     return "\n\n".join(p for p in parts if p)
 
 
@@ -244,10 +248,15 @@ def _skill_slug(text: str) -> str:
 
 
 # ===========================================================================
-# 后台记忆反思（对标 Hermes background_review / 长期记忆沉淀）
-# 每轮成功回答后，fork 一次廉价 LLM 调用，从本轮对话中蒸馏出值得长期记住的
-# 用户事实/偏好，追加进 MEMORY.md（下一轮自动注入系统提示）。
-# 护栏：opt-in（cfg.agent.reflection_enabled，默认关）、阈值校验、全链路异常吞掉
+# 后台记忆反思（对标 Hermes background_review / 长期记忆沉淀 —— 并超越）
+# 每轮成功回答后，以 asyncio.create_task 非阻塞触发（等价 Hermes 的「后台线程 fork」，
+# 协程式实现，不额外占 OS 线程、不碰主会话 prompt cache）。
+# 单次 LLM 调用做「合并反思」：从本轮对话（用户请求 + 助手回答 + 工具轨迹）中一次性提炼
+#   ① memory   —— 跨会话该记的用户事实/偏好
+#   ② pitfalls —— 踩坑/约束/环境约定（写入记忆防未来复犯；Hermes 把这类塞进 skill，
+#                  智枢统一沉淀进 MEMORY.md 更干净，避免 skill 被环境性负向声明污染）
+#   ③ skill    —— 可复用技能候选（命中阈值则落盘，与 maybe_learn 错峰避免重复）
+# 护栏：opt-in（reflection_enabled 默认开）、阈值校验、JSON 容错解析、全链路异常吞掉
 # （反思失败不影响主对话，也不写脏记忆）。
 # ===========================================================================
 import os as _os
@@ -255,10 +264,88 @@ import threading as _threading
 
 _REFLECT_LOCK = _threading.Lock()
 
+_REFLECT_REVIEW_SYSTEM_PROMPT = (
+    "你是长期记忆与技能蒸馏器。从本轮对话（用户请求 + 助手回答 + 工具轨迹）中，"
+    "提炼「跨会话应保留」的积累。\n"
+    "必须只输出一个 JSON 对象，不要任何额外文字、不要 Markdown 代码块包裹，格式严格如下：\n"
+    "{\n"
+    '  "memory": ["关于用户的事实/偏好，每条以「- 」开头，简洁客观，约 20 字"],\n'
+    '  "pitfalls": ["踩坑/约束/环境约定，未来应避免或注意；每条以「- 」开头，约 20 字。'
+    "不要写一次性环境故障，只写可复用的教训\"],\n"
+    '  "skill": null\n'
+    "}\n"
+    "skill 字段：当存在明确、可复用的方法论/技巧/修复方案时，改为：\n"
+    '{"name":"kebab-slug","description":"何时使用","body":"## 步骤\\n1. ...\\n## 示例\\n..."}'
+    "；否则保持 null。\n"
+    "规则：\n"
+    "1. memory 记「用户是谁、想要什么」；pitfalls 记「怎么做会踩坑、环境有什么约定」；skill 记「可复制的做法」。\n"
+    "2. 若某维度无明显内容，给空数组 [] 或 null。\n"
+    "3. 不要记录一次性任务细节、可从当前对话推断的临时信息。\n"
+    "4. skill.name 小写 kebab，不超过 40 字符；body 用 Markdown，含简短步骤与示例。"
+)
+
+
+def _reflect_extract_json(text: str):
+    """从 LLM 文本中稳健解析反思 JSON（容错：去 ```json 包裹、截取首个 { 到末个 }）。"""
+    if not text:
+        return None
+    t = text.strip()
+    if t.startswith("```"):
+        t = t[3:]
+        if "```" in t:
+            t = t.split("```", 1)[0]
+        t = t.strip()
+        if t.lower().startswith("json"):
+            t = t[4:].strip()
+    s, e = t.find("{"), t.rfind("}")
+    if s == -1 or e == -1 or e <= s:
+        return None
+    try:
+        return json.loads(t[s:e + 1])
+    except Exception:
+        return None
+
+
+def _persist_skill_file(cfg, slug: str, body: str, owner: str | None,
+                        source_task: str, description: str | None = None) -> bool:
+    """把技能正文落盘到 data_dir/skills/<slug>/{module.json,SKILL.md}；已存在则跳过。"""
+    try:
+        root = os.path.join(cfg.server.data_dir, "skills")
+        target = os.path.join(root, _sanitize(slug))
+        if os.path.isdir(target):
+            return False
+        os.makedirs(target, exist_ok=True)
+        meta = {
+            "name": slug,
+            "description": (description or body.split("\n", 1)[0].lstrip("#").strip()
+                            or f"自动沉淀：{source_task[:40]}"),
+            "enabled": True,
+            "auto_generated": True,
+            "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "source_task": source_task[:200],
+        }
+        if owner and owner not in ("anonymous", "system"):
+            meta["owner"] = owner
+        with open(os.path.join(target, "module.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        with open(os.path.join(target, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(body)
+        return True
+    except Exception:
+        return False
+
 
 async def maybe_reflect(cfg, llm, *, user_message: str, answer: str,
-                        owner: str | None = None) -> Optional[str]:
-    """从本轮对话蒸馏用户事实，沉淀进长期记忆(MEMORY.md)；返回沉淀要点或 None。"""
+                        owner: str | None = None,
+                        traj_tools: list[dict] | None = None,
+                        steps_used: int = 0,
+                        tool_total: int = 0) -> Optional[dict]:
+    """完整后台反思（对标 Hermes background_review 的 combined review + 技能回写）。
+
+    单 LLM 调用产出结构化 JSON（memory / pitfalls / skill），沉淀进长期记忆(MEMORY.md)，
+    并在命中阈值时把可复用技能落盘。以 create_task 非阻塞触发，全链路异常安全。
+    返回 {\"memory\":[...], \"pitfalls\":[...], \"skill\":name|None} 便于测试/审计。
+    """
     try:
         ac = getattr(cfg, "agent", None)
         if not getattr(ac, "reflection_enabled", False):
@@ -266,45 +353,79 @@ async def maybe_reflect(cfg, llm, *, user_message: str, answer: str,
         if not (user_message or "").strip() or len(user_message) < 8:
             return None
 
+        traj_text = ""
+        if traj_tools:
+            traj_text = "\n".join(
+                f"- 工具 {t.get('name')} 入参={json.dumps(t.get('args', {}), ensure_ascii=False)[:200]} "
+                f"→ 结果摘要：{(t.get('result') or '')[:120]}"
+                for t in traj_tools[:24]
+            )
+
         prompt = [
-            {"role": "system",
-             "content": "你是长期记忆蒸馏器。从用户与助手的对话中，仅提取「值得跨会话记住的、"
-                        "关于用户的事实与偏好」，例如：用户角色/职业、技术栈、正在做的项目、"
-                        "明确表达过的约定或要求、反复出现的痛点。\n"
-                        "输出规则：\n1. 每条事实一行，以「- 」开头，简洁客观；\n"
-                        "2. 不要记录一次性任务细节，也不要记录可从当前对话本身推断的临时信息；\n"
-                        "3. 若没有明显值得长期记住的内容，只输出空字符串。\n只输出要点，不要解释。"},
+            {"role": "system", "content": _REFLECT_REVIEW_SYSTEM_PROMPT},
             {"role": "user",
-             "content": f"用户：{user_message}\n\n助手（节选）：{(answer or '')[:1000]}"},
+             "content": f"用户请求：{user_message}\n\n助手回答（节选）：{(answer or '')[:1200]}\n\n"
+                        f"工具轨迹（节选）：\n{traj_text or '（无）'}"},
         ]
         resp = await llm.chat(prompt, model=cfg.default_model)
-        body = (resp["choices"][0]["message"].get("content", "") or "").strip()
-        facts = [ln.strip().lstrip("-").strip() for ln in body.splitlines()
-                 if ln.strip().startswith("-")]
-        facts = [f for f in facts if f]
-        if not facts:
+        body_text = (resp["choices"][0]["message"].get("content", "") or "").strip()
+        data = _reflect_extract_json(body_text)
+        if not isinstance(data, dict):
+            return None
+
+        memory = [str(x).strip().lstrip("-").strip() for x in (data.get("memory") or []) if str(x).strip()]
+        pitfalls = [str(x).strip().lstrip("-").strip() for x in (data.get("pitfalls") or []) if str(x).strip()]
+        if not memory and not pitfalls and not data.get("skill"):
             return None
 
         from ...context import get_ctx
+        ctx = get_ctx()
         # 安全：反思沉淀写入当前用户自己的记忆目录，不污染他人/全局记忆
         mem_path = _os.path.join(
-            user_memory_dir(get_ctx().cfg.server.data_dir, owner), "MEMORY.md")
-        new_block = "\n".join(f"- {f}" for f in facts)
-        with _REFLECT_LOCK:
-            head = ""
-            if _os.path.isfile(mem_path):
-                try:
-                    head = open(mem_path, encoding="utf-8").read().rstrip() + "\n"
-                except Exception:
-                    head = ""
-            with open(mem_path, "w", encoding="utf-8") as f:
-                f.write(head + new_block + "\n")
+            user_memory_dir(ctx.cfg.server.data_dir, owner), "MEMORY.md")
+
+        # ---- 记忆沉淀（带日期分节 + [事实]/[约束] 标签，便于后续检索/蒸馏）----
+        written: list[str] = []
+        if memory or pitfalls:
+            day = time.strftime("%Y-%m-%d")
+            lines = [f"---\n## 沉淀 · {day}"]
+            for f in memory:
+                lines.append(f"- [事实] {f}")
+            for p in pitfalls:
+                lines.append(f"- [约束] {p}")
+            new_block = "\n".join(lines) + "\n"
+            with _REFLECT_LOCK:
+                head = ""
+                if _os.path.isfile(mem_path):
+                    try:
+                        head = open(mem_path, encoding="utf-8").read().rstrip() + "\n"
+                    except Exception:
+                        head = ""
+                with open(mem_path, "w", encoding="utf-8") as f:
+                    f.write(head + new_block)
+            written = memory + pitfalls
+
+        # ---- 技能回写（与 maybe_learn 错峰：复杂任务已由 maybe_learn 写，
+        #      这里补「简单但可复用」的技巧，避免重复沉淀）----
+        skill_name: str | None = None
+        sk = data.get("skill")
+        if isinstance(sk, dict) and sk.get("name") and sk.get("body"):
+            ac2 = getattr(cfg, "agent", None)
+            maybe_learn_fired = (getattr(ac2, "skills_auto_learn", False)
+                                 and tool_total >= getattr(ac2, "skills_auto_learn_min_tools", 3))
+            if not maybe_learn_fired:
+                raw = re.sub(r"[^A-Za-z0-9_\-]", "-", str(sk.get("name")).strip().lower())
+                slug = _sanitize(raw)[:40] or "task"
+                if _persist_skill_file(cfg, slug, str(sk.get("body")), owner,
+                                       user_message, description=str(sk.get("description") or "")):
+                    skill_name = slug
 
         try:
-            get_ctx().audit.log(owner or "system", "memory_reflect",
-                                f"沉淀长期记忆 {len(facts)} 条（来源轮次）")
+            ctx.audit.log(owner or "system", "memory_reflect",
+                          f"沉淀记忆 {len(written)} 条"
+                          + (f" + 技能 {skill_name}" if skill_name else ""))
         except Exception:
             pass
-        return "; ".join(facts[:5])
+        return {"memory": memory, "pitfalls": pitfalls, "skill": skill_name}
     except Exception:
         return None

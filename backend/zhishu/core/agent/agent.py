@@ -22,7 +22,7 @@ import re
 import time
 from typing import AsyncIterator, Optional
 
-from ..providers.client import LLMClient
+from ..providers.client import LLMClient, AllProvidersFailedError
 from ..tools import ToolRegistry, ToolContext, set_current_user
 from ..rag import KnowledgeBase
 from ..memory import MemoryStore, MemoryManager
@@ -109,6 +109,7 @@ def _code_exec_breaker_message(count: int) -> str:
         f"一次性跑完并直接产出最终交付物：读取所需文件 → 处理数据 → 把结果写成 CSV/JSON 文件"
         f"（自动获得 /media 下载链接）→ 调用 generate_excel(from_file=该链接) 生成 Excel。\n"
         f"下一次 code_exec 将被允许执行这一次整合脚本；此后若仍是零散增量调用，将继续被熔断。"
+        f"\n{_self_heal_hint('code_exec')}"
     )
 
 
@@ -159,6 +160,7 @@ def _read_file_breaker_message(count: int) -> str:
         f"请立即改用 paths 列表【一次性】读取所有剩余文件"
         f"（如 paths:[\"a.txt\",\"b.csv\",\"c.pdf\"]）：一次 read_file 即可读取多个文件并带分隔头返回；"
         f"后续若仍是逐个单文件读取，将继续被熔断拦截。"
+        f"\n{_self_heal_hint('read_file')}"
     )
 
 
@@ -176,7 +178,63 @@ def _read_file_final_directive(count: int) -> str:
     )
 
 
+def _self_heal_hint(name: str) -> str:
+    """按工具类型生成中文「自愈提示」，引导模型换思路而非原样重试（对标 Hermes _tool_failure_recovery_hint）。"""
+    _HINTS = {
+        "code_exec": "（自愈提示）先读最近一次报错定位根因，再一次性改写整段脚本产出最终交付物；"
+                     "用 generate_excel(from_file=链接) 生成 Excel，不要再分步调试。",
+        "terminal_run": "（自愈提示）先 `pwd && ls -la` 确认当前目录与可用文件，再决定命令；"
+                        "被白名单拦截时改走 code_exec 或 read_file。",
+        "read_file": "（自愈提示）把要读的文件收进一个 paths 列表，一次 read_file 批量读取；已读过的别重复读。",
+        "file_write": "（自愈提示）若写入被拒，检查路径是否在被允许的工作区；大文件改用 code_exec 生成。",
+        "web_search": "（自愈提示）换更具体的关键词或加时间范围，别用相同关键词反复搜。",
+        "delegate_to_agent": "（自愈提示）把完整任务一次性写清交给子智能体，不要反复委派同一件事。",
+    }
+    return _HINTS.get(name, "（自愈提示）停下来确认目标与障碍，换一种工具或参数，而非原样重试。")
+
+
+def _normalize_result(result: str) -> str:
+    """把工具结果归一化为可比对的短指纹，用于「成功但无进展」检测。"""
+    if not result:
+        return ""
+    s = result
+    for p in ("[工具错误]", "[工具执行异常]", "[已拦截]", "[系统"):
+        if s.startswith(p):
+            s = s[len(p):]
+    return s.strip()[:300]
+
+
 MAX_STEPS = 90  # 默认迭代预算（对齐 Hermes 父 Agent）；run() 优先用 cfg.agent.max_steps
+
+
+# ---------------------------------------------------------------------------
+# 打断信号监听（P1-D，对标 Hermes reverse-signal 立即终止）
+#
+#   用户常在中途说「停 / 算了 / 换一个 / 重新来 / 先别」来打断或改方向。若让这句话
+#   照常进入多步工具循环，模型会把它误当成新任务去执行，造成「问题处理自动中断」的
+#   混乱体感（用户明明想停，agent 却越跑越远）。这里在主循环启动前识别这类信号，
+#   直接温和收尾确认，做到「用户说停就真的停」。
+#   安全性：仅当消息以停止短语**开头**且长度 ≤ 60 字时才判定为打断（避免「帮我停掉
+#   后台服务」这类正常长指令被误杀），并排除带明显任务语义（含「请/帮我/如何/怎么」等
+#   前缀后的实质指令不以停止短语开头的情况）。
+# -----------------------------------------------------------------
+_REVERSE_SIGNAL_PHRASES = (
+    "停", "停止", "停下", "停一下", "停手", "别继续", "别做了", "别干了",
+    "算了", "算了吧", "不用了", "不用做", "取消", "取消任务", "中止", "放弃",
+    "等等", "等一下", "等下", "换一个", "换个", "重新来", "重来",
+    "不要继续", "先别", "暂停", "别管", "别搞", "别弄",
+)
+
+
+def detect_reverse_signal(text: str) -> bool:
+    """判断用户消息是否为「打断 / 改方向」信号（对标 Hermes 的反向信号识别）。"""
+    t = (text or "").strip()
+    if not t or len(t) > 60:
+        return False
+    return any(t.startswith(p) for p in _REVERSE_SIGNAL_PHRASES)
+
+
+
 
 # ---------------------------------------------------------------------------
 # 文本委派解析（弱模型兼容层）
@@ -601,6 +659,12 @@ class Agent:
 
         # 每轮复位本轮工具产出的 /media 链接收集（防止跨轮 / 跨子智能体累积污染）
         self._turn_media_links = []
+        # ---- P1-D 打断信号监听：用户明确说「停 / 算了 / 换个 / 重来」时直接温和收尾
+        #     避免「用户已叫停但 agent 仍在跑工具」的混乱体感，这是对齐并超越 Hermes 的关键点。
+        if detect_reverse_signal(user_message):
+            yield {"type": "status", "text": f"收到你的打断信号，已停止当前任务。"}
+            yield {"type": "done", "note": "reverse signal"}
+            return
         # ---- 1. 组装上下文（分层系统提示）----
         # 先发一个状态事件保活 SSE：知识库检索（向量相似度）/ 系统提示组装可能耗时
         # （尤其首轮需惰性加载数 GB 向量索引）。若首字节迟迟不发，前端 / 反向代理的读
@@ -853,6 +917,12 @@ class Agent:
         # read_file 硬熔断（v1.0.30）：强制批量读取，打断逐文件读取循环。
         _read_file_single_count: int = 0
         _read_file_final_granted: bool = True
+        # 幂等无进展检测（P0-C 超越 Hermes）：同一工具连续返回「内容相同」的结果
+        # （参数可不同，如反复 pwd / 反复列同一目录），即「成功但无进展」病理空转。
+        # 超过阈值注入自愈引导，不终止运行。
+        _no_progress_last: dict = {}
+        _no_progress_count: dict = {}
+        _no_progress_nudged: set = set()
         # 文本委派去重：防止弱模型反复输出同一个 delegate_to_agent(...) 空转步数。
         # 仅按子智能体名去重（忽略 task 文本差异）——弱模型常把同一子智能体换个说法反复
         # 重派，若按 task 前缀去重会把「换汤不换药」的重派误判为新委派，导致 stall 计数永不
@@ -907,6 +977,15 @@ class Agent:
                     max_tokens=self.cfg.agent.max_tokens,
                     tool_choice=_tool_choice,
                 )
+                # 回退链切换提示：若本次调用因某 Provider 故障自动切到了备用 Provider，
+                # 透传一个轻量 warning 给用户（对标 Hermes 的一次性 fallback notice），
+                # 让用户感知到「系统已自愈」而非「卡死/中断」。
+                # 用 getattr 兜底：自托管 LLMClient 才有 consume_fallback_messages，
+                # 测试桩/其它兼容实现未必实现该方法，不能因此中断主流程。
+                _consume = getattr(self.llm, "consume_fallback_messages", None)
+                if _consume:
+                    for _fb_msg in _consume():
+                        yield {"type": "warning", "message": _fb_msg}
                 # 防御：上游网关/代理可能返回「200 + 错误 JSON」而非抛异常，
                 # 归一化后缺少 choices；此处显式校验，避免下方 resp["choices"] 触发 KeyError
                 # 冲出 SSE 生成器（浏览器侧表现为「network error」）。
@@ -919,9 +998,12 @@ class Agent:
             except Exception as e:
                 # Provider 全部不可用 / 网络不可达 / 鉴权失败 / 响应畸形等：转为清晰错误事件，
                 # 避免异常冲出 SSE 生成器导致响应流中断（浏览器侧表现为「network error」）。
+                # 若整条回退链都失败（AllProvidersFailedError），附带可读的中文排查提示。
+                _detail = str(e)
+                if isinstance(e, AllProvidersFailedError) and e.hint:
+                    _detail = f"{e}\n（提示：{e.hint}）"
                 yield {"type": "error",
-                       "message": f"模型服务调用失败：{e}。请检查 LLM Provider 配置（API Key / base_url）"
-                                  f"或本地推理服务（Ollama / vLLM）是否可用。"}
+                       "message": f"模型服务调用失败：{_detail}"}
                 yield {"type": "done"}
                 return
             tool_calls = choice.get("tool_calls")
@@ -1216,6 +1298,7 @@ class Agent:
                                 f"[系统] 工具 `{name}` 已连续/重复失败（累计 "
                                 f"{_breaker_sig.get(_sig, 0)} 次）。请停止无意义重试："
                                 f"改用其他命令/工具、修正参数，或直接向用户说明该障碍。"
+                                f"\n{_self_heal_hint(name)}"
                             ),
                         })
                     # —— 工具步数接近软上限：提醒收尾，不终止 ——
@@ -1251,6 +1334,29 @@ class Agent:
                         # 不终止运行，模型可据此进入下一步。
                         result = (f"[系统] 该调用与上一次结果完全相同，已为你跳过重复执行。"
                                   f"请停止重复，按上述提示进入下一步或直接给出结论。")
+                    # ---- 幂等无进展检测（P0-C 超越 Hermes）----
+                    # 同一工具连续返回内容相同的结果（参数可不同），即「成功但无进展」循环，
+                    # 即便无失败、参数也变了，仍属病理空转。合成结果（[系统]/[工具错误]/[已拦截]）不计入。
+                    _nr = _normalize_result(result)
+                    _is_synthetic = (result or "").startswith(
+                        ("[系统", "[工具错误]", "[工具执行异常]", "[已拦截]"))
+                    if _nr and not _is_synthetic:
+                        if _no_progress_last.get(name) == _nr:
+                            _no_progress_count[name] = _no_progress_count.get(name, 0) + 1
+                        else:
+                            _no_progress_count[name] = 0
+                        _no_progress_last[name] = _nr
+                        if (_no_progress_count.get(name, 0) >= 3
+                                and name not in _no_progress_nudged):
+                            _no_progress_nudged.add(name)
+                            messages.append({
+                                "role": "system",
+                                "content": (
+                                    f"[系统] 检测到工具 `{name}` 连续多次返回相同结果"
+                                    f"（成功但无进展），说明当前做法在原地打转。\n"
+                                    f"{_self_heal_hint(name)}"
+                                ),
+                            })
                     # 所有分支均不硬终止：运行继续，由 max_steps 迭代预算统一兜底。
                     _stop = ""
                     if _stop:
@@ -1716,12 +1822,15 @@ class Agent:
                     traj_tools=traj_tools, steps_used=step + 1,
                     tool_total=tool_total, owner=owner,
                 ))
-            # 后台记忆反思：每轮成功回答后（opt-in），fork 廉价 LLM 调用把可沉淀的用户事实
-            # 写入长期记忆 MEMORY.md。同样用 create_task 触发，异常安全，不写脏记忆。
+            # 后台记忆反思：每轮成功回答后（opt-in），fork 廉价 LLM 调用做「合并反思」
+            # （用户事实 + 踩坑约束 + 可复用技能候选），沉淀进长期记忆 MEMORY.md，
+            # 并在命中阈值时回写技能。同样用 create_task 触发，异常安全，不写脏记忆。
             if self.cfg.agent.reflection_enabled:
                 asyncio.create_task(maybe_reflect(
                     self.cfg, self.llm,
                     user_message=user_message, answer=answer, owner=owner,
+                    traj_tools=traj_tools, steps_used=step + 1,
+                    tool_total=tool_total,
                 ))
             yield {"type": "done"}
             return

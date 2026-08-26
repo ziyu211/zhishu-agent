@@ -205,26 +205,30 @@ def build_system_prompt(
     if agent_name:
         system = build_agent_system_prompt(agent_name)
         system = system or cfg.system_prompt
-        # 继承用户知识库检索上下文（按 owner 隔离，防跨用户泄露）
-        extras: list[str] = []
-        if kb and query:
-            ctx_text = kb.build_context(query, top_k=5, owner=owner)
-            if ctx_text:
-                extras.append("【内部知识库检索结果，仅用于辅助回答】\n" + ctx_text)
-        # 继承用户长期记忆（MEMORY/USER/SOUL.md，按 owner 隔离）
+        # 继承用户长期记忆（MEMORY/USER/SOUL.md，按 owner 隔离）—— 先冻结进稳定前缀，
+        # 使「人设 + 用户记忆」成为稳定块，仅知识库检索结果随 query 变化（利于 prompt-cache）。
         if owner:
             mem_ctx = build_user_memory_prompt(cfg, owner)
             if mem_ctx:
-                extras.append(mem_ctx)
-        if extras:
-            system += "\n\n" + "\n\n".join(extras)
+                system += "\n\n" + mem_ctx
+        # 继承用户知识库检索上下文（按 owner 隔离，防跨用户泄露）
+        if kb and query:
+            ctx_text = kb.build_context(query, top_k=5, owner=owner)
+            if ctx_text:
+                system += "\n\n" + "【内部知识库检索结果，仅用于辅助回答】\n" + ctx_text
         return system, False
 
     stable = cfg.system_prompt
+    # 冻结精选长期记忆(MEMORY/USER/SOUL.md)进稳定前缀：内容（按 owner 隔离）不变则
+    # 前缀字节稳定，命中 prompt-cache，降低 token 成本与系统提示重建开销；
+    # 技能/KB/委派清单等高频变化部分留在 volatile 段。
+    frozen_memory = build_user_memory_prompt(cfg, owner)
+    if frozen_memory:
+        stable = stable + "\n\n" + frozen_memory
 
     volatile: list[str] = []
-    # 已启用技能 + 长期记忆（MEMORY/USER/SOUL.md，均按 owner 用户隔离）
-    extra = build_agent_context_prompt(cfg, owner=owner, is_admin=is_admin, user_role=user_role)
+    # 已启用技能（记忆已冻结进 stable，此处不再注入记忆，避免重复与破坏稳定前缀）
+    extra = build_agent_context_prompt(cfg, owner=owner, is_admin=is_admin, user_role=user_role, include_memory=False)
     if extra:
         volatile.append(extra)
     # 知识库检索增强
