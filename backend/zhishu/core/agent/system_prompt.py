@@ -25,7 +25,7 @@ _TOOL_GUIDANCE = """\
 引用（stored_path / /media/ URL / 文件名）即可，对比在服务端完成并返回差异报告；\
 千万不要自己 read_file 两份再人工对比，那既容易空转也不可靠。
 - parse_docx / parse_xlsx / parse_pdf 等旧插件已废弃，不要再调用，以免失败或空转。
-- 图片：作为视觉参考直接传给模型即可（系统不内置 OCR，无法提取图片内文字）。
+- 图片：作为视觉参考直接传给模型即可；若需图片内文字，用 read_file 读取该图片，系统已内置 OCR(tesseract+中文包) 会自动提取中文文字，无文字的纯图再作为视觉参考。
 - 自愈：若 read_file 或解析器遇到不支持的文件格式、编码、或需要标准工具没有的处理\
 逻辑而失败，可用 code_exec 编写 Python 直接读取并处理该文件（把 stored_path 作为 \
 path 参数传入，代码中用 os.environ['TARGET_FILE'] 读取，结果 print 到 stdout）。\

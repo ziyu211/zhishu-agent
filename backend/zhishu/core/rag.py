@@ -480,7 +480,7 @@ _TEXT_EXTS = {
     ".scss",
 }
 
-# 图片扩展名（进入对话作为视觉参考；系统不内置 OCR）
+# 图片扩展名（进入对话作为视觉参考；图片文字可由 read_file 经内置 OCR 提取）
 _IMAGE_EXTS_READ = {
     ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff", ".svg",
 }
@@ -644,7 +644,8 @@ _ZIP_BASED_DOC_EXTS = (".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".epub
 # （尤其旧版 OLE：.doc/.xls/.ppt 内部流名不统一，嗅探极易把真实 .xls/.ppt
 # 误判成 .doc；既然扩展名已明示类型，直接按扩展名派发即可，纠错交给 LibreOffice）。
 _TRUSTED_EXTS = _ZIP_BASED_DOC_EXTS + (".doc", ".xls", ".ppt", ".pdf",
-                                       ".rtf", ".epub", ".odt", ".ods", ".odp")
+                                       ".rtf", ".epub", ".odt", ".ods", ".odp",
+                                       ".wps", ".et", ".dps")
 
 
 def _sniff_office_ext(raw: bytes) -> str | None:
@@ -744,8 +745,8 @@ def _extract_pdf(raw: bytes) -> str:
       2) pypdf：若已安装则作为兜底（单页容错 + 空口令解密）；
       3) pdfminer.six：终极兜底，对中文/CID 字体更鲁棒；
       4) 三者都失败（通常是纯图片扫描件、无文字层）返回空字符串，
-         交由 read_file_text 渲染为图片或提示用户——本系统刻意不内置 OCR
-         （tesseract / PaddleOCR 等需原生二进制，跨平台部署不可控）。
+        交由 read_file_text 渲染为图片或提示用户——系统已内置 OCR
+        （tesseract + 中文包，扫描件/图片型 PDF 文字可由 _ocr_pdf 提取）。
     """
     # 1) PyMuPDF（环境已安装）为主提取器 —— 仅取文本层，不做 OCR
     try:
@@ -986,8 +987,8 @@ def read_file_text(filename: str, raw: bytes,
                 doc.close()
                 if media_urls:
                     raise ValueError(
-                        "该 PDF 为纯图片扫描件（无文字层）。系统为保持跨平台一致、不内置 OCR 识别，"
-                        "无法直接提取文字。已为您将各页渲染为图片，可在前端/以下地址查看内容：\n"
+                        "该 PDF 为纯图片扫描件（无文字层）。已尝试内置 OCR(tesseract+中文包) 仍未识别到文字，"
+                        "已为您将各页渲染为图片，可在前端/以下地址查看内容：\n"
                         + "\n".join(media_urls)
                         + "\n（如需文字版，请提供由文字处理软件导出的文本型 PDF，或先转换为可提取文本的格式。）")
             except ValueError:
@@ -996,7 +997,7 @@ def read_file_text(filename: str, raw: bytes,
                 pass
             raise ValueError(
                 "PDF 未提取到文本：文件可能已加密、受损，或为纯图片扫描件（无文字层）。"
-                "系统不内置 OCR 识别（跨平台兼容性考虑）；若为扫描件请提供文本型 PDF。")
+                "系统已内置 OCR(tesseract+中文包) 仍无有效文字，若为扫描件请提供由文字处理软件导出的文本型 PDF。")
         return text, "PDF"
 
     if ext in (".docx", ".doc"):
@@ -1053,6 +1054,26 @@ def read_file_text(filename: str, raw: bytes,
         raise ValueError(
             "暂不支持旧版 .ppt 格式（OLE 二进制结构，非 zip，标准库无法解析）。"
             "已尝试 LibreOffice 转换未成功。可选方案：请用户另存为 .pptx 后重新上传以获得完整解析。"
+        )
+
+    if ext in (".wps", ".et", ".dps"):
+        # WPS Office 旧版格式（.wps 文字 / .et 表格 / .dps 演示），同为 OLE 二进制结构，
+        # 与 .doc/.xls/.ppt 同理：优先 LibreOffice 无头转换，失败再尽力而为字节扫描，
+        # 仍失败才引导用户「另存为 .docx/.xlsx/.pptx」（WPS 一键导出，兼容最稳）。
+        target = {".wps": ".docx", ".et": ".xlsx", ".dps": ".pptx"}[ext]
+        label = {".wps": "WPS", ".et": "ET", ".dps": "DPS"}[ext]
+        conv = _libreoffice_convert(raw, filename, target, media_dir, owner)
+        if conv and conv[0].strip():
+            return conv[0], label
+        text = _extract_legacy_best_effort(raw)
+        if text.strip():
+            return text, label
+        raise ValueError(
+            f"暂不支持旧版 {ext}（WPS Office 二进制格式，标准库无法完整解析）。"
+            "已尝试 LibreOffice 转换与字节扫描，均未获得有效文本。"
+            "可选方案：① 请用户在 WPS 中「另存为 .docx/.xlsx/.pptx」后重新上传以获得完整解析；"
+            "② 或调用 code_exec 对文件做「尽力而为」的文本提取（扫描可打印字符），"
+            "路径通过 os.environ['TARGET_FILE'] 读取。"
         )
 
     if ext == ".pptx":
@@ -1270,7 +1291,7 @@ class KnowledgeBase:
         except ValueError as e:
             raise ValueError(f"重新解析失败：{e}")
         if not text.strip():
-            raise ValueError("重新解析后内容为空（可能是图片型文档；系统不内置 OCR，无法提取图片内文字，请转换为文本型文档）。")
+            raise ValueError("重新解析后内容为空（可能是图片型文档；系统已内置 OCR 仍无有效文字，请转换为文本型文档）。")
         # 删除旧分块与元数据（delete_document 会一并清理 raw_path 文件）
         self.store.delete_document(doc_id, owner=owner)
         # 回退旧图谱贡献（reparse 走的是 store.delete，不会触发 KB.delete_document）

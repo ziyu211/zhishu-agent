@@ -226,11 +226,14 @@ class AgentConfig:
     skills_auto_learn: bool = False
     skills_auto_learn_min_steps: int = 8    # 至少消耗的推理步数（含工具轮）
     skills_auto_learn_min_tools: int = 3    # 至少调用工具次数
-    # 图片输入模式（决定附件图片如何进入对话；系统始终不内置 OCR）：
-    #   auto   : 默认。把图片作为视觉参考以 base64 vision content part 传给模型
-    #            （即 Hermes 的 native 模式；若 provider 实际不支持视觉会报错，可改 text）
-    #   native : 同 auto，显式声明走视觉部件
-    #   text   : 关闭视觉，仅提示「模型无视觉能力」，图片内容不进入模型
+    # 图片输入模式（决定附件图片如何进入对话；图片内文字可经 read_file 内置 OCR 提取，
+    # 无文字/纯图则作为视觉参考）：
+    #   auto   : 默认。主模型支持视觉时，把图片以 base64 vision content part 传给模型
+    #            （Hermes 的 native 模式）；若 provider 实际不支持视觉会报错，可改 aux/text。
+    #   native : 同 auto，显式声明走视觉部件（要求主模型支持视觉）。
+    #   aux    : 主模型无视觉时，经辅助视觉 Provider 把图片「描述」成文字后注入上下文
+    #            （aux 视觉回退，v1.0.38）；若没有可用视觉 Provider 才提示无法分析图片。
+    #   text   : 同 aux（历史别名）。
     image_input_mode: str = "auto"
     # 会话内 nudge（对标 Hermes _memory_nudge_interval / _skill_nudge_interval）：
     # 每完成 N 次工具调用，向模型注入一条内部提醒，提示它把可复用的工作流沉淀为

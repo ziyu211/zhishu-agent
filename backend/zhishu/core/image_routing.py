@@ -1,8 +1,9 @@
 """智枢 —— 图片 / PDF 多模态输入路由（对标 Hermes 的图片与扫描件处理）。
 
-设计原则（与 Hermes 一致，且刻意避开任何原生 OCR 引擎）：
+设计原则（与 Hermes 一致：本模块只负责把图片/PDF「喂给模型」的路由，不抽取文字；
+  图片/扫描件内的文字提取由 read_file 经内置 OCR 另路完成）：
   1. **上传只落盘、不解析**：附件由 chat/attach 落到 media 目录，本模块只在「发送」时
-     决定如何把视觉信息交给模型，不抽取图片/扫描件内的文字。
+     决定如何把视觉信息交给模型，不抽取图片/扫描件内的文字（OCR 走 read_file）。
   2. **图片路由 image_input_mode（auto / native / text）**：
        - auto / native：若当前文本模型支持视觉，则把图片以 base64 data URL 作为
          ``image_url`` content part 附到用户消息（native 模式），并附加
@@ -228,17 +229,18 @@ def _is_local_url(base_url: Optional[str]) -> bool:
 
 
 def decide_image_input_mode(cfg, model_name: Optional[str]) -> str:
-    """对标 Hermes ``decide_image_input_mode``，返回 'native' 或 'text'。
+    """对标 Hermes ``decide_image_input_mode``，返回 'native' / 'aux'。
 
     Hermes 依据 model.supports_vision 决策；智枢未逐模型声明视觉能力，
     故以 ``agent.image_input_mode`` 为准：
-      - text  : 关闭视觉，仅提示"模型无视觉"；
-      - auto / native : 乐观走 native（把图片作为 vision content part 传入），
-        若 provider 实际不支持，回退链会报错并提示用户改配 ``image_input_mode: text``。
+      - auto / native : 主模型支持视觉，乐观走 native（图片作为 vision content part 传入）；
+        若 provider 实际不支持，回退链会报错并提示改配 aux/text。
+      - aux / text    : 主模型无视觉，经辅助视觉 Provider 把图片描述成文字注入上下文
+        （aux 视觉回退）；无可用视觉 Provider 时仅提示无法分析图片。
     """
     mode = (getattr(getattr(cfg, "agent", None), "image_input_mode", "auto") or "auto").lower()
-    if mode == "text":
-        return "text"
+    if mode in ("text", "aux"):
+        return "aux"
     return "native"
 
 

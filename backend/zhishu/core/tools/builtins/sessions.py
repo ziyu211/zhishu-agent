@@ -31,24 +31,27 @@ def _preview(text: str, n: int = _MAX_SNIPPET) -> str:
 
 
 def _discover(conn, query: str, limit: int, owner_prefix: str) -> str:
-    """跨会话 FTS 检索，按会话去重。FTS 不可用时降级 LIKE。
+    """跨会话 FTS 检索，按会话去重。FTS5(trigram) 主召回 + LIKE 兜底合并，最大化召回。
 
     安全：所有查询强制按 ``owner_prefix``（``{owner}:%``）过滤，
     仅检索当前用户自己的会话，防止跨用户历史泄露。
     """
-    rows: list[tuple] = []
+    fts_rows: list[tuple] = []
     try:
-        rows = conn.execute(
+        fts_rows = conn.execute(
             "SELECT session, content FROM turns_fts WHERE turns_fts MATCH ? "
             "AND session LIKE ? ORDER BY rank LIMIT 100",
             (query, owner_prefix)).fetchall()
     except sqlite3.OperationalError:
-        pass
-    if not rows:
-        rows = conn.execute(
+        fts_rows = []
+    like_rows: list[tuple] = []
+    # <3 字符的短查询 trigram 不索引，或 FTS 未命中时，用 LIKE 兜底（中文短词/专名也能召回）
+    if len(query) < 3 or not fts_rows:
+        like_rows = conn.execute(
             "SELECT session, content FROM turns WHERE content LIKE ? "
             "AND session LIKE ? ORDER BY id DESC LIMIT 100",
             (f"%{query}%", owner_prefix)).fetchall()
+    rows = list(fts_rows) + list(like_rows)
     if not rows:
         return f"[session_search] 未在历史会话中检索到「{query}」相关内容。"
     # 按会话去重（保留首个命中片段）

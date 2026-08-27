@@ -5,7 +5,7 @@
 统一复用 zhishu.core.rag.read_file_text 的 PDF 提取逻辑（pypdf 优先、
 pdfminer 兜底），保证「安装即可用、调用必返回内容」。
 无论模型调用 read_file 还是 parse_pdf，都能拿到一致的正文文本。
-对纯图片扫描件会返回空文本（系统不内置 OCR，扫描件请作为视觉参考或转换为文本型 PDF）。
+对纯图片扫描件若内置 OCR(tesseract+中文包) 仍无文字，会返回空文本（扫描件请作为视觉参考或转换为文本型 PDF）。
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def main() -> int:
         return 2
 
     if not text.strip():
-        sys.stderr.write("PDF 未提取到文本：可能已加密、受损，或为纯图片扫描件（系统不内置 OCR）。\n")
+        sys.stderr.write("PDF 未提取到文本：可能已加密、受损，或为纯图片扫描件（内置 OCR 仍无有效文字）。\n")
         return 3
     sys.stdout.write(text)
     return 0

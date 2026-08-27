@@ -20,7 +20,7 @@ from ..core.concurrency import get_limiter, ConcurrencyLimitError
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
 
-# 图片扩展名（进入对话框后作为视觉参考；系统不内置 OCR）
+# 图片扩展名（进入对话框后作为视觉参考；图片文字可由 read_file 经内置 OCR 提取）
 _IMAGE_EXTS = {
     ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tiff", ".svg",
 }
@@ -106,7 +106,7 @@ async def chat_attach(
         "parse_error": None,
     }
     if base["is_image"]:
-        # 图片统一作为视觉参考进入对话（系统不内置 OCR，无法提取图片内文字）
+        # 图片统一作为视觉参考进入对话（图片文字可由 read_file 经内置 OCR 提取）
         base["vision_available"] = True
     return base
 
@@ -146,7 +146,7 @@ async def chat_parse(
 ):
     """按 stored_path（附件绝对路径或 /media/ URL）解析**已落盘**的附件：
 
-    - 图片：系统不内置 OCR，无法提取图片内文字，统一返回提示（请作为视觉参考使用）；
+    - 图片：图片文字可由 read_file 经内置 OCR(tesseract+中文包) 提取；若确为无文字的纯图，统一返回提示（请作为视觉参考使用）；
     - 文档/文本：read_file_text 零依赖提取（docx/xlsx 标准库、pdf/csv/txt 等）。
 
     解析结果入库便于后续检索，返回 parsed/text/text_total/doc_id/needs_plugin/
@@ -179,10 +179,10 @@ async def chat_parse(
     owner = user.get("u")
     ext = os.path.splitext(abs_path)[1].lower()
     if ext in _IMAGE_EXTS:
-        # 图片：系统不内置 OCR，无法提取文字，仅作为视觉参考
+        # 图片：图片文字可由 read_file 经内置 OCR 提取；此处 /chat/parse 不自动入库，仅作视觉参考
         return {"parsed": False, "text": None, "text_total": None, "doc_id": None,
                 "needs_plugin": None,
-                "parse_error": "图片暂不支持文字提取（系统不内置 OCR），请作为视觉参考使用。",
+                "parse_error": "图片文字可经 read_file 内置 OCR(tesseract+中文包) 提取；此处 /chat/parse 不自动入库，请作为视觉参考，或用 read_file 获取文字版。",
                 "status": "error"}
     # 文档/文本：零依赖提取
     out = await run_in_threadpool(_parse_stored, ctx, abs_path, os.path.basename(abs_path), owner)

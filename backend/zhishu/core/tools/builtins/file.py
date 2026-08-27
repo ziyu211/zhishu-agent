@@ -95,7 +95,7 @@ def _resolve_read_path(path: str, owner: str | None = None,
     "【提速关键】读取『多个』文件时必须用 paths 列表一次读取（例：paths:[\"a.txt\",\"b.csv\",\"c.pdf\"]），"
     "严禁为每个文件单独调用本工具——每多一次调用就多一次 LLM 往返，这是处理变慢的主因。仅读单个文件才用 path。"
     "按需读取文件内容（对标 hermes 解耦/按需哲学），是读取用户上传文档的唯一入口；"
-    "支持 TXT/MD/CSV/TSV/JSON/代码/日志等文本，以及 Word(.doc/.docx)/Excel(.xls/.xlsx)/PPT(.ppt/.pptx)/"
+    "支持 TXT/MD/CSV/TSV/JSON/代码/日志等文本，以及 Word(.doc/.docx)/Excel(.xls/.xlsx)/PPT(.ppt/.pptx)/WPS(.wps/.et/.dps)/"
     "OpenDocument(.odt/.ods/.odp)/RTF(.rtf)/EPUB(.epub)/PDF(.pdf)——前者用标准库零依赖提取；"
     "旧版 .doc/.xls/.ppt 经 LibreOffice 无头转换后解析（无需用户另存）。支持分页(page)、"
     "行号(start_line/end_line)、字符预算(max_chars)。**如需读取文件末尾最近 N 行（如『最新100期』、日志尾部），"

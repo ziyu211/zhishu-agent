@@ -32,7 +32,37 @@ class MemoryStore:
             )
         except sqlite3.OperationalError:
             pass
+        # 优化（全量优化）：将默认 unicode61 分词器升级为 trigram，
+        # 以支持中文子串检索（unicode61 会把整段无空格中文当成一个 token，
+        # 致使「北京」搜不到「北京市朝阳区」）。trigram 生成 3-gram，对中/英子串
+        # 均友好；<3 字符的短查询由 recall/_discover 的 LIKE 兜底覆盖。
+        # 迁移幂等：已是 trigram 则跳过；否则 DROP+重建并从 turns 回填。
+        self._migrate_fts_tokenizer()
         self.conn.commit()
+
+    def _migrate_fts_tokenizer(self):
+        """将 turns_fts 的分词器升级为 trigram（支持中文子串检索）。幂等且安全。"""
+        try:
+            row = self.conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='turns_fts'"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        if row and row[0] and "trigram" in row[0].lower():
+            return  # 已是 trigram，无需迁移
+        try:
+            self.conn.execute("DROP TABLE IF EXISTS turns_fts")
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE turns_fts USING fts5("
+                "session, content, tokenize='trigram')"
+            )
+            rows = self.conn.execute("SELECT session, content FROM turns").fetchall()
+            if rows:
+                self.conn.executemany(
+                    "INSERT INTO turns_fts (session, content) VALUES (?,?)", rows
+                )
+        except sqlite3.OperationalError:
+            pass
 
     def append(self, session: str, role: str, content: str):
         self.conn.execute(
@@ -56,19 +86,42 @@ class MemoryStore:
         return [{"role": r, "content": c} for r, c in reversed(rows)]
 
     def recall(self, session: str, query: str, limit: int = 5) -> List[str]:
+        """检索会话流水（消息级）。
+
+        双路召回、合并去重：
+          - FTS5(trigram)：负责中/英子串快速检索（≥3 字符；中文整段也可命中）；
+          - LIKE 兜底：覆盖 <3 字符的短查询（trigram 不索引）及 FTS 偶发未命中，
+            保证中文短词/专有名词（如「报告」「API」）也能召回。
+        """
+        fts_rows: list = []
         try:
-            rows = self.conn.execute(
+            fts_rows = self.conn.execute(
                 "SELECT content FROM turns_fts WHERE turns_fts MATCH ? AND session=? "
                 "ORDER BY rank LIMIT ?",
                 (query, session, limit),
             ).fetchall()
         except sqlite3.OperationalError:
-            like = f"%{query}%"
-            rows = self.conn.execute(
-                "SELECT content FROM turns WHERE session=? AND content LIKE ? LIMIT ?",
-                (session, like, limit),
-            ).fetchall()
-        return [r[0] for r in rows]
+            fts_rows = []
+        like_rows: list = []
+        if len(query) < 3 or not fts_rows:
+            try:
+                like_rows = self.conn.execute(
+                    "SELECT content FROM turns WHERE session=? AND content LIKE ? LIMIT ?",
+                    (session, f"%{query}%", limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                like_rows = []
+        seen: set = set()
+        out: list = []
+        for r in fts_rows + like_rows:
+            c = r[0]
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
+            if len(out) >= limit:
+                break
+        return out
+
 
     def clear(self, session: str = None):
         if session:

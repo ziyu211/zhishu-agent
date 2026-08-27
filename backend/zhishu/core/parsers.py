@@ -13,8 +13,8 @@
     注册工具），实现「用户确认后直接安装」。
   * run_plugin_parse()：已安装插件后，直接调用其 helper 脚本完成解析。
 
-注：本系统刻意不内置 OCR（tesseract / PaddleOCR 等需原生二进制，跨平台部署不可控）。
-图片统一作为视觉参考进入对话，不再提供文字 OCR 提取能力。
+注：本系统已内置 OCR（tesseract + 中文包），图片/扫描 PDF 文字可由 read_file 经 OCR 提取；
+纯图片若无文字则作为视觉参考进入对话。
 """
 from __future__ import annotations
 
