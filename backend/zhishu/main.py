@@ -23,7 +23,7 @@ from .core.media import media_mime, content_disposition, resolve_media_fallback
 from . import api as api_pkg
 
 # 单一版本来源：登录页通过 /health 拉取此版本展示
-APP_VERSION = "1.0.44"
+APP_VERSION = "1.0.50"
 
 
 @asynccontextmanager
