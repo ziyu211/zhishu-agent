@@ -16,6 +16,9 @@ export const resetUserPassword = (uid: number, password: string) =>
   request<any>(`/api/v1/users/${uid}/password`, { method: 'POST', body: { password }, skipActAs: true })
 export const deleteUser = (uid: number) =>
   request<any>(`/api/v1/users/${uid}`, { method: 'DELETE', skipActAs: true })
+/** 管理员强制下线：抬高目标用户 password_epoch，使其全部既有令牌立即失效 */
+export const revokeUser = (uid: number) =>
+  request<any>(`/api/v1/users/${uid}/revoke`, { method: 'POST', skipActAs: true })
 
 export const usersApi = {
   listUsers,
@@ -24,4 +27,5 @@ export const usersApi = {
   updateUser,
   resetUserPassword,
   deleteUser,
+  revokeUser,
 }

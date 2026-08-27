@@ -31,8 +31,14 @@ DISABLED_KEY = {
 
 
 def sanitize_name(name: str) -> str:
-    """模块名只允许 [A-Za-z0-9_.-]，避免路径穿越。"""
-    return re.sub(r"[^A-Za-z0-9_.\-]", "", (name or "").strip())[:64]
+    """模块名只允许 [A-Za-z0-9_.-] 与中文字符（\u4e00-\u9fff），避免路径穿越。
+
+    允许中文：用户常以中文命名技能（如「写周报」「报销助手」），若把中文滤空
+    会导致 create_skill / POST /skills 以中文名保存时报「名称非法」，模型被迫
+    改用 create_tool（会话临时）或谎称成功——正是「保存技能后技能页看不到」的
+    促成因素之一。中文字符不含路径分隔符，无穿越风险。
+    """
+    return re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]", "", (name or "").strip())[:64]
 
 
 def _state_path() -> str:

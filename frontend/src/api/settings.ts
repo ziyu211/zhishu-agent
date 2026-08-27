@@ -17,6 +17,7 @@ export const updateSettings = (body: {
     shell_enforce_allowlist: boolean
     enable_audit: boolean
     enable_redact: boolean
+    code_exec_network_isolated: boolean
   }>
 }) => request<SettingsResp>('/api/v1/settings', { method: 'POST', body, skipActAs: true })
 

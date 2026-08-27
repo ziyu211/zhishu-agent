@@ -69,7 +69,8 @@ export interface RemoteModelsResp {
 // ─── 用户管理 ───────────────────────────────────────────
 export interface UserItem {
   id: number
-  user: string
+  username: string       // 后端 users 列表实际返回 username（security._row 直接 dict(row)）
+  user?: string          // 兼容：auth /me 可能返回 user 字段（app.setUser 已归一化）
   role: string
   role_label?: string
   display_name?: string
@@ -206,6 +207,8 @@ export interface SecuritySettings {
   outbound_allow: boolean
   /** 是否允许代码执行 */
   allow_code_exec: boolean
+  /** code_exec 沙箱出网隔离（与全局 outbound_allow 解耦；默认 false=允许出网） */
+  code_exec_network_isolated?: boolean
   /** Shell 执行总闸 */
   allow_shell: boolean
   /** 是否强制 Shell 白名单 */
@@ -234,11 +237,14 @@ export interface AuditResp {
 export interface SkillItem {
   name: string
   description?: string
+  version?: string
   enabled: boolean
   source?: string
   owner?: string
   shared?: boolean
   share_with?: string[]
+  use_count?: number        // read_skill 命中次数（技能冷热观察）
+  last_used?: string        // 最近一次使用时间
 }
 export interface PluginItem {
   name: string
@@ -249,17 +255,22 @@ export interface PluginItem {
   owner?: string
   shared?: boolean
   share_with?: string[]
+  tool_count?: number        // 后端插件列表返回已注册工具数
 }
 export interface McpItem {
   name: string
   description?: string
   enabled: boolean
-  status?: string
-  tools?: string[]
-  config?: Record<string, any>
   owner?: string
   shared?: boolean
   share_with?: string[]
+  // 后端 /mcp 实际返回（modules._list_modules + status 合并）：
+  connected: boolean
+  tool_count: number
+  error?: string | null
+  command?: string
+  args?: string[]
+  env?: Record<string, string>   // 已脱敏（值 ******）
 }
 export interface ToolItem {
   name: string
@@ -290,9 +301,7 @@ export interface AgentItem {
   model?: string
   max_steps?: number
   tools?: string[] | 'all' | 'none'
-  tools_mode?: 'all' | 'none' | 'custom'
-  created_at?: string
-  tool_count?: number
+  sub_agents?: any[]          // 后端 /agents 返回的子智能体配置
   owner?: string
   shared?: boolean
   share_with?: string[]

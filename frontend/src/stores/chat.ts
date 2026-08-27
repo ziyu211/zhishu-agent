@@ -446,7 +446,9 @@ export const useChatStore = defineStore('chat', {
       a.needs_plugin = r.needs_plugin ?? null
       a.text_total = r.text_total ?? null
       a.parse_error = r.parse_error
-      a.status = r.parse_error
+      // 图片是「视觉参考」，/chat/parse 的信息性提示（OCR 指引）不是错误：
+      // 图片附件即使带 parse_error 也保持 stored 状态，避免对话框标红叉。
+      a.status = r.parse_error && !a.is_image
         ? 'error'
         : r.needs_plugin
           ? 'done'

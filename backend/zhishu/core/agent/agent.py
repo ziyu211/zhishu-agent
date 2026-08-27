@@ -80,6 +80,48 @@ def _build_consolidation_nudge(name: str, count: int) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# 技能保存意图闭环校验（v1.0.43 · 修复「对话说保存成功、技能页却看不到」）
+#
+# 背景：系统提示虽已声明「保存/创建技能必须用 create_skill」，但模型仍可能误用
+# create_tool（会话临时 dyn_，不进技能库）或未真正调用工具就宣称成功，造成假成功。
+# 服务端兜底：用户消息命中「保存/创建技能」意图，而本回合轨迹中没有成功的
+# create_skill（返回含「已持久化」）→ 在最终回复尾部如实纠正，保证用户不被误导。
+# ---------------------------------------------------------------------------
+_SKILL_SAVE_INTENT_RE = re.compile(
+    r"(保存|固化|沉淀|收录|做成|创建|定义).{0,6}(技能|skill)|"
+    r"(技能|skill).{0,6}(保存|固化|沉淀|收录|做成|创建)|"
+    r"(save|create|persist).{0,12}(skill)|"
+    r"(skill).{0,12}(save|create|persist)",
+    re.IGNORECASE,
+)
+_SKILL_SAVE_CORRECTION = (
+    "\n\n---\n⚠️ **提示**：本轮未检测到技能成功写入技能库（需要 create_skill 返回"
+    "「已持久化」才算保存成功）。若您刚才要求保存技能，请回复「请把刚才的流程保存为技能」"
+    "让我重试，或到「技能」页手动新建；我会在真正落盘后给您确认。"
+)
+
+
+def _skill_save_intent(text: str) -> bool:
+    """用户消息是否含「保存/创建技能」意图（纯函数，便于单测）。"""
+    return bool(text and _SKILL_SAVE_INTENT_RE.search(text))
+
+
+def _skill_saved_ok(traj_tools) -> bool:
+    """本回合轨迹中是否已有一次成功的 create_skill 落盘。"""
+    for t in traj_tools or []:
+        if t.get("name") == "create_skill" and "已持久化" in (t.get("result") or ""):
+            return True
+    return False
+
+
+def _guard_skill_save_claim(answer: str, user_message: str, traj_tools) -> str:
+    """最终回复防「假成功」：命中技能保存意图且未真实落盘 → 尾部追加如实纠正。"""
+    if _skill_save_intent(user_message) and not _skill_saved_ok(traj_tools):
+        return (answer or "").rstrip() + _SKILL_SAVE_CORRECTION
+    return answer
+
+
+# ---------------------------------------------------------------------------
 # code_exec 硬熔断（v1.0.29）
 #
 # 背景：v1.0.27 的「同工具合并提醒」仅注入一次（_consolidate_nudged 去重），对国产网关
@@ -1803,6 +1845,9 @@ class Agent:
             # 也避免「最终回答生成期间长时间无 SSE 业务事件」导致前端空闲计时器误判断流
             # （曾表现为长工具循环后「对话不出结果，需重发才出」）。
             answer = final
+            # 技能保存意图闭环校验：用户要求保存技能但未真实落盘 → 尾部如实纠正
+            # （防模型误用 create_tool / 谎称成功，保证「技能页看不到」不再发生）。
+            answer = _guard_skill_save_claim(answer, user_message, traj_tools)
             # 若本轮 create_team 成功创建了团队，把醒目前缀拼到最终回复开头，确保用户一定看到
             _roster = getattr(self, "_team_roster_preface", "")
             if _roster and not answer.lstrip().startswith("## ✅ 已创建多智能体团队"):

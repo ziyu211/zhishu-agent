@@ -4,12 +4,33 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 
 from ..base import tool, get_current_user
 
 
 def _sanitize(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.\-]", "", (name or "").strip())[:64]
+    """技能目录名：允许 [A-Za-z0-9_.-] 与中文字符（用户常以中文命名技能，
+    如「写周报」；若滤空会迫使模型改用 create_tool 或谎称保存成功）。
+    中文字符无路径分隔风险，与 runtime.sanitize_name 口径一致。"""
+    return re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]", "", (name or "").strip())[:64]
+
+
+def _touch_skill(base: str, name: str) -> None:
+    """技能使用统计（对标 Hermes `skill_usage.py`）：read_skill 命中时自增
+    use_count 并更新 last_used，支撑技能冷热排序与运营观察。
+    失败静默——统计绝不影响技能读取主流程。"""
+    try:
+        fp = os.path.join(base, "skills", _sanitize(name), "module.json")
+        if not os.path.isfile(fp):
+            return
+        meta = json.load(open(fp, encoding="utf-8"))
+        meta["use_count"] = int(meta.get("use_count") or 0) + 1
+        meta["last_used"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 @tool(
@@ -43,12 +64,14 @@ async def read_skill(args: dict, ctx) -> str:
     md = os.path.join(d, "SKILL.md")
     if os.path.isfile(md):
         try:
+            _touch_skill(base, name)  # 使用统计（失败静默）
             return open(md, encoding="utf-8").read()[:8000]
         except Exception as e:
             return f"[read_skill] 读取失败：{e}"
     meta = os.path.join(d, "module.json")
     if os.path.isfile(meta):
         try:
+            _touch_skill(base, name)  # 使用统计（失败静默）
             return (json.load(open(meta, encoding="utf-8")).get("content") or "（无内容）")[:8000]
         except Exception as e:
             return f"[read_skill] 读取失败：{e}"
@@ -109,6 +132,10 @@ async def create_skill(args: dict, ctx) -> str:
     try:
         with open(os.path.join(d, "module.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+        # 与 API 层 write_meta 口径一致：正文同时写入 SKILL.md（Hermes 渐进披露约定，
+        # read_skill 优先读此文件；导出 zip 时也被 Hermes 直接识别，保证互通）。
+        with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write(content)
     except Exception as e:
         return f"[create_skill] 写入失败：{e}"
 

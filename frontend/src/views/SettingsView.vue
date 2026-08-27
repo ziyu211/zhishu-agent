@@ -28,12 +28,14 @@ const security = reactive({
   shell_enforce_allowlist: true,
   enable_audit: true,
   enable_redact: true,
+  code_exec_network_isolated: false,
 })
 const securityLoading = ref(false)
 const securityFields: { key: keyof typeof security; label: string; desc: string }[] = [
   { key: 'allow_private_fetch', label: '内网模型探测', desc: '允许从内网/私有地址（如本地 Ollama/vLLM）拉取模型列表' },
   { key: 'outbound_allow', label: '工具出网', desc: '允许联网工具（网页搜索、外部 API 调用）访问公网' },
   { key: 'allow_code_exec', label: '代码执行', desc: '允许智能体生成并执行 Python 代码片段（沙箱隔离）' },
+  { key: 'code_exec_network_isolated', label: '代码执行出网隔离', desc: '开启后 code_exec 沙箱禁止访问外部网络（与全局工具出网解耦，默认关闭=允许出网）' },
   { key: 'allow_shell', label: 'Shell 执行', desc: '允许定时任务与 terminal_run 工具执行 Shell 命令' },
   { key: 'shell_enforce_allowlist', label: 'Shell 白名单', desc: '强制 Shell 命令可执行文件白名单（关闭仅保留高危拒绝清单）' },
   { key: 'enable_audit', label: '审计日志', desc: '记录关键操作审计日志（落库 zhishu_audit.db）' },

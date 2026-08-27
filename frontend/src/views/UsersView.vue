@@ -231,6 +231,24 @@ async function removeUser(u: any) {
   }
 }
 
+/** 管理员强制下线：抬高 password_epoch，使其全部既有令牌立即失效 */
+function revokeUser(u: any) {
+  dialog.warning({
+    title: '强制下线',
+    content: `确认强制下线用户「${u.username}」？其所有已登录会话的令牌将立即失效，需重新登录。`,
+    positiveText: '强制下线',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      try {
+        await api.revokeUser(u.id)
+        message.success(`已强制下线「${u.username}」`)
+      } catch (e: any) {
+        message.error(e?.message || '操作失败')
+      }
+    },
+  })
+}
+
 function toggleSelectAll() {
   const pageIds = pagedUsers.value.map((u) => u.id)
   const allSelected = pageIds.every((id) => selectedIds.value.includes(id))
@@ -395,6 +413,7 @@ onMounted(load)
                 <NButton v-if="canWrite && u.status !== 'active'" size="tiny" quaternary @click="setStatus(u, 'active')">启用</NButton>
                 <NButton v-if="canWrite && u.status === 'active'" size="tiny" quaternary @click="setStatus(u, 'disabled')">停用</NButton>
                 <NButton v-if="canWrite" size="tiny" quaternary @click="openReset(u)">重置密码</NButton>
+                <NButton v-if="canWrite && app.isAdmin" size="tiny" quaternary type="warning" @click="revokeUser(u)">强制下线</NButton>
                 <NPopconfirm v-if="canWrite" @positive-click="removeUser(u)">
                   <template #trigger><NButton size="tiny" quaternary type="error">删除</NButton></template>
                   确认删除用户「{{ u.username }}」？

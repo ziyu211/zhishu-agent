@@ -248,7 +248,7 @@ watch(actAs, () => load())
     <NModal v-model:show="showModal" :title="editing ? '编辑技能' : '新建技能'" preset="card" style="width: 640px; max-width: 92vw;">
       <NForm>
         <NFormItem label="名称">
-          <NInput v-model:value="form.name" :disabled="!!editing" placeholder="技能目录名（英文/数字/.-_）" />
+          <NInput v-model:value="form.name" :disabled="!!editing" placeholder="技能目录名（中英文/数字/.-_，如 写周报）" />
         </NFormItem>
         <NFormItem label="描述">
           <NInput v-model:value="form.description" placeholder="一句话描述这个技能的用途" />

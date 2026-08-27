@@ -314,6 +314,21 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
     return result
 
 
+def _looks_like_skill_save(name: str, desc: str) -> bool:
+    """探测 create_tool 调用是否实为「保存/创建技能」意图。
+
+    服务端硬性护栏：即使模型未遵守系统提示，误用 create_tool 保存技能也会在此
+    被拦下并指引改道 create_skill，杜绝「对话说保存成功、技能页却看不到」的
+    假成功链路。判定口径：工具名/描述同时含「技能/skill」与持久化动词
+    （保存/固化/沉淀/收录/save/persist/create）。「生成技能题」这类无持久化
+    意图的调用不受影响。
+    """
+    blob = f"{name} {desc}".lower()
+    if "技能" not in blob and "skill" not in blob:
+        return False
+    return any(v in blob for v in ("保存", "固化", "沉淀", "收录", "save", "persist", "create"))
+
+
 @tool(
     "create_tool",
     "把一段 Python 注册为可复用的动态工具（对标 Hermes 自创持久工具）。"
@@ -346,6 +361,12 @@ async def create_tool(args: dict, ctx: ToolContext) -> str:
         return "[create_tool] 缺少 code 参数"
     tname = _DYN_PREFIX + name
     desc = args.get("description") or f"用户自定义工具 {name}（由 code_exec 引擎运行）"
+    if _looks_like_skill_save(name, desc):
+        return ("[create_tool] 检测到技能保存意图（工具名/描述含「技能/skill」与保存/创建语义）："
+                "本工具注册的是会话内临时 dyn_ 工具，重启即清空、**不会**出现在「功能模块技能」页面。"
+                "用户要求『保存/创建技能』时必须改用 create_skill 工具"
+                "（把技能正文 Markdown 写入磁盘技能库，技能页可见、重启保留、跨会话复用）。"
+                "请重新调用 create_skill(name=<技能名>, content=<技能正文>, description=<简介>) 完成保存。")
     params = args.get("parameters") or {"type": "object", "properties": {}, "required": []}
     sec = getattr(ctx, "security", None)
     mem = getattr(sec, "code_exec_mem_limit_mb", 0) or 0

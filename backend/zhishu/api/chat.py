@@ -14,7 +14,6 @@ from starlette.concurrency import run_in_threadpool
 from .auth import require_auth
 from ..context import get_ctx
 from ..core.agent import Agent, build_context_engine
-from ..core import parsers
 from ..core.rag import read_file_text
 from ..core.concurrency import get_limiter, ConcurrencyLimitError
 
@@ -51,19 +50,6 @@ def _save_upload(raw: bytes, filename: str, owner: str | None = None) -> tuple[s
         f.write(raw)
     rel = os.path.join("attachments", owner_dir, uid_dir, safe_name)
     return rel, abs_path
-
-
-def _need_plugin_payload(name: str | None) -> dict | None:
-    if not name:
-        return None
-    info = parsers.PARSE_PLUGINS.get(name)
-    if not info:
-        return {"name": name, "description": "", "version": ""}
-    return {
-        "name": info["name"],
-        "description": info["description"],
-        "version": info.get("version", ""),
-    }
 
 
 from ..core.upload import read_upload_limited

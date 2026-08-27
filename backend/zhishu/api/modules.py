@@ -120,6 +120,10 @@ def _list_modules(sub: str, user: Optional[dict] = None) -> list:
         }
         if sub == "plugins":
             item["tool_count"] = len(info.get("tools") or [])
+        if sub == "skills":
+            # 技能使用统计（对标 Hermes skill_usage）：read_skill 命中自增
+            item["use_count"] = int(info.get("use_count") or 0)
+            item["last_used"] = info.get("last_used")
         if sub == "mcp":
             item["command"] = info.get("command", "")
             item["args"] = info.get("args", [])
