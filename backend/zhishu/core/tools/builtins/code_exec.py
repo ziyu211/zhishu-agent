@@ -260,6 +260,12 @@ async def code_exec(args: dict, ctx: ToolContext) -> str:
     _used_singular = bool(code) and not snippets
     if not code:
         return "[code_exec] 缺少 code / snippets 参数"
+    # 服务端硬护栏：拦截「用 Python 把技能写进磁盘」的绕道（应改用对话层 create_skill）。
+    if _code_writes_skill(code):
+        return ("[code_exec] 检测到你正用 Python 把技能写入磁盘（绕道保存技能）：本工具是代码执行沙箱，"
+                "不应在脚本里直接写技能库。请改用对话层 **create_skill** 工具（name + content 一步到位），"
+                "技能会被正确登记到「功能模块技能」列表、重启保留、跨会话复用。"
+                "请勿用 code_exec/file_write 写技能文件——那样既易因三引号嵌套报错，又常导致技能页看不到。")
     sec = getattr(ctx, "security", None)
     default_to = getattr(sec, "code_exec_timeout", 30) or 30
     mem = getattr(sec, "code_exec_mem_limit_mb", 0) or 0
@@ -327,6 +333,26 @@ def _looks_like_skill_save(name: str, desc: str) -> bool:
     if "技能" not in blob and "skill" not in blob:
         return False
     return any(v in blob for v in ("保存", "固化", "沉淀", "收录", "save", "persist", "create"))
+
+
+def _code_writes_skill(code: str) -> bool:
+    """探测 code_exec 脚本是否实为正把技能写进磁盘（绕道保存技能）。
+
+    典型绕道路径：模型先 code_exec/file_write 把技能正文写成 skills/<name>/SKILL.md，
+    再谎称「创建成功」。本护栏在代码执行前拦下，强制改道对话层 create_skill 工具。
+    判定口径（任一成立即拦）：
+      ① 脚本写入技能库目录 data/skills（"skills/" 子串 + 写文件操作）；
+      ② 正文同时含「技能/skill」与保存/创建动词，且确实在写文件（.md/open/write）。
+    """
+    low = (code or "").lower()
+    writes_file = any(k in code for k in ("open(", "write_text", "w+", "'w'", '"w"', "mkdir"))
+    if writes_file and ("skills/" in low or "data/skills" in low or "/skills" in low):
+        return True
+    if writes_file and ("技能" in code or "skill" in low) and any(
+        v in low for v in ("保存", "固化", "沉淀", "创建", "save", "persist", "create")
+    ):
+        return True
+    return False
 
 
 @tool(

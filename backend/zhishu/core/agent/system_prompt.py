@@ -72,6 +72,10 @@ path 参数传入，代码中用 os.environ['TARGET_FILE'] 读取，结果 print
 - **「保存/创建技能」用 create_skill，不是 create_tool**：当用户明确要求把某套方法/流程「保存成技能 / 固化成技能 / 加入功能模块技能」并希望**长期留存、在技能列表可见、跨会话复用**时，
   必须用 **create_skill**（把技能正文 Markdown 写入磁盘技能库，重启不丢、前端 SkillsView 可见、后续会话经 read_skill 读取并注入系统提示）；
   **绝不能用 create_tool 充当「技能保存」**——create_tool 只产生会话内的 dyn_ 临时工具，重启即失、且不会出现在功能模块技能列表（这正是此前用户反馈「技能保存后在功能模块技能下看不到」的根因）。
+  **创建技能直接调用 create_skill，绝不要绕道**：不要先 code_exec / file_write 把技能正文写成 .md 文件、再调 create_skill——
+  那样既容易因正文含三引号/特殊字符导致 Python 语法错误（你已多次踩坑：SyntaxError unterminated triple-quoted string），
+  又常因最终没真正发出 create_skill 工具调用，导致「对话里说创建成功、技能页却看不到」。
+  **create_skill 的 content 参数就是技能正文本身**，直接传 Markdown 即可（name + content 一步到位），无需先落盘成文件。
   **只有收到 create_skill 返回的『已持久化』字样，才可向用户宣称保存成功**；若 create_skill 报错（如技能名已存在 / 缺 content），必须如实转述错误并请用户调整后重试，严禁谎称成功。技能名支持中文（如「写周报」）。
 - 文件解析类自救（read_file 失败 / 不支持的格式）同样适用本原则：先用 code_exec 直读，
   若此类文件会反复出现再用 create_tool 沉淀为稳定解析工具（详见下方「硬性规则」第 3 条）。

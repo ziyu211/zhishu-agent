@@ -88,22 +88,47 @@ def _build_consolidation_nudge(name: str, count: int) -> Optional[str]:
 # create_skill（返回含「已持久化」）→ 在最终回复尾部如实纠正，保证用户不被误导。
 # ---------------------------------------------------------------------------
 _SKILL_SAVE_INTENT_RE = re.compile(
-    r"(保存|固化|沉淀|收录|做成|创建|定义).{0,6}(技能|skill)|"
-    r"(技能|skill).{0,6}(保存|固化|沉淀|收录|做成|创建)|"
-    r"(save|create|persist).{0,12}(skill)|"
-    r"(skill).{0,12}(save|create|persist)",
+    # 动词（保存/创建/…）与「技能」之间允许最长 40 字符间隔——
+    # 覆盖「创建 SVIPFTP 技能」这类技能名嵌在动词与名词之间的真实语序（此前 .{0,6} 漏判）。
+    r"(保存|固化|沉淀|收录|做成|创建|定义|新增|登记|新建|写|存).{0,40}(技能|skill)|"
+    r"(技能|skill).{0,40}(保存|固化|沉淀|收录|做成|创建|定义|新增|登记|新建)|"
+    r"(save|create|persist|new|add|register|write).{0,40}(skill)|"
+    r"(skill).{0,40}(save|create|persist|new|add|register|write)",
+    re.IGNORECASE,
+)
+# 模型在最终回复里「断言技能已创建成功」的强标记（用于识别谎报假成功）。
+# 排除：含真实工具返回的「已持久化」字样、或引用历史技能（之前/上次/此前创建）。
+_SKILL_SUCCESS_CLAIM_RE = re.compile(
+    r"(创建完成|创建成功|已成功创建|技能已成功创建|保存成功|已保存为技能|"
+    r"已加入技能|已加入功能模块技能|已固化成技能|技能创建成功|成功创建技能|技能已创建)",
     re.IGNORECASE,
 )
 _SKILL_SAVE_CORRECTION = (
-    "\n\n---\n⚠️ **提示**：本轮未检测到技能成功写入技能库（需要 create_skill 返回"
-    "「已持久化」才算保存成功）。若您刚才要求保存技能，请回复「请把刚才的流程保存为技能」"
-    "让我重试，或到「技能」页手动新建；我会在真正落盘后给您确认。"
+    "\n\n---\n⚠️ **提示**：本轮对话里我**并未真正把技能写入技能库**（需要 create_skill 工具返回"
+    "「已持久化」才算保存成功，且前端「技能」页才会显示）。\n"
+    "若您确实需要保存该技能，请直接回复「请把上面的方法保存为技能」让我用 create_skill 工具重新保存——"
+    "我会一步到位（name + content 直接传入，不再用 code_exec/file_write 绕道），落盘后给您确认，"
+    "您即可在「技能」页看到它。"
 )
 
 
 def _skill_save_intent(text: str) -> bool:
     """用户消息是否含「保存/创建技能」意图（纯函数，便于单测）。"""
     return bool(text and _SKILL_SAVE_INTENT_RE.search(text))
+
+
+def _skill_success_claimed(answer: str) -> bool:
+    """最终回复是否断言「技能已创建成功」（识别模型把『计划/两步法』当成已完成）。
+
+    规避误报：① 回复含真实工具返回的「已持久化」→ 不算谎报；② 引用历史技能
+    （之前/上次/此前创建）→ 非本轮回填，不纠错。"""
+    if not answer:
+        return False
+    if "已持久化" in answer:
+        return False
+    if re.search(r"(之前|上次|此前|以前|上回|刚才已经|已经创建过)", answer):
+        return False
+    return bool(_SKILL_SUCCESS_CLAIM_RE.search(answer))
 
 
 def _skill_saved_ok(traj_tools) -> bool:
@@ -115,8 +140,15 @@ def _skill_saved_ok(traj_tools) -> bool:
 
 
 def _guard_skill_save_claim(answer: str, user_message: str, traj_tools) -> str:
-    """最终回复防「假成功」：命中技能保存意图且未真实落盘 → 尾部追加如实纠正。"""
-    if _skill_save_intent(user_message) and not _skill_saved_ok(traj_tools):
+    """最终回复防「假成功」双路判定：
+    - 用户要求保存技能但未真实落盘 → 尾部纠正；
+    - 或模型自报「创建成功」但本回合无成功 create_skill（且非引用历史技能）→ 同样纠正。
+    二者任一成立即纠错，杜绝「对话说成功、技能页看不到」。
+    """
+    if _skill_saved_ok(traj_tools):
+        return answer
+    triggered = _skill_save_intent(user_message) or _skill_success_claimed(answer)
+    if triggered:
         return (answer or "").rstrip() + _SKILL_SAVE_CORRECTION
     return answer
 
