@@ -142,6 +142,13 @@ def test_svipftp_real_repro():
     check(_code_writes_skill(bad1), "code_exec 写 skills/ 目录 → 识别为绕道")
     check(_code_writes_skill(bad2), "code_exec 写『技能』文件 → 识别为绕道")
     check(not _code_writes_skill(good), "code_exec 写普通 csv → 放行")
+    # v1.0.50 加固：把 create_skill / create_tool 当 Python 函数调用（本次逃逸主路径）
+    bad3 = "create_skill(name='SVIPFTP 自动处理', content=md, description='自动处理 FTP')"
+    bad4 = "from zhishu.skills import create_skill\ncreate_skill(name='x', content='y')"
+    good2 = "def create_skill_helper():\n    print('本地辅助函数，非系统工具')"
+    check(_code_writes_skill(bad3), "code_exec 直接调用 create_skill(...) → 识别为绕道")
+    check(_code_writes_skill(bad4), "code_exec import create_skill 后调用 → 识别为绕道")
+    check(not _code_writes_skill(good2), "仅定义 create_skill_helper 本地函数 → 放行（非系统工具调用）")
     # create_tool 误用仍拦截
     check(_looks_like_skill_save("svipftp_skill", "保存 FTP 上传技能"),
           "create_tool 名/描述含技能+保存 → 拦截改道")

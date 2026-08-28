@@ -336,13 +336,15 @@ def _looks_like_skill_save(name: str, desc: str) -> bool:
 
 
 def _code_writes_skill(code: str) -> bool:
-    """探测 code_exec 脚本是否实为正把技能写进磁盘（绕道保存技能）。
+    """探测 code_exec 脚本是否实为「绕道保存技能 / 工具」。
 
-    典型绕道路径：模型先 code_exec/file_write 把技能正文写成 skills/<name>/SKILL.md，
-    再谎称「创建成功」。本护栏在代码执行前拦下，强制改道对话层 create_skill 工具。
-    判定口径（任一成立即拦）：
-      ① 脚本写入技能库目录 data/skills（"skills/" 子串 + 写文件操作）；
-      ② 正文同时含「技能/skill」与保存/创建动词，且确实在写文件（.md/open/write）。
+    典型绕道路径：
+      ① 把技能正文写成 data/skills/<name>/SKILL.md（写文件 + skills 目录）；
+      ② 正文含「技能/skill」+ 保存/创建动词且确实在写文件；
+      ③【v1.0.50 加固】把 create_skill / create_tool 当 Python 函数调用
+         （如 create_skill(name=..., content=...) 或 from ... import create_skill），
+         而非改用对话层系统工具——这正是 v1.0.44 后仍逃逸、导致 code_exec 语法报错的主路径。
+    任一成立即拦下，强制改道对话层 create_skill 工具（name + content 一步到位）。
     """
     low = (code or "").lower()
     writes_file = any(k in code for k in ("open(", "write_text", "w+", "'w'", '"w"', "mkdir"))
@@ -351,6 +353,13 @@ def _code_writes_skill(code: str) -> bool:
     if writes_file and ("技能" in code or "skill" in low) and any(
         v in low for v in ("保存", "固化", "沉淀", "创建", "save", "persist", "create")
     ):
+        return True
+    # ③ 试图把系统工具当函数调用 / 导入——这是本次逃逸的核心：模型在 code_exec 里
+    # 直接 create_skill(...) 或 import create_skill，既非合法系统工具调用，又常因
+    # 三引号嵌套 / 参数畸形报语法错。一律拦下并引导改用对话层 create_skill 工具。
+    if re.search(r"\bcreate_skill\s*\(", code) or re.search(r"\bcreate_tool\s*\(", code):
+        return True
+    if re.search(r"(?:^|\n)\s*(?:import|from)\s+.*\bcreate_skill\b", code):
         return True
     return False
 
