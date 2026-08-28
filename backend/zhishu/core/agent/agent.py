@@ -38,6 +38,7 @@ from ..agents_runtime import (
 from ..modules.runtime import can_view, filter_tool_specs
 from ..config import ZhishuConfig, classify_model
 from .system_prompt import build_system_prompt
+from .json_repair import repair_tool_args as _repair_tool_args
 from .download_guard import (
     guard_download_links,
     process_media_tags,
@@ -306,8 +307,6 @@ def detect_reverse_signal(text: str) -> bool:
     if not t or len(t) > 60:
         return False
     return any(t.startswith(p) for p in _REVERSE_SIGNAL_PHRASES)
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1100,13 +1099,24 @@ class Agent:
                     try:
                         args = json.loads(raw_args or "{}")
                     except (json.JSONDecodeError, TypeError):
-                        # 关键修复：模型生成的 arguments 非法 JSON 若不修正，回放给 Provider 会触发
-                        # HTTP 400（"Assistant tool call ... arguments must be valid JSON"），直接掐断
-                        # 整个对话。这里就地替换为合法 JSON 并标记，避免崩溃；同时注入重试引导，
-                        # 让模型以合法 JSON 重新调用，而非让错误传播成致命 400。
-                        args = {}
-                        fn["arguments"] = "{}"
-                        _malformed_tc.append((tc, name))
+                        # 关键修复（缺口②）：先尝试修复退化 JSON，而非直接丢空。模型恢复
+                        # create_skill/create_tool 时常产生智能引号、字符串内未转义换行、尾随逗号、
+                        # 括号被截断等畸形参数；若直接置 ``{}``，等于丢光 name/content，工具必失败、
+                        # 模型反复重试仍畸形 → 死循环。修复成功则保住真实参数，工具正常执行。
+                        # 仅当修复仍失败才退化为 ``{}`` + 重试提示（避免回放给 Provider 触发 HTTP 400）。
+                        _repaired = _repair_tool_args(raw_args)
+                        if _repaired is not None:
+                            try:
+                                args = json.loads(_repaired)
+                                fn["arguments"] = _repaired
+                            except (json.JSONDecodeError, TypeError):
+                                args = {}
+                                fn["arguments"] = "{}"
+                                _malformed_tc.append((tc, name))
+                        else:
+                            args = {}
+                            fn["arguments"] = "{}"
+                            _malformed_tc.append((tc, name))
                     if name == DELEGATE_TOOL_NAME and can_delegate:
                         _any_delegate = True
                     _parsed.append((tc, name, args))
