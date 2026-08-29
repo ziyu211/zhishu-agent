@@ -125,6 +125,7 @@ async def create_skill(args: dict, ctx) -> str:
         "enabled": True,
         "shared": shared,
         "share_with": [],
+        "created_by": "user",
     }
     # 多用户隔离：私有技能归属触发保存的用户；匿名/后台任务不写 owner（系统级共享）
     if owner and owner not in ("anonymous", "system"):

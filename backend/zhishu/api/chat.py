@@ -212,6 +212,13 @@ async def chat(req: ChatReq, user=require_auth("chat")):
     # 记忆命名空间隔离：owner:session，即使 session id 相同也不会串号
     memory_session = f"{owner}:{req.session}"
 
+    # 显式 /learn 命令：把「从某工作流学习并保存为技能」包装成强指令，交给 Agent 用
+    # create_skill 工具落盘（对标 Hermes /learn）。仅作消息层包装，不绕过既有鉴权/隔离。
+    if req.message.strip().startswith("/learn"):
+        from ..core.agent.learn_prompt import build_learn_prompt
+        payload = req.message.strip()[len("/learn"):].strip()
+        req.message = "[/learn] " + build_learn_prompt(payload)
+
     agent = Agent(
         ctx.cfg, ctx.llm, ctx.kb, ctx.memory, ctx.tool_ctx, media=ctx.media,
         context_engine=build_context_engine(ctx.cfg, ctx.llm),

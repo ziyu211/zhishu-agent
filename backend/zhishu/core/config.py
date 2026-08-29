@@ -223,7 +223,10 @@ class AgentConfig:
     skills_progressive: bool = False       # 技能渐进披露（仅列清单+read_skill，默认全量注入）
     # 技能自进化闭环（对标 Hermes learning loop）：复杂任务完成后由 LLM 蒸馏沉淀为技能文件。
     # 安全护栏：仅当步数/工具调用数达标、且任务成功（到达 done）时触发；仅写入技能目录并审计。
-    skills_auto_learn: bool = False
+    # 默认开启：对标 Hermes 的「主动学习」——复杂任务成功后由 LLM 把轨迹蒸馏为技能文件，
+    # 下次同类任务直接复用。自带阈值护栏（步数/工具数达标 + 到达 done），且仅写技能目录 + 审计，
+    # 不含 LLM 合并（consolidation，本系统暂不做）。自进化失败不阻塞主对话。
+    skills_auto_learn: bool = True
     skills_auto_learn_min_steps: int = 8    # 至少消耗的推理步数（含工具轮）
     skills_auto_learn_min_tools: int = 3    # 至少调用工具次数
     # 图片输入模式（决定附件图片如何进入对话；图片内文字可经 read_file 内置 OCR 提取，
@@ -244,6 +247,17 @@ class AgentConfig:
     # v1.0.37 起默认开启（Hermes 式「主动记忆」是本系统记忆能力的关键一环；maybe_reflect
     # 自带 trivial 门控、去重与异常安全，实际 token 开销小——每轮仅一次极短对话抽取）。
     reflection_enabled: bool = True
+    # ---- 技能库管家（Curator，对标 Hermes curator 的「闲置剪枝」）----
+    # 确定性「闲置剪枝」默认开启：仅处理**自动沉淀**的技能（module.json 里
+    # created_by=="agent" 且 auto_generated==True），按最近活跃时间戳
+    # （last_used 优先、缺则 created_at）迁移生命周期。从不删除，只把长期零使用
+    # （默认 90 天）的技能归档到 skills/.archive/<name>/（可经 learning-graph / 导出恢复）。
+    # 用户自建技能、Builtin、被 pinned 的技能一律跳过。LLM 合并（consolidation）本 P1 不做。
+    curator_enabled: bool = True
+    curator_archive_after_days: int = 90   # 自动沉淀技能连续 N 天零使用则归档
+    curator_stale_after_days: int = 30     # 超过 N 天未使用先标记为 stale
+    curator_min_idle_hours: float = 2.0    # 距上次运行至少空闲 N 小时才触发
+    curator_interval_hours: int = 24 * 7    # 两次巡检最小间隔（一周）
     # 单次生成的最大输出 token 数（LLMClient.chat/stream 的 max_tokens 上限）。
     # 此前默认 2048，导致「全面分析/长文总结」等复杂任务的最终回答被静默截断
     # （表现为「回复内容不完整」）。上调到 8192 以容纳较长的结构化分析/报告；

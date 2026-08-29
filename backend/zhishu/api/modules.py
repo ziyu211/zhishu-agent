@@ -100,7 +100,7 @@ def _list_modules(sub: str, user: Optional[dict] = None) -> list:
     urole = _role(user) if user else ""
     for name in sorted(os.listdir(base)):
         d = os.path.join(base, name)
-        if not os.path.isdir(d) or name in disabled:
+        if not os.path.isdir(d) or name in disabled or name.startswith("."):
             continue
         info = read_meta(sub, name)
         if info.get("enabled") is False:
@@ -264,6 +264,7 @@ async def create_skill(body: SkillBody, user=require_auth("modules:write")):
         "owner": _username(user),
         "shared": bool(body.shared),
         "share_with": list(body.share_with or []),
+        "created_by": "user",
     }
     write_meta("skills", name, meta)
     return {"ok": True, "name": name}
@@ -287,6 +288,33 @@ async def remove_skill(name: str, user=require_auth("modules:write")):
     _guard_edit("skills", name, user, "技能")
     delete_module("skills", name)
     return {"ok": True, "name": name}
+
+
+@router.get("/skills/learning-graph")
+async def learning_graph(user=require_auth("modules:read")):
+    """学习血缘图谱（对标 Hermes learning_graph）：技能节点（含 created_by / 血缘 /
+    使用统计）+ 长期记忆节点 + 关联边。多用户隔离：非 admin 只看自己，admin 看全局。"""
+    from ..core.memory.learning_graph import build_learning_graph
+    cfg = get_ctx().cfg
+    owner = None if _is_admin(user) else _username(user)
+    graph = build_learning_graph(cfg.server.data_dir, owner=owner, is_admin=_is_admin(user))
+    return graph
+
+
+@router.post("/skills/curator/run")
+async def run_curator(user=require_auth("modules:write")):
+    """立即跑一次确定性剪枝（可选 dry_run 仅统计不归档）。返回各状态变更计数。"""
+    from ..core.memory.curator import apply_curator
+    cfg = get_ctx().cfg
+    counts = apply_curator(cfg.agent, cfg.server.data_dir, owner=_username(user))
+    return {"ok": True, "counts": counts}
+
+
+@router.get("/skills/curator/state")
+async def curator_state(user=require_auth("modules:read")):
+    """查看技能库管家最近一次巡检状态。"""
+    from ..core.memory.curator import load_state
+    return load_state(get_ctx().cfg.server.data_dir)
 
 
 @router.put("/skills/{name}/toggle")

@@ -1919,6 +1919,13 @@ class Agent:
                     traj_tools=traj_tools, steps_used=step + 1,
                     tool_total=tool_total,
                 ))
+            # 技能库管家（Curator）闲置剪枝：每轮完成后按 idle/interval 触发确定性巡检，
+            # 把长期未使用的自动沉淀技能归档（仅 created_by=="agent"，绝不删除，可恢复）。异常安全。
+            try:
+                from ..memory.curator import maybe_run_curator
+                asyncio.create_task(maybe_run_curator(self.cfg, owner=owner))
+            except Exception:
+                pass
             yield {"type": "done"}
             return
 
