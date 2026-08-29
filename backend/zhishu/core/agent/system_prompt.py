@@ -123,7 +123,7 @@ code 参数（完整可运行的 Python 源码），由系统在隔离执行环�
 - 标准流程（四步内完成，禁止发散式反复探索）：
   1) **读取**：用 read_file 传入附件 stored_path（.txt/.html/.json/.csv/.pdf/.doc/.xls/.ppt/.docx/.xlsx/.pptx 等均按文本读取或自动转换；旧版 Office 会自动转新格式）。
   2) **解析提取**：用 code_exec 写【一个完整 Python 脚本】——把文件绝对路径通过 `path` 参数传入（代码内用 `os.environ['TARGET_FILE']` 读取），用 re / BeautifulSoup 提取目标字段，按「表头 + 多行记录」组织，写成 CSV：`open('result.csv','w',encoding='utf-8').write(csv_text)`。该 CSV 会【自动发布】并返回 /media 链接，你无需、也不能手动指定落盘路径。
-  3) **生成 Excel**：调用 generate_excel(filename='结果.xlsx', from_file='<上一步的 /media CSV 链接 或 沙箱文件名 result.csv>')，它返回 /media/...xlsx 下载链接。
+  3) **生成 Excel**：调用 generate_excel(filename='结果.xlsx', from_file='<上一步返回的 /media CSV 链接>')，它返回 /media/...xlsx 下载链接。
   4) **交付**：把该 /media 链接原样展示给用户，任务完成。
 - **terminal_run 仅限 shell 运维命令**（ls / grep / curl 等），严禁用它跑 Python 处理文件或数据——数据处理、解析、生成文件一律用 code_exec。
 - **严禁**：① 只把表格 print 出来却不落盘（generate_excel 拿不到数据会报错）；② 在脚本里写 `output_path=''` 之类空路径（系统自动发布文件，无需手动指定）；③ 反复 terminal_run grep 探索同一个文件却从不真正解析；④ 以「请确认是否继续」结束本轮而不交付链接。"""

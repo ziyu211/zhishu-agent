@@ -83,6 +83,9 @@ def test_media_save_file():
     on_disk = os.path.join(m.root, "alice", os.path.basename(url.split("/")[-1]))
     check(os.path.isfile(on_disk), "文件已落盘到 owner 目录")
     # 特殊字符被 slug 化
+    # 先建好中间目录 weird name，使 open 能经 ../ 解析把源文件写到 d/name &.txt；
+    # 再用含特殊字符/穿越的引用路径喂给 save_file，验证其 slug 归一化逻辑。
+    os.makedirs(os.path.join(d, "weird name"), exist_ok=True)
     p2 = os.path.join(d, "weird name/../name &.txt")
     with open(p2, "w") as f:
         f.write("x")

@@ -80,8 +80,14 @@ async def update_settings(
         mem_part["extraction_enabled"] = mem["extraction_enabled"]
     if isinstance(mem.get("extraction_interval"), int) and mem["extraction_interval"] > 0:
         mem_part["extraction_interval"] = mem["extraction_interval"]
-    if mem.get("extraction_model") is None or isinstance(mem.get("extraction_model"), str):
-        mem_part["extraction_model"] = mem.get("extraction_model") or None
+    # 仅当用户显式携带 extraction_model（含 null，用于清空）才写入；
+    # 用 ``"extraction_model" in mem`` 区分「未提供」与「显式置空」，否则
+    # mem.get(...) 对缺省返回 None 会误判为「提供了 None」，导致整组 memory
+    # 被写入 override（即便本次只改了 security）—— 见 test_settings_security。
+    if "extraction_model" in mem and (
+        mem["extraction_model"] is None or isinstance(mem["extraction_model"], str)
+    ):
+        mem_part["extraction_model"] = mem["extraction_model"]
     if mem_part:
         patch["memory"] = mem_part
     sec = body.get("security") or {}
