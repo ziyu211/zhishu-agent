@@ -1,5 +1,7 @@
 .git
 backend/data
+data
+.venv
 frontend/node_modules
 frontend/tmp
 frontend/dist
