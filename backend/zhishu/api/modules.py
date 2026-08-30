@@ -236,6 +236,20 @@ async def export_skill_one(name: str, user=require_auth("modules:read")):
     )
 
 
+@router.get("/skills/learning-graph")
+async def learning_graph(user=require_auth("modules:read")):
+    """学习血缘图谱（对标 Hermes learning_graph）：技能节点（含 created_by / 血缘 /
+    使用统计）+ 长期记忆节点 + 关联边。多用户隔离：非 admin 只看自己，admin 看全局。
+
+    注意：必须声明在 /skills/{name} 之前，否则单段路径 learning-graph 会被
+    {name} 路由贪婪匹配导致本端点永远 404（路由遮蔽）。"""
+    from ..core.memory.learning_graph import build_learning_graph
+    cfg = get_ctx().cfg
+    owner = None if _is_admin(user) else _username(user)
+    graph = build_learning_graph(cfg.server.data_dir, owner=owner, is_admin=_is_admin(user))
+    return graph
+
+
 @router.get("/skills/{name}")
 async def get_skill(name: str, user=require_auth("modules:read")):
     info = _guard_view("skills", name, user, "技能")
@@ -288,17 +302,6 @@ async def remove_skill(name: str, user=require_auth("modules:write")):
     _guard_edit("skills", name, user, "技能")
     delete_module("skills", name)
     return {"ok": True, "name": name}
-
-
-@router.get("/skills/learning-graph")
-async def learning_graph(user=require_auth("modules:read")):
-    """学习血缘图谱（对标 Hermes learning_graph）：技能节点（含 created_by / 血缘 /
-    使用统计）+ 长期记忆节点 + 关联边。多用户隔离：非 admin 只看自己，admin 看全局。"""
-    from ..core.memory.learning_graph import build_learning_graph
-    cfg = get_ctx().cfg
-    owner = None if _is_admin(user) else _username(user)
-    graph = build_learning_graph(cfg.server.data_dir, owner=owner, is_admin=_is_admin(user))
-    return graph
 
 
 @router.post("/skills/curator/run")
