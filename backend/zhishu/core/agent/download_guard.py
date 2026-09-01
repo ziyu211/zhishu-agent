@@ -252,6 +252,161 @@ def strip_evasion(text: str) -> str:
     return _clean_evasion_sentences(text or "")
 
 
+# ── 思考链泄漏剥离（v1.0.57 · 修复 C）────────────────────────────────────
+# 背景：内网 qwen3.5 / sensenova 等 reasoning 模型会把思维链混在 content 里回吐，
+# 形如「……让我先使用 read_file 工具读取文档内容。<br/></think>\n\n我来帮您处理…」。
+# 这类内容一旦回显给用户，① 泄漏内部推理，② 让「我要调用 X 工具」的意图看上去
+# 像已执行的动作（正是本轮排查的「报成功却不生效」观感来源之一）。
+#
+# 这里剥离三种真实形态：
+#   ① 成对标签 <think>…</think> / <thinking>…</thinking> / <reasoning>…</reasoning>；
+#   ② **孤立闭合标签**（最常见）：模型直接裸吐思考正文，末尾才补一个 </think>
+#      → 闭合标签之前的全部内容都是思考链，整段丢弃（保留其后的正式回复）；
+#   ③ 孤立开始标签：<think> 之后至文末均为思考链 → 丢弃（若会导致正文全空则
+#      退化为仅删标签，绝不把用户的答案清成空白）。
+_THINK_TAGS = r"think|thinking|reasoning|thought"
+_THINK_PAIR_RE = re.compile(
+    r"(?is)<\s*(" + _THINK_TAGS + r")\s*>.*?<\s*/\s*\1\s*>")
+_THINK_OPEN_RE = re.compile(r"(?is)<\s*(?:" + _THINK_TAGS + r")\s*>")
+_THINK_CLOSE_RE = re.compile(r"(?is)<\s*/\s*(?:" + _THINK_TAGS + r")\s*>")
+# 思考链尾部常见的 <br/> 残留（仅在标签邻域清理，不动正文里合法的 <br>）
+_TRAILING_BR_RE = re.compile(r"(?i)(?:\s*<\s*br\s*/?\s*>)+\s*$")
+
+
+def _tidy(text: str) -> str:
+    out = re.sub(r"\n{3,}", "\n\n", text or "")
+    return out.strip()
+
+
+def strip_thinking(text: str) -> str:
+    """剥离回复中泄漏的思维链标签及其内容（纯函数，便于单测）。
+
+    见上方注释的三种形态。任何情况下都不会把非空回复清成空串——
+    若剥离后正文为空，则退化为「仅删除标签、保留文字」。
+    """
+    if not text:
+        return text or ""
+    original = text
+    # ① 成对标签整块删除
+    out = _THINK_PAIR_RE.sub("", text)
+    # ② 孤立闭合标签：其之前的内容全部视为思考链
+    matches = list(_THINK_CLOSE_RE.finditer(out))
+    if matches:
+        out = out[matches[-1].end():]
+    # ③ 孤立开始标签：其之后的内容全部视为思考链
+    mo = _THINK_OPEN_RE.search(out)
+    if mo:
+        out = out[:mo.start()]
+    out = _TRAILING_BR_RE.sub("", out)
+    out = _tidy(out)
+    if not out:
+        # 兜底：剥离过度会让用户看到空回复 —— 退化为仅去标签、保留文字
+        fallback = _THINK_OPEN_RE.sub("", original)
+        fallback = _THINK_CLOSE_RE.sub("", fallback)
+        return _tidy(fallback)
+    return out
+
+
+def _tail_partial(text: str, maxlen: int = 16) -> str:
+    """返回尾部可能是「被切断的半个标签」的残片（流式场景用）。"""
+    i = text.rfind("<")
+    if i == -1:
+        return ""
+    tail = text[i:]
+    if ">" in tail or len(tail) > maxlen:
+        return ""
+    return tail
+
+
+class ThinkingFilter:
+    """流式思考链剥离器（有状态，供 SSE 逐块过滤）。
+
+    - `<think>` 起始 → 进入抑制态，丢弃内容直至匹配的闭合标签；
+    - 孤立闭合标签 → 丢弃标签本体（流式下其之前的内容已发出、无法回收，
+      这是流式的固有限制；智枢自身 UI 走 agent.py 最终整段回复，由
+      strip_thinking 完整处理，不受此限）；
+    - 标签可能被切分在多个 chunk → 用尾部残片缓冲兜住不完整标签。
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._in_think = False
+
+    def feed(self, chunk: str) -> str:
+        text = self._buf + (chunk or "")
+        self._buf = ""
+        out: List[str] = []
+        while text:
+            if self._in_think:
+                mc = _THINK_CLOSE_RE.search(text)
+                if mc:
+                    text = text[mc.end():]
+                    self._in_think = False
+                    continue
+                self._buf = _tail_partial(text)  # 其余为思考内容，丢弃
+                text = ""
+                continue
+            mo = _THINK_OPEN_RE.search(text)
+            mc = _THINK_CLOSE_RE.search(text)
+            if mc and (mo is None or mc.start() < mo.start()):
+                out.append(text[:mc.start()])   # 孤立闭合标签：仅丢弃标签本体
+                text = text[mc.end():]
+                continue
+            if mo:
+                out.append(text[:mo.start()])
+                text = text[mo.end():]
+                self._in_think = True
+                continue
+            keep = _tail_partial(text)
+            out.append(text[:len(text) - len(keep)] if keep else text)
+            self._buf = keep
+            text = ""
+        return "".join(out)
+
+    def flush(self) -> str:
+        rest = "" if self._in_think else self._buf
+        self._buf = ""
+        return rest
+
+
+# ── 「声称已生成文件」幻觉护栏（v1.0.57 · 修复 D）──────────────────────────
+# 背景：v1.0.55 的幻觉修复只覆盖 code_exec「执行结果为空 → 模型编造」；但模型仍可能
+# 在**任何**任务里凭空写出「📎 本次生成的可下载文件：元.docx」这类交付声明，而本轮
+# 根本没有任何工具产出过 /media 链接（正是内网排版任务的真实故障形态）。
+# 判定规则（高精度、低误报）：回复出现「已生成/可下载文件」类强声明，且
+#   ① 回复正文中不含任何 /media 链接，且
+#   ② 本回合工具轨迹里也没有任何工具返回过 /media 链接
+# → 三者同时成立说明这是凭空声明，必须如实纠正（真实交付必然携带链接）。
+_FILE_CLAIM_RE = re.compile(
+    r"(本次生成的可下载文件|可下载文件|点击(即可)?下载|下载链接如下|"
+    r"已(为你|为您)?(成功)?(生成|导出|输出|产出|创建)了?[^\n]{0,12}(文件|文档|表格|附件|docx|xlsx|pdf|pptx|csv)|"
+    r"已(完成)?(重新)?排版(完成|好了|完毕)?|排版(已)?完成|"
+    r"(文件|文档|表格|附件)已(生成|导出|保存|产出|输出))",
+    re.IGNORECASE,
+)
+FILE_CLAIM_CORRECTION = (
+    "\n\n---\n⚠️ **提示**：本轮**并没有真正产出任何可下载文件**（真实产出必然带有 "
+    "`/media/...` 下载链接；本回合工具轨迹中没有任何文件产出）。上文若出现「已生成/"
+    "可下载文件」类表述，属于未经工具验证的表述，请勿据此认为文件已生成。\n"
+    "如需真正拿到文件，请让我用 `code_exec` 实际生成并交付 `/media` 链接"
+    "（例如用 python-docx 处理并保存后回传下载链接）。"
+)
+
+
+def file_claim_unbacked(answer: str, tool_results: List[str] | None = None) -> bool:
+    """回复声称已生成文件，但本轮无任何 /media 产出 → True（纯函数，便于单测）。"""
+    if not answer:
+        return False
+    if not _FILE_CLAIM_RE.search(answer):
+        return False
+    if _has_media_link(answer):
+        return False            # 已带真实下载链接，属正常交付
+    for r in tool_results or []:
+        if _has_media_link(r or ""):
+            return False        # 工具确实产出过链接（链接丢失由下载护栏负责补回）
+    return True
+
+
 # ── MEDIA: 发布协议（v1.0.39，对标 Hermes extract_media）────────────────
 # 模型在回复中输出 MEDIA:/abs/path 标签即声明「该文件要交付给用户」。本函数把标签
 # 替换为 /media 下载链接（文件真实存在时发布；已落在媒体根则直接改写；不存在则

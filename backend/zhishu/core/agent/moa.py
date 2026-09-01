@@ -20,6 +20,7 @@ from ..tools import ToolRegistry, ToolContext
 from ..tools.base import get_current_user, get_current_is_admin, get_current_role
 from ..modules.runtime import filter_tool_specs
 from ..agents_runtime import DELEGATE_TOOL_NAME
+from .download_guard import strip_thinking
 
 
 class MoAClient:
@@ -31,12 +32,20 @@ class MoAClient:
                    temperature=0.7, max_tokens=2048) -> dict:
         refs = await self._run_references(messages)
         aggregated = await self._aggregate(refs)
+        # 思考链泄漏剥离（v1.0.57 · 修复 C 收口）：reference / aggregator 模型若为
+        # 内网 qwen3.5 / sensenova 等 reasoning 模型，会把 <thinking>…</think> 混在
+        # content 里回吐；MoA 直接聚合 content，若不在此剥离，思考链会随流式 token
+        # 泄漏给用户（且绕过 agent.py 主路径仅对 final 的 strip）。此处对聚合结果整体
+        # 剥离后再切分，保证每个 piece 都是干净正文。
+        aggregated = strip_thinking(aggregated)
         return {"choices": [{"message": {"role": "assistant", "content": aggregated}}]}
 
     async def stream(self, messages, model=None, tools=None,
                      temperature=0.7, max_tokens=2048) -> AsyncIterator[str]:
         refs = await self._run_references(messages)
         aggregated = await self._aggregate(refs)
+        # 思考链泄漏剥离（v1.0.57 · 修复 C 收口）：见 chat() 注释。
+        aggregated = strip_thinking(aggregated)
         # 简单按句切分，模拟流式
         for piece in _chunk_text(aggregated):
             yield piece

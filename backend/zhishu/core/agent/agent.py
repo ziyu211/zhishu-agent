@@ -46,6 +46,9 @@ from .download_guard import (
     find_leaked_paths,
     strip_evasion,
     strip_leaked_paths,
+    strip_thinking,
+    file_claim_unbacked,
+    FILE_CLAIM_CORRECTION as _FILE_CLAIM_CORRECTION_TEXT,
 )
 from .context_engine import NoOpContextEngine, ContextEngine, CompressionContextEngine
 from ..modules.skills import maybe_learn, maybe_reflect
@@ -152,6 +155,53 @@ def _guard_skill_save_claim(answer: str, user_message: str, traj_tools) -> str:
     if triggered:
         return (answer or "").rstrip() + _SKILL_SAVE_CORRECTION
     return answer
+
+
+# ---------------------------------------------------------------------------
+# 「声称已生成文件 / 声称已读文件」幻觉护栏（v1.0.57 · 修复 D）
+#
+# 背景：v1.0.55 的幻觉修复只覆盖 code_exec「执行结果为空 → 模型编造」这一条路径。
+# 但内网排版任务暴露了同一顽疾的非 code 变体：模型全程没调任何工具，却在回复里写出
+# 「📎 本次生成的可下载文件（点击即可下载）：元.docx」——真实产出必然带 /media 链接，
+# 此类无链接的交付声明必属凭空编造。本护栏在最终回复上做**双路**如实纠正：
+#   ① 声称生成文件，但回复与工具轨迹里都没有任何 /media 链接 → 纠正；
+#   ② 最终回复里把 read_file 调用当文本贴出（说明兜底也没接住），而轨迹中确无
+#      read_file 成功执行 → 纠正（与 A 的循环内兜底形成纵深防御）。
+# ---------------------------------------------------------------------------
+_READ_FILE_TEXT_CORRECTION = (
+    "\n\n---\n⚠️ **提示**：上文出现了 `read_file` 的调用文本，但本轮**并未真正执行**过文件读取"
+    "（工具轨迹中没有 read_file 记录），因此上文关于文件内容的描述不可信。\n"
+    "请重新向我确认文件路径（形如 `/media/attachments/...`），我会真实调用 `read_file` 读取后再处理。"
+)
+
+
+def _tool_names(traj_tools) -> set:
+    return {(t.get("name") or "") for t in (traj_tools or [])}
+
+
+def _tool_results(traj_tools) -> list:
+    return [(t.get("result") or "") for t in (traj_tools or [])]
+
+
+def _guard_file_claim(answer: str, traj_tools) -> str:
+    """最终回复防「凭空声称已生成文件 / 已读文件」，附加如实纠正说明。"""
+    if not answer:
+        return answer
+    out = answer
+    # ① 声称生成文件却无任何 /media 产出
+    try:
+        if file_claim_unbacked(out, _tool_results(traj_tools)):
+            out = out.rstrip() + _FILE_CLAIM_CORRECTION_TEXT
+    except Exception:  # noqa: BLE001 - 护栏绝不能影响正常回复
+        pass
+    # ② 最终回复里仍把 read_file 写成文本，且本轮确无 read_file 执行
+    try:
+        if "read_file" in out.lower() and "read_file" not in _tool_names(traj_tools):
+            if _extract_read_file_args(out):
+                out = out.rstrip() + _READ_FILE_TEXT_CORRECTION
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +583,93 @@ def _extract_python_blocks(text: str) -> list[str]:
         if body and body.strip():
             out.append(body)
     return out
+
+
+def _extract_read_file_args(text: str, limit: int = 8) -> list[dict]:
+    """从模型把 read_file 写成文本/代码块的内容里，解析出真实可执行的参数列表。
+
+    用于「弱模型把文件读取写成文本（如 ``read_file --path X`` 的 bash/纯文本块）
+    而非真正发起工具调用」的兜底执行：抽出路径后走与 function call 完全一致的
+    read_file 执行路径，真正读取并回填内容，消除「只贴调用文本不读文件 → 编造结论」
+    （即「报成功却不生效」的读文件变体）的退化。
+
+    支持的常见形变：
+      1) bash/文本式：read_file --path /media/attachments/.../元.docx
+         （常伴随 Markdown 链接写法 read_file --path [名称](/media/...)）
+      2) 函数式：     read_file(path="X") / file_read(path="X") / read_file("X")
+      3) 批量式：     read_file --paths a b c / read_file(paths=["a","b"])
+
+    仅当确实解析到「像文件路径」的实参（含 /media/ 前缀或文件名扩展名）才命中，
+    避免把说明性文字（如「请用 read_file 读取」）误当成真实调用。
+    """
+    out: list[dict] = []
+    if not text or not re.search(r'read_file|file_read', text, re.IGNORECASE):
+        return out
+
+    def _is_pathish(tok: str) -> bool:
+        t = (tok or "").strip()
+        if not t or t.startswith(("http://", "https://")):
+            return False
+        lm = re.search(r'\(([^)]+)\)', t)
+        if lm and lm.group(1).startswith(("/media/", "/")):
+            t = lm.group(1)
+        if t.startswith("/media/"):
+            return True
+        return bool(re.search(r'\.\w{1,8}(?:[)\]\s]|\Z)', t))
+
+    def _norm(tok: str) -> str:
+        t = (tok or "").strip().strip('"').strip("'").strip()
+        lm = re.search(r'\[[^\]]*\]\(([^)]+)\)', t)
+        return lm.group(1).strip() if lm else t
+
+    # 1) 函数式：read_file(path="X") / read_file(paths=["a","b"]) / read_file("X")
+    for m in re.finditer(r'(?:read_file|file_read)', text, re.IGNORECASE):
+        rest = text[m.end():m.end() + 600]
+        pm = re.match(r'\s*\(\s*(.*?)\s*\)', rest, re.DOTALL)
+        if not pm:
+            continue
+        inner = pm.group(1)
+        pl = re.search(r'paths\s*=\s*\[(.*?)\]', inner, re.DOTALL)
+        if pl:
+            items = [p for p in re.findall(r'["\']([^"\']+)["\']', pl.group(1)) if _is_pathish(p)]
+            if items:
+                out.append({"paths": [_norm(p) for p in items[:limit]]})
+                continue
+        pa = re.search(r'path\s*=\s*["\']([^"\']+)["\']', inner)
+        if pa and _is_pathish(pa.group(1)):
+            out.append({"path": _norm(pa.group(1))})
+            continue
+        pos = [p for p in re.findall(r'["\']([^"\']+)["\']', inner) if _is_pathish(p)]
+        if pos:
+            out.append({"path": _norm(pos[0])})
+
+    # 2) bash/文本式：read_file --path <target> / read_file --paths a b c
+    for m in re.finditer(r'(?:read_file|file_read)', text, re.IGNORECASE):
+        seg = text[m.start():m.start() + 800]
+        if '--path' not in seg:
+            continue
+        links = [l for l in re.findall(r'\[[^\]]*\]\(([^)]+)\)', seg) if _is_pathish(l)]
+        bare = [b for b in re.findall(r'(/media/[^\s)\]]+|\S+\.[a-zA-Z0-9]{1,8})', seg)
+                if _is_pathish(b) and b not in links
+                and '[' not in b and '(' not in b and ']' not in b]
+        if '--paths' in seg:
+            toks = (links + bare)[:limit]
+            if toks:
+                out.append({"paths": [_norm(t) for t in toks]})
+        elif links or bare:
+            cand = (links + bare)[0]
+            out.append({"path": _norm(cand)})
+
+    # 去重（path / paths 分别按内容归一）
+    seen = set()
+    uniq: list[dict] = []
+    for c in out:
+        key = tuple(sorted((k, tuple(v) if isinstance(v, list) else v)
+                          for k, v in c.items()))
+        if key not in seen:
+            seen.add(key)
+            uniq.append(c)
+    return uniq
 
 
 def _expected_sub_agents(meta: dict) -> list[str]:
@@ -1669,6 +1806,65 @@ class Agent:
                         })
                         continue
 
+            # ---- 文件读取兜底（弱模型兼容）：模型没发 function call，而是把
+            # read_file --path X / read_file(path="X") 当文本 / bash 代码块输出。
+            # 若不接住，模型会误以为读到了文件内容，进而编造「文件是…」「已生成可下载文件」
+            # 等虚假结论（即「报成功却不生效」的读文件变体）。这里抽出路径后走与 function call
+            # 完全一致的 read_file 执行路径，真正读取并回填内容后 continue，让模型基于真实文件
+            # 内容作答，彻底消除「只贴调用文本不读文件」的退化。
+            _lc = _content.lower()
+            if _content and ("read_file" in _lc or "file_read" in _lc):
+                _rf_calls = _extract_read_file_args(_content)
+                if _rf_calls:
+                    # 模型这段「伪调用」只作为思考轨迹回填，不当最终回答吐给用户
+                    messages.append({"role": "assistant", "content": _content})
+                    for _rf_args in _rf_calls:
+                        tool_total += 1
+                        yield {"type": "tool_call", "name": "read_file", "args": _rf_args}
+                        _result = await ToolRegistry.execute(
+                            "read_file", _rf_args, self.ctx)
+                        traj_tools.append({
+                            "name": "read_file",
+                            "args": _rf_args,
+                            "result": (_result or "")[:300],
+                        })
+                        messages.append({
+                            "role": "assistant",
+                            "content": _content,
+                            "tool_calls": [{
+                                "id": f"read_file_{tool_total}",
+                                "type": "function",
+                                "function": {
+                                    "name": "read_file",
+                                    "arguments": json.dumps(_rf_args, ensure_ascii=False),
+                                },
+                            }],
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": f"read_file_{tool_total}",
+                            "content": _result or "",
+                        })
+                        # 与 code_exec 兜底同构的「幻觉修复」：显式声明非用户发言 + 内联真实返回 +
+                        # 空结果如实告知 + 引导继续用 code_exec 产出 /media 文件，严禁编造。
+                        _exec_out = ((_result or "").strip())[:8000]
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[系统通知 · 非用户发言] 你刚才输出的 read_file 调用已由系统自动真实执行"
+                                "（你原本把它写成了文本/代码块，未真正发起工具调用）。以下为该工具的真实返回：\n"
+                                "---- read_file 返回开始 ----\n"
+                                f"{_exec_out or '（工具未返回任何输出：文件可能不存在、越权、或解析失败）'}\n"
+                                "---- read_file 返回结束 ----\n\n"
+                                "请严格基于上述真实返回继续处理任务：若需对文件做排版/转换/生成新文件，"
+                                "请用 code_exec 编写 Python（如 python-docx 处理 docx）生成产物，"
+                                "系统会自动将其发布为 /media 下载链接并回填，你只需把链接原样交付用户；"
+                                "若返回表明文件不存在或越权，必须如实告知用户并建议其确认文件是否已上传，"
+                                "严禁臆测文件内容或谎称已生成文件。"
+                            ),
+                        })
+                    continue
+
             # 协调类智能体强制委派闸门：
             # 若 Orchestrator 等协调类 Agent 在第一轮没有实际发起任何委派（既没有 function call，
             # 也没有文本 delegate_to_agent/<tool_call>），则追加硬性系统提示要求其立即委派，
@@ -1842,6 +2038,12 @@ class Agent:
                     return
                 yield {"type": "done", "note": "模型未返回内容"}
                 return
+            # 思考链泄漏剥离（v1.0.57 · 修复 C）：内网 qwen3.5 / sensenova 等 reasoning 模型
+            # 常把思维链混在 content 里回吐（真实形态：「…让我先使用 read_file 工具读取文档
+            # 内容。<br/></think>\n\n我来帮您处理…」），既泄漏内部推理，又让「我要调用某工具」
+            # 的意图在用户眼里像是已执行的动作——正是「报成功却不生效」的观感来源之一。
+            # 放在所有下游护栏之前，确保链接/路径/搪塞处理都基于干净正文。
+            final = strip_thinking(final)
             # 续写补全：若上一轮因达到 max_tokens 而被截断（finish_reason=="length"），
             # 追加「继续写」指令让模型接着上文输出剩余部分，最多续 3 次，彻底避免
             # 「回复内容不完整」。即使 agent.max_tokens 已调大，此兜底仍能兜住个别超长报告。
@@ -1902,6 +2104,10 @@ class Agent:
             # 技能保存意图闭环校验：用户要求保存技能但未真实落盘 → 尾部如实纠正
             # （防模型误用 create_tool / 谎称成功，保证「技能页看不到」不再发生）。
             answer = _guard_skill_save_claim(answer, user_message, traj_tools)
+            # 幻觉护栏（v1.0.57 · 修复 D）：把 v1.0.55 仅覆盖 code_exec 空结果的护栏扩展到
+            # 非 code 工具——凭空声称「已生成可下载文件」却无任何 /media 产出，或最终回复里
+            # 仍把 read_file 当文本贴出而本轮确无 read_file 执行 → 尾部如实纠正。
+            answer = _guard_file_claim(answer, traj_tools)
             # 若本轮 create_team 成功创建了团队，把醒目前缀拼到最终回复开头，确保用户一定看到
             _roster = getattr(self, "_team_roster_preface", "")
             if _roster and not answer.lstrip().startswith("## ✅ 已创建多智能体团队"):

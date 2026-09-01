@@ -28,6 +28,7 @@ from .auth import require_auth
 from ..context import get_ctx
 from ..core.providers.client import LLMClient
 from ..core.concurrency import get_limiter, ConcurrencyLimitError
+from ..core.agent.download_guard import strip_thinking, ThinkingFilter
 
 router = APIRouter(prefix="/v1", tags=["openai-compat"])
 
@@ -189,6 +190,11 @@ async def chat_completions(request: Request, user=require_auth("chat")):
                 _msg = _ch.get("message") if isinstance(_ch, dict) else None
                 if isinstance(_msg, dict) and "content" not in _msg:
                     _msg["content"] = ""
+                # 思考链泄漏剥离（v1.0.57 · 修复 C）：reasoning 模型常把 <think>…</think>
+                # 思维链混进 content，OpenAI 兼容客户端会原样展示，既泄漏内部推理，
+                # 又让「我要调用某工具」的意图看上去像已执行的动作。非流式可整段净化。
+                if isinstance(_msg, dict) and isinstance(_msg.get("content"), str):
+                    _msg["content"] = strip_thinking(_msg["content"])
         ctx.audit.log(user.get("real_u", owner), "openai_chat",
                       str(raw_messages[-1].get("content", ""))[:200],
                       f"model={model_out}")
@@ -215,6 +221,9 @@ async def chat_completions(request: Request, user=require_auth("chat")):
                              "finish_reason": None}],
             }
             yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n"
+            # 思考链泄漏剥离（v1.0.57 · 修复 C，流式版）：有状态过滤器逐块吃掉
+            # <think>…</think> 区间，并兜住被切分在多个 chunk 中的半截标签。
+            _tfilter = ThinkingFilter()
             try:
                 stream_coro = llm.stream(
                     messages, model=model, temperature=temperature,
@@ -235,12 +244,25 @@ async def chat_completions(request: Request, user=require_auth("chat")):
                         }
                     else:
                         text = piece if isinstance(piece, str) else str(piece)
+                        text = _tfilter.feed(text)
+                        if not text:
+                            continue  # 整块都是思考链 / 半截标签缓冲中，不外发
                         chunk = {
                             "id": cid, "object": "chat.completion.chunk",
                             "created": created, "model": model_out,
                             "choices": [{"index": 0, "delta": {"content": text},
                                          "finish_reason": None}],
                         }
+                    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                # 收尾：吐出过滤器里残留的非思考链尾巴（半截标签兜底）
+                _tail = _tfilter.flush()
+                if _tail:
+                    chunk = {
+                        "id": cid, "object": "chat.completion.chunk",
+                        "created": created, "model": model_out,
+                        "choices": [{"index": 0, "delta": {"content": _tail},
+                                     "finish_reason": None}],
+                    }
                     yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             except Exception as e:  # noqa: BLE001
                 status, etype, msg = _upstream_error_shape(e)
