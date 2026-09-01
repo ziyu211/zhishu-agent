@@ -1518,7 +1518,7 @@ class Agent:
                         if _key in _delegated_seen:
                             messages.append({
                                 "role": "user",
-                                "content": f"[系统] 你已委派过 {_args['agent_name']} 且结果见上文，"
+                                "content": f"[系统通知 · 非用户发言] 你已委派过 {_args['agent_name']} 且结果见上文，"
                                            f"请勿重复委派。请委派其他未执行的子智能体，"
                                            f"或直接给出最终结论。",
                             })
@@ -1544,7 +1544,7 @@ class Agent:
                         # 把子智能体结论交回主管，兼容所有 Provider。
                         messages.append({
                             "role": "user",
-                            "content": (f"[系统] 子智能体 {_args['agent_name']} 已执行完毕，结果如下：\n"
+                            "content": (f"[系统通知 · 非用户发言] 子智能体 {_args['agent_name']} 已执行完毕，结果如下：\n"
                                         f"{_result or '(空)'}\n\n"
                                         f"请继续：若还有未完成的分工，输出下一个 "
                                         f"delegate_to_agent(...)；若信息已足够，请直接给出最终"
@@ -1579,12 +1579,12 @@ class Agent:
                                                    "result": (_fr or "")[:300]})
                                 messages.append({
                                     "role": "user",
-                                    "content": (f"[系统] 子智能体 {_fn} 已执行完毕（系统补派），"
+                                    "content": (f"[系统通知 · 非用户发言] 子智能体 {_fn} 已执行完毕（系统补派），"
                                                 f"结果如下：\n{_fr or '(空)'}"),
                                 })
                             messages.append({
                                 "role": "user",
-                                "content": ("[系统] 全部子智能体均已执行完毕，请直接输出最终整合结论，"
+                                "content": ("[系统通知 · 非用户发言] 全部子智能体均已执行完毕，请直接输出最终整合结论，"
                                             "不要再输出 delegate_to_agent。"),
                             })
                     # 协调类仍有应委派子智能体未委派时，不要因「重复重派同批已派子智能体」而空转续步，
@@ -1647,12 +1647,24 @@ class Agent:
                             "tool_call_id": f"code_exec_{tool_total}",
                             "content": _result or "",
                         })
+                        # 【幻觉修复 v1.0.55】原提示文本是非自包含的（只让模型去「上方」找结果），
+                        # 但① 本条是 role=user 的系统注入，模型（如 qwen3.5）会误当作
+                        # 「用户提到」；② 该表述不自包含，一旦 tool 消息在 compat 层被
+                        # flatten_tool_messages 摊平、被 enforce_alternating 合并，或
+                        # 执行结果为空，模型就完全看不到结果，只能编造 → 产生幻觉。
+                        # 现改为：显式声明非用户发言 + 内联真实返回 + 空结果如实告知。
+                        _exec_out = ((_result or "").strip())[:4000]
                         messages.append({
                             "role": "user",
                             "content": (
-                                "[系统] 你刚才提供的 Python 代码已由系统通过 code_exec 工具实际执行，"
-                                "执行结果见上方工具返回。请基于真实执行结果进行分析与总结，"
-                                "直接给出最终结论，不要再重复贴出相同的代码块。"
+                                "[系统通知 · 非用户发言] 你刚才输出的 Python 代码块已由系统"
+                                "自动提交给 code_exec 工具执行。以下为该工具的真实返回：\n"
+                                "---- code_exec 返回开始 ----\n"
+                                f"{_exec_out or '（工具未返回任何输出：可能执行失败、被拦截或无打印内容）'}\n"
+                                "---- code_exec 返回结束 ----\n\n"
+                                "请严格基于上述真实返回进行分析与总结，直接给出最终结论；"
+                                "若返回为空或表明执行失败，请如实告知用户失败原因，"
+                                "不得编造或臆测执行结果，也不要重复贴出相同的代码块。"
                             ),
                         })
                         continue
@@ -1744,7 +1756,7 @@ class Agent:
                                                    "result": (_fr or "")[:300]})
                                 messages.append({
                                     "role": "user",
-                                    "content": (f"[系统] 子智能体 {_fn} 已执行完毕（系统补派），"
+                                    "content": (f"[系统通知 · 非用户发言] 子智能体 {_fn} 已执行完毕（系统补派），"
                                                 f"结果如下：\n{_fr or '(空)'}"),
                                 })
                             _did_delegate_this_step = True
@@ -1794,7 +1806,7 @@ class Agent:
                                        "result": (_sr or "")[:300]})
                     messages.append({
                         "role": "user",
-                        "content": (f"[系统] 协调类智能体 {_target} 已完成执行，结果如下：\n"
+                        "content": (f"[系统通知 · 非用户发言] 协调类智能体 {_target} 已完成执行，结果如下：\n"
                                     f"{_sr or '(空)'}\n\n"
                                     f"请基于该结果直接给出面向用户的最终整合结论，不要再调用工具。"),
                     })
