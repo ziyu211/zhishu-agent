@@ -155,7 +155,7 @@ function render(src: string): string {
       para.push(lines[i])
       i++
     }
-    html += `<p>${inline(para.join('<br/>'))}</p>`
+    html += `<p>${para.map(inline).join('<br/>')}</p>`
   }
   return html
 }
