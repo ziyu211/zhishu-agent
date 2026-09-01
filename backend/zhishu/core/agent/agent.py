@@ -672,6 +672,140 @@ def _extract_read_file_args(text: str, limit: int = 8) -> list[dict]:
     return uniq
 
 
+def _match_brace(s: str) -> int:
+    """从 s[0]=='{' 起做括号配对扫描，返回匹配的右花括号索引（不含）；不成对返回 -1。
+
+    字符串内的 { } 不计入深度（处理 content 内含代码花括号的 JSON 技能正文）。
+    """
+    depth = 0
+    in_str = False
+    esc = False
+    for i, ch in enumerate(s):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\":
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return -1
+
+
+def _extract_create_skill_args(text: str) -> list[dict]:
+    """从模型把 create_skill 写成文本 / JSON / 代码块的内容里，解析出真实可执行的参数。
+
+    用于「弱模型把保存技能写成 JSON 文本（如 ```json {"name":"pb1","content":"..."} ``` 代码块）
+    而非真正发起工具调用」的兜底执行（即 E 兜底）：抽出参数后走与 function call 完全一致的
+    create_skill 执行路径，真正落盘并回填结果后 continue，让模型基于真实保存结果继续，
+    消除「只贴 create_skill JSON 声称已保存成功、技能页却看不到」的退化。
+
+    支持的常见形变：
+      1) ```json 代码块：{"name":"pb1","content":"...","description":"..."}
+      2) 裸 JSON 对象（含 name + content 字段）
+      3) 函数式：create_skill(name="pb1", content="...")
+
+    仅当确实解析到 name + content 两个字段（content 长度阈值防误触发）才命中，
+    避免把说明性文字（如「请用 create_skill 保存」）误当成真实调用。
+    """
+    out: list[dict] = []
+    if not text or "create_skill" not in text.lower():
+        return out
+
+    def _build(name, content, description="", shared="false", version="1.0.0") -> dict | None:
+        name = (name or "").strip()
+        content = (content or "").strip()
+        # 护栏：技能正文需达一定长度，避免把说明性短文本误判为技能 body
+        if len(name) < 2 or len(content) < 20 or len(content) > 60000:
+            return None
+        return {
+            "name": name,
+            "content": content,
+            "description": (description or "").strip()[:200],
+            "shared": str(shared).strip().lower() in ("1", "true", "yes", "y"),
+            "version": str(version or "1.0.0")[:32],
+        }
+
+    def _parse_json_obj(raw: str) -> dict | None:
+        raw = (raw or "").strip()
+        if not raw:
+            return None
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            try:
+                from .json_repair import repair_tool_args
+                fixed = repair_tool_args(raw)
+                obj = json.loads(fixed) if fixed else None
+            except Exception:
+                obj = None
+        if not isinstance(obj, dict):
+            return None
+        name = obj.get("name") or obj.get("技能名") or obj.get("技能名称")
+        content = obj.get("content") or obj.get("正文") or obj.get("技能正文")
+        if not name or not content:
+            return None
+        return _build(name, content,
+                      obj.get("description") or "",
+                      obj.get("shared", "false"),
+                      obj.get("version") or "1.0.0")
+
+    # 1) ```json / ``` 代码块：优先按 JSON 解析
+    for m in re.finditer(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE):
+        p = _parse_json_obj(m.group(1))
+        if p:
+            out.append(p)
+    # 2) 裸 JSON 对象：以 {"name": 起，括号配对扫描到匹配的右花括号
+    if not out:
+        for m in re.finditer(r"\{\s*[\"']?name[\"']?\s*:", text, re.IGNORECASE):
+            seg = text[m.start():m.start() + 60000]
+            end = _match_brace(seg)
+            if end <= 0:
+                continue
+            p = _parse_json_obj(seg[:end])
+            if p:
+                out.append(p)
+    # 3) 函数式：create_skill(name="X", content="Y", description="Z")
+    if not out:
+        for m in re.finditer(r"create_skill\s*\(", text, re.IGNORECASE):
+            rest = text[m.end():m.end() + 20000]
+            pm = re.match(r"\s*(.*?)\s*\)", rest, re.DOTALL)
+            if not pm:
+                continue
+            inner = pm.group(1)
+            nk = re.search(r"name\s*=\s*[\"']([^\"']+)[\"']", inner, re.IGNORECASE)
+            ck = re.search(r"content\s*=\s*[\"'](.*?)[\"']", inner, re.IGNORECASE | re.DOTALL)
+            if nk and ck:
+                dkv = re.search(r"description\s*=\s*[\"']([^\"']*)[\"']", inner, re.IGNORECASE)
+                skv = re.search(r"shared\s*=\s*[\"']?([^\"',\s]+)", inner, re.IGNORECASE)
+                vkv = re.search(r"version\s*=\s*[\"']([^\"']+)[\"']", inner, re.IGNORECASE)
+                p = _build(nk.group(1), ck.group(1),
+                           dkv.group(1) if dkv else "",
+                           skv.group(1) if skv else "false",
+                           vkv.group(1) if vkv else "1.0.0")
+                if p:
+                    out.append(p)
+
+    # 去重（按 name 归一）
+    seen = set()
+    uniq: list[dict] = []
+    for c in out:
+        if c["name"] in seen:
+            continue
+        seen.add(c["name"])
+        uniq.append(c)
+    return uniq
+
+
 def _expected_sub_agents(meta: dict) -> list[str]:
     """推断协调类 Agent 应当覆盖的子智能体清单（用于收尾前强制补齐）。
 
@@ -1865,6 +1999,69 @@ class Agent:
                             ),
                         })
                     continue
+
+            # ---- 技能保存兜底（弱模型兼容 · E）：模型没发 function call，而是把
+            # create_skill 的调用参数写成 JSON 文本 / 代码块（典型如
+            # ```json {"name":"pb1","content":"..."} ```），并声称「技能已保存成功」。
+            # 若不接住，技能永远落不了盘（技能页看不到），而模型却谎称保存成功。
+            # 这里抽出参数后走与 function call 完全一致的 create_skill 执行路径，真正落盘并
+            # 回填结果后 continue，让模型基于真实保存结果继续，彻底消除「只贴 JSON 声称成功」的退化。
+            if _content and "create_skill" in _lc:
+                _cs_calls = _extract_create_skill_args(_content)
+                if _cs_calls:
+                    # 避免同一段回复里对已执行过的同名技能重复落盘（create_skill 会回「已存在」）
+                    _done_names = {t.get("args", {}).get("name") for t in traj_tools
+                                   if t.get("name") == "create_skill"}
+                    _had_cs = False
+                    for _cs_args in _cs_calls:
+                        if _cs_args["name"] in _done_names:
+                            continue
+                        _had_cs = True
+                        messages.append({"role": "assistant", "content": _content})
+                        tool_total += 1
+                        yield {"type": "tool_call", "name": "create_skill", "args": _cs_args}
+                        _cs_result = await ToolRegistry.execute(
+                            "create_skill", _cs_args, self.ctx)
+                        traj_tools.append({
+                            "name": "create_skill",
+                            "args": {"name": _cs_args["name"]},
+                            "result": (_cs_result or "")[:300],
+                        })
+                        messages.append({
+                            "role": "assistant",
+                            "content": _content,
+                            "tool_calls": [{
+                                "id": f"create_skill_{tool_total}",
+                                "type": "function",
+                                "function": {
+                                    "name": "create_skill",
+                                    "arguments": json.dumps(_cs_args, ensure_ascii=False),
+                                },
+                            }],
+                        })
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": f"create_skill_{tool_total}",
+                            "content": _cs_result or "",
+                        })
+                        # 【幻觉修复 v1.0.59】自包含声明：非用户发言 + 内联真实返回 + 空/报错如实告知。
+                        _cs_out = ((_cs_result or "").strip())[:4000]
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[系统通知 · 非用户发言] 你刚才输出的 create_skill 调用参数已由系统"
+                                "自动真实执行（你原本把它写成了 JSON 文本/代码块，未真正发起工具调用）。"
+                                "以下为该工具的真实返回：\n"
+                                "---- create_skill 返回开始 ----\n"
+                                f"{_cs_out or '（工具未返回任何输出）'}\n"
+                                "---- create_skill 返回结束 ----\n\n"
+                                "请基于上述真实返回继续：若返回「已持久化」，才可向用户说明技能已保存成功"
+                                "并简述其用途；若返回「技能已存在」或报错，请如实转述，并视情况建议用户换名或调整后重试。"
+                                "严禁在收到「已持久化」字样之前谎称保存成功。"
+                            ),
+                        })
+                    if _had_cs:
+                        continue
 
             # 协调类智能体强制委派闸门：
             # 若 Orchestrator 等协调类 Agent 在第一轮没有实际发起任何委派（既没有 function call，
