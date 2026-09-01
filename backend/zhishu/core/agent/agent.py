@@ -886,6 +886,7 @@ class Agent:
                 build_system_prompt,
                 self.cfg, agent_name=agent_name, owner=owner,
                 kb=self.kb, query=user_message, is_admin=is_admin, user_role=user_role,
+                session_id=session,
             )
         except Exception as e:
             # 上下文组装异常（知识库/分词等）若冲出生成器会掐断 SSE → 浏览器报 network error。

@@ -204,6 +204,7 @@ def build_system_prompt(
     query: Optional[str] = None,
     is_admin: bool = False,
     user_role: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> tuple[str, bool]:
     """组装系统提示。
 
@@ -238,7 +239,8 @@ def build_system_prompt(
 
     volatile: list[str] = []
     # 已启用技能（记忆已冻结进 stable，此处不再注入记忆，避免重复与破坏稳定前缀）
-    extra = build_agent_context_prompt(cfg, owner=owner, is_admin=is_admin, user_role=user_role, include_memory=False)
+    extra = build_agent_context_prompt(cfg, owner=owner, is_admin=is_admin, user_role=user_role,
+                                       include_memory=False, session_id=session_id)
     if extra:
         volatile.append(extra)
     # 知识库检索增强

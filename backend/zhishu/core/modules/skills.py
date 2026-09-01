@@ -11,6 +11,7 @@ import json
 import os
 import re
 import time
+from collections import OrderedDict
 from typing import Optional
 
 from ..config import ZhishuConfig
@@ -114,29 +115,78 @@ def _read_memory_files(cfg: ZhishuConfig, owner: str | None = None) -> list[str]
     return out
 
 
+# ===========================================================================
+# 技能使用统计（对标 Hermes skill_usage）
+# 计数点：技能被「注入系统提示生效」时自增 use_count / 更新 last_used。
+# 为什么不在 read_skill 里计：enabled 技能的正文默认直接注入系统提示，模型会
+# 按注入指令行动而不再调用 read_skill，导致统计恒为 0（内网实测症状）。
+# 按 session_id 去重：同一会话的多轮对话只计一次，避免数字虚高。
+# 失败静默——统计绝不影响技能注入主流程。
+# ===========================================================================
+_USAGE_SESSIONS: "OrderedDict[str, set]" = OrderedDict()
+_USAGE_SESSIONS_MAX = 1000
+
+
+def touch_skill_usage(name: str, session_id: Optional[str] = None) -> bool:
+    """技能使用统计：注入系统提示生效时 +1。按会话去重；失败静默。
+
+    注：name 来自磁盘目录列举（可信），故不做会滤掉中文的 sanitize，
+    仅挡路径穿越字符，以兼容「写周报」等中文技能名。
+    """
+    try:
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            return False
+        if session_id:
+            st = _USAGE_SESSIONS.get(session_id)
+            if st is not None and name in st:
+                return False
+            _USAGE_SESSIONS[session_id] = (st or set()) | {name}
+            # LRU 剪枝：防止长跑进程内存膨胀
+            while len(_USAGE_SESSIONS) > _USAGE_SESSIONS_MAX:
+                _USAGE_SESSIONS.popitem(last=False)
+        fp = os.path.join(_skills_root(), name, "module.json")
+        if not os.path.isfile(fp):
+            return False
+        meta = json.load(open(fp, encoding="utf-8"))
+        meta["use_count"] = int(meta.get("use_count") or 0) + 1
+        meta["last_used"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None,
                                is_admin: bool = False,
                                user_role: Optional[str] = None,
-                               *, include_memory: bool = True) -> str:
+                               *, include_memory: bool = True,
+                               session_id: Optional[str] = None) -> str:
     """组装注入系统提示的 volatile 部分：已启用技能 + 长期记忆文件。
 
     开启 cfg.agent.skills_progressive 时改为「技能清单」模式（渐进披露）。
     无技能/记忆时返回空字符串（与重构前行为一致，不污染系统提示）。
     长期记忆按 owner 隔离（见 user_memory_dir）；技能按 owner+is_admin+角色 过滤，
     防止跨用户记忆/技能泄露。
+    session_id 非空时对注入的技能做使用统计（按会话去重）。
     """
     parts: list[str] = []
 
     progressive = getattr(getattr(cfg, "agent", None), "skills_progressive", False)
     skills = _enabled_skills(cfg, username=owner, is_admin=is_admin, user_role=user_role)
     if skills:
+        # 仅统计「真正被注入」的技能：清单模式=全部；全文模式=有正文的那些
+        injected = (skills if progressive
+                    else [s for s in skills if (s.get("content") or "").strip()])
+        for s in injected:
+            touch_skill_usage(s.get("name") or "", session_id=session_id)
         if progressive:
             lines = ["可用技能（调用 read_skill 工具并按需读取其完整指令）："]
-            for s in skills:
+            for s in injected:
                 lines.append(f"- {s['name']}: {s.get('description', '')}")
             parts.append("【已启用技能 Skills】\n" + "\n".join(lines))
         else:
-            blocks = [f"## {s['name']}\n{s.get('content', '')}" for s in skills if (s.get('content') or '').strip()]
+            blocks = [f"## {s['name']}\n{s.get('content', '')}" for s in injected]
             if blocks:
                 parts.append("【已启用技能 Skills】\n" + "\n\n".join(blocks))
 
