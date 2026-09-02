@@ -1,5 +1,5 @@
 # 智枢智能体 —— 单容器镜像（国产基础镜像 + 国内源，适配受限/离线网络）
-# 构建：在 zhishu-agent/ 目录下执行  docker build -t zhishu-agent:1.0.60 -f deploy/Dockerfile .
+# 构建：在 zhishu-agent/ 目录下执行  docker build -t zhishu-agent:1.0.61 -f deploy/Dockerfile .
 # 说明：去掉了原架构的 Node BFF，前端构建产物直接由 Python 托管。
 # 基础镜像走华为云 SWR ddn-k8s（直连可达，不经 docker.io/代理）；配置用 example（不含密钥，运行时应挂载真实 zhishu.yaml）。
 

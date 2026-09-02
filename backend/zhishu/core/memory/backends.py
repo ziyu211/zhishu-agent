@@ -105,11 +105,30 @@ class BuiltinMemoryBackend(MemoryBackend):
 
     def stats(self, owner: Optional[str] = None) -> dict:
         try:
-            docs = self.kb.list_documents(owner=owner or None, limit=1000)
-            return {"backend": "builtin", "count": len(docs), "owner": owner or "*"}
+            owner = owner or None
+            # 与 rag.py:stats 对齐：向量库按 owner 计向量条数 / 文档数 / 嵌入维度
+            vectors = self.kb.store.count(owner)
+            documents = self.kb.store.doc_count(owner)
+            dim = getattr(getattr(self.kb, "emb", None), "dim", None)
+            return {
+                "backend": "builtin",
+                "vectors": vectors,
+                "documents": documents,
+                "embedding_dim": dim,
+                "count": vectors,  # 兼容前端 clear 守卫依赖
+                "owner": owner or "*",
+            }
         except Exception as e:  # noqa: BLE001
             logger.warning("BuiltinMemoryBackend.stats 失败: %s", e)
-            return {"backend": "builtin", "count": 0, "owner": owner or "*", "error": str(e)}
+            return {
+                "backend": "builtin",
+                "vectors": 0,
+                "documents": 0,
+                "embedding_dim": None,
+                "count": 0,
+                "owner": owner or "*",
+                "error": str(e),
+            }
 
     def clear(self, owner: Optional[str] = None) -> int:
         try:
