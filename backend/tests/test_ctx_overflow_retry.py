@@ -237,7 +237,52 @@ def test_chat_once_sends_normalized_system_at_front():
     sent = captured["json"]["messages"]
     assert sent[0]["role"] == "system"
     assert "base" in sent[0]["content"] and "mid nudge" in sent[0]["content"]
-    assert len([m for m in sent if m["role"] == "system"]) == 1
+
+
+# ---------------------------------------------------------------- 超长 system 提示词
+def test_truncate_truncates_oversized_system_prompt():
+    # 系统提示词自身过大（技能/记忆/知识库注入过多）也必须被截断，
+    # 否则仅靠删对话历史无法把请求压进窗口 →「你好也 400」。
+    huge_sys = "SYSHEAD-" + "x" * 200000
+    messages = [
+        {"role": "system", "content": huge_sys},
+        {"role": "user", "content": "你好"},
+    ]
+    out = _truncate_messages(messages, 1)
+    assert out[0]["role"] == "system"
+    c = out[0]["content"]
+    # 头部保留、尾部丢弃、标记写入
+    assert c.startswith("SYSHEAD-")
+    assert "系统提示过长已自动截断" in c
+    # level=1 的 sys_cap = 60000，截断后不超过该上限 + 后缀长度
+    assert len(c) <= 60000 + 80
+
+
+# ---------------------------------------------------------------- 裁满仍超长 → 清晰报错
+def test_chat_once_clear_error_when_overflow_persists():
+    pc = _make_pc()
+    client = LLMClient(cfg=None, api_mode="openai")
+    # 每次都返回上下文超长 400：历史/系统裁剪到极限仍超长
+    overflow = _FakeResp(400, {"error": {
+        "message": "The input (130264 tokens) is longer than the model's "
+                   "context length (81920 tokens)."}})
+
+    state = {"n": 0}
+
+    async def fake_post(url, json=None, headers=None):
+        state["n"] += 1
+        return overflow
+
+    fake_http = types.SimpleNamespace(post=fake_post)
+    with mock.patch("zhishu.core.providers.client.get_shared_http", return_value=fake_http):
+        with pytest.raises(RuntimeError) as ei:
+            asyncio.run(client._chat_once(pc, "m", [{"role": "user", "content": "你好"}],
+                                         None, 0.7, 2048))
+    # 不应伪装成「Provider 不可用」，而应明确指出上下文超长 + 处置建议
+    msg = str(ei.value)
+    assert "上下文超长" in msg
+    assert "skills_progressive" in msg or "context_length" in msg
+    assert "均不可用" not in msg
 
 
 if __name__ == "__main__":

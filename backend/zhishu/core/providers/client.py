@@ -195,6 +195,20 @@ def _truncate_messages(messages: list, level: int) -> list:
 
     # 3) 对剩余超长单条消息截断（即便删轮次仍可能单条过长）
     cap = max(1500, 24000 // level)
+    # 系统提示词自身也可能过大（技能/长期记忆/知识库注入过多）。若不裁系统提示，
+    # 仅靠删对话历史无法把请求压进窗口 → 陷入「你好也 400」的死局。故同样截断：
+    # 保留头部（身份/早期技能），尾部丢弃。sys_cap 比单条 cap 宽松，尽量多保留技能。
+    sys_cap = max(1500, 60000 // level)
+    sys_out: list = []
+    for m in sys_msgs:
+        c = m.get("content")
+        if isinstance(c, str) and len(c) > sys_cap:
+            nm = dict(m)
+            nm["content"] = c[:sys_cap] + \
+                "\n...[系统提示过长已自动截断，建议减少已启用技能/长期记忆/知识库注入]"
+            sys_out.append(nm)
+        else:
+            sys_out.append(m)
     flat: list = []
     for unit in units:
         for m in unit:
@@ -205,7 +219,7 @@ def _truncate_messages(messages: list, level: int) -> list:
                 flat.append(nm)
             else:
                 flat.append(m)
-    return sys_msgs + flat
+    return sys_out + flat
 
 
 #: system 归一化已下沉到 compat 层（多框架共用）。此别名保留旧调用点 / 回归用例。
@@ -486,11 +500,21 @@ class LLMClient:
                 detail = _extract_upstream_detail(e.response) if e.response is not None else ""
                 last_detail = detail or last_detail
                 # 1) 上下文超长：裁剪历史 + 缩短 max_tokens 后重试
-                if sc == 400 and ctx_level < _CTX_TRUNCATE_RETRIES and _is_context_overflow(detail):
-                    ctx_level += 1
-                    base_msgs = _truncate_messages(base_msgs, ctx_level)
-                    mt = max(512, int(mt * 0.6))
-                    continue
+                if sc == 400 and _is_context_overflow(detail):
+                    if ctx_level < _CTX_TRUNCATE_RETRIES:
+                        ctx_level += 1
+                        base_msgs = _truncate_messages(base_msgs, ctx_level)
+                        mt = max(512, int(mt * 0.6))
+                        continue
+                    # 已尽力裁剪（历史 + 超长单条 + 超长系统提示）仍超长 → 明确报错，
+                    # 避免被聚合层伪装成「所有 Provider 均不可用」误导用户。
+                    raise RuntimeError(
+                        f"上下文超长：已自动裁剪对话历史/超长消息/系统提示，请求仍超出模型"
+                        f"上下文窗口（{detail or '上游返回 HTTP 400'}）。这通常意味着系统提示词"
+                        f"（已启用技能 / 长期记忆 / 知识库注入）本身过大。请：①在「模型管理」"
+                        f"减少该 Provider 的已启用技能或调大 context_length；②或开启 "
+                        f"agent.skills_progressive（仅列技能清单、按需读取）。"
+                    ) from e
                 # 2) 推理框架兼容问题：放宽画像后重试（每种修复动作只尝试一次，不会死循环）
                 repair = compat.diagnose(sc, detail)
                 if repair and repair not in applied and len(applied) < _COMPAT_MAX_REPAIRS:
