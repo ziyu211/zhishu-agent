@@ -42,21 +42,53 @@ def _make_pc():
 
 # ---------------------------------------------------------------- 超长检测
 def test_is_context_overflow():
+    # ---- 通用 / 已知措辞 ----
     assert _is_context_overflow(
         "This model's maximum context length is 131072 tokens. "
         "However, you requested 300000 tokens (...).")
     assert _is_context_overflow("ERR: max_model_len exceeded")
     assert _is_context_overflow("错误：超出上下文长度")
-    # vLLM 变体措辞（内网 192.168.0.9:30010 真实报错，含早期版本拼写错误 "ontert"）
+    assert _is_context_overflow("maximum length is 81920 tokens")
+
+    # ---- vLLM 变体措辞（内网 192.168.0.9:30010 真实报错，含早期版本拼写错误 "ontert"）----
     assert _is_context_overflow(
         "Provider[192.168.0.9:30010] 返回HTTP400:The input(130373tokens) "
         "is longer than the model's ontert length (81920tokens)")
     assert _is_context_overflow("The input is longer than the model's max context length (8192)")
-    assert _is_context_overflow("maximum length is 81920 tokens")
+
+    # ---- SGLang：exceeds max context length / input prompt is too long ----
+    assert _is_context_overflow(
+        "The length of input prompt (12345) exceeds the max context length (8192).")
+    assert _is_context_overflow("The input prompt is too long: max context length is 8192.")
+
+    # ---- LMDeploy：input token length is too long / exceeds model's max context ----
+    assert _is_context_overflow("The input token length (12345) is too long.")
+    assert _is_context_overflow(
+        "Input length (12345) exceeds model's max context length (8192).")
+
+    # ---- MindIE（华为）：input sequence length exceeds the maximum length / 中文 ----
+    assert _is_context_overflow(
+        "The input sequence length (12345) exceeds the maximum length (8192).")
+    assert _is_context_overflow("输入序列长度(12345)超过最大长度(8192)")
+
+    # ---- Ollama：input is too long / exceeds context window / maximum context length ----
+    assert _is_context_overflow("Input is too long for the model.")
+    assert _is_context_overflow("exceeds context window of 8192 tokens")
+    assert _is_context_overflow("maximum context length is 8192 tokens")
+
+    # ---- 结构化兜底：名词 + 溢出动词共现（不依赖具体英文顺序）----
+    assert _is_context_overflow("error: prompt length 50000 exceeds the limit")
+    assert _is_context_overflow("请求长度 50000 超过模型最大上下文")
+
     # 不应误判其它 400
     assert not _is_context_overflow("")
     assert not _is_context_overflow("model 'foo' not found")
     assert not _is_context_overflow("Invalid 'tools' format")
+    # 速率限制 / 鉴权 / 参数非法 —— 不应被长度正则误伤
+    assert not _is_context_overflow("Rate limit exceeded, retry after 60s")
+    assert not _is_context_overflow("max retries exceeded")
+    assert not _is_context_overflow("Invalid API key provided")
+    assert not _is_context_overflow("The server is overloaded, try later")
 
 
 # ---------------------------------------------------------------- 裁剪

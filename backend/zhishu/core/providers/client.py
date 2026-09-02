@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import threading
 import time
 from typing import Any, AsyncIterator, Optional
@@ -111,25 +112,54 @@ _CTX_OVERFLOW_HINTS = (
     "max_model_len", "prompt is too long", "token limit",
     "exceeds the context", "exceeds the maximum", "请求长度过长",
     "上下文长度", "超出上下文", "超出最大", "token 数量",
-    # vLLM / SGLang / LMDeploy / MindIE 等本地推理框架的变体措辞。
+    # vLLM / SGLang / LMDeploy / MindIE / Ollama 等本地推理框架的变体措辞。
     # 例：vLLM 早期版本报错 "The input(130373tokens) is longer than the
     # model's ontert length (81920tokens)"（"ontert" 为该版本拼写错误），
     # 既不含 "context length" 也不含 "max_model_len"，必须靠 "longer than"
     # 兜底才能识别为超长并触发自动裁剪；否则会被误判为「Provider 不可用」。
     "longer than", "maximum length", "max context length",
     "context window", "sequence length",
+    # 通用兜底：单独出现的 "too long" 也能命中（LMDeploy / Ollama 的
+    # "input is too long" / "The input token length is too long" 等）。
+    "too long",
+)
+
+# 结构化兜底正则：长度类名词 与 溢出类动词 在 40 字符内共现即判为超长。
+# 不依赖具体英文单词顺序，跨 vLLM / SGLang / LMDeploy / MindIE / Ollama
+# 各种措辞通吃，也覆盖未来新增推理框架，避免再出现「措辞没穷举到就误报
+# Provider 不可用」的同类 bug。动词 / 名词各取其一即可，误报面很小
+# （chat provider 的 400 体里几乎不会同时出现「长度名词 + 溢出动词」）。
+# 注：名词不放 "max"，否则 "max retries exceeded" 这类会被误伤；
+# "max context length" 等已由子串 hint 覆盖，无需靠正则名词 "max"。
+_CTX_OVERFLOW_RE = re.compile(
+    r"(?:context|window|sequence|prompt|input|token|length|model|"
+    r"模型|上下文|序列|提示|输入)"
+    r"[^.]{0,40}?"
+    r"(?:exceed(?:s|ed)?|longer than|too long|超过|超出|超长)"
+    r"|"
+    r"(?:exceed(?:s|ed)?|longer than|too long|超过|超出|超长)"
+    r"[^.]{0,40}?"
+    r"(?:context|window|sequence|prompt|input|token|length|model|"
+    r"模型|上下文|序列|提示|输入)"
 )
 
 
 def _is_context_overflow(detail: str) -> bool:
     """根据上游 400 响应体判断是否「上下文 / 输入超长」。
 
-    只匹配与长度相关的关键字，避免把「模型不存在 / 参数非法」等其它 400 误判为可裁剪。
+    两层判定：
+      1) 精确子串命中（高精准，覆盖已知常见措辞）；
+      2) 结构化正则兜底（高召回，长度名词 + 溢出动词共现即命中），
+         跨 vLLM / SGLang / LMDeploy / MindIE / Ollama 通用，未来新框架也无需改代码。
+    只匹配与长度相关的信号，避免把「模型不存在 / 参数非法 / 速率限制」等
+    其它 400 误判为可裁剪。
     """
     if not detail:
         return False
     d = detail.lower()
-    return any(h in d for h in _CTX_OVERFLOW_HINTS)
+    if any(h in d for h in _CTX_OVERFLOW_HINTS):
+        return True
+    return bool(_CTX_OVERFLOW_RE.search(d))
 
 
 def _truncate_messages(messages: list, level: int) -> list:
