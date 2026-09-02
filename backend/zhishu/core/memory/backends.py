@@ -110,14 +110,21 @@ class BuiltinMemoryBackend(MemoryBackend):
             vectors = self.kb.store.count(owner)
             documents = self.kb.store.doc_count(owner)
             dim = getattr(getattr(self.kb, "emb", None), "dim", None)
-            return {
+            emb = getattr(self.kb, "emb", None)
+            out = {
                 "backend": "builtin",
                 "vectors": vectors,
                 "documents": documents,
                 "embedding_dim": dim,
                 "count": vectors,  # 兼容前端 clear 守卫依赖
                 "owner": owner or "*",
+                # 与 rag.py:stats 对齐：透传检索能力，让前端如实展示「全文/混合」模式
+                "fts_available": getattr(self.kb.store, "_fts_available", False),
+                "semantic_available": getattr(emb, "semantic_available", False) if emb else False,
+                "unconfigured": getattr(emb, "unconfigured", False) if emb else False,
+                "retrieval_mode": "hybrid" if (getattr(emb, "semantic_available", False) if emb else False) else "fts",
             }
+            return out
         except Exception as e:  # noqa: BLE001
             logger.warning("BuiltinMemoryBackend.stats 失败: %s", e)
             return {

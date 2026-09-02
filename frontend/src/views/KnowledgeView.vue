@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import {
   NButton, NInput, NModal, NTag, NEmpty, NSpin, NUpload, useMessage, NTabs, NTabPane,
-  NSwitch, NTooltip, NScrollbar,
+  NSwitch, NTooltip, NScrollbar, NAlert,
 } from 'naive-ui'
 import { api } from '@/api/client'
 import { useAppStore } from '@/stores/app'
@@ -175,8 +175,25 @@ onMounted(() => { loadStats(); loadDocs() })
         <span class="pill">{{ stats.documents }} 文档</span>
         <span class="pill">{{ stats.vectors }} 向量</span>
         <span class="pill">{{ stats.backend }}</span>
+        <span class="pill" :class="stats.retrieval_mode === 'fts' ? 'pill-warn' : 'pill-ok'">
+          {{ stats.retrieval_mode === 'fts' ? '全文检索模式' : '混合检索' }}
+        </span>
       </div>
     </header>
+
+    <NAlert
+      v-if="stats.unconfigured"
+      type="warning"
+      :show-icon="true"
+      title="未配置 Embedding 模型，检索已自动回退为全文检索模式"
+      style="margin: 12px 20px 0"
+    >
+      当前未配置语义 Embedding（<code>embedding.embed_model</code> 为空），系统没有静默降级为无意义的哈希伪向量，而是自动以
+      <b>全文检索（FTS5 中文子串匹配）</b>作为检索主干，关键词命中依然可用、质量可控。
+      如需更强的语义检索（同义/上下位词召回），请在「设置 / 模型管理」中配置支持
+      <code>/embeddings</code> 的模型（如通义、DeepSeek、Ollama 本地模型等）并指定
+      <code>embedding.embed_model</code>，系统将自动切换为「全文 + 向量」混合检索。
+    </NAlert>
 
     <NTabs v-model:value="tab" type="line" class="kg-tabs">
       <NTabPane name="kb" tab="知识库">
@@ -318,6 +335,8 @@ onMounted(() => { loadStats(); loadDocs() })
 .header-sub { font-size: 12px; color: $text-muted; margin-top: 2px; }
 .stat-pills { display: flex; gap: 8px; }
 .pill { font-size: 12px; padding: 3px 10px; border-radius: 10px; background: $bg-secondary; color: $text-secondary; border: 1px solid $border-light; }
+.pill-ok { background: rgba(var(--success-rgb, 40, 167, 69), 0.08); color: $success; border-color: rgba(var(--success-rgb, 40, 167, 69), 0.3); }
+.pill-warn { background: rgba(var(--warning-rgb, 240, 173, 78), 0.1); color: $warning; border-color: rgba(var(--warning-rgb, 240, 173, 78), 0.35); }
 
 .kb-body { flex: 1; padding: 20px; overflow: hidden; }
 .kg-tabs { padding: 0 20px; }

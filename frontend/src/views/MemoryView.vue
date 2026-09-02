@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
-import { NButton, NInput, NTag, useMessage } from 'naive-ui'
+import { NButton, NInput, NTag, NAlert, useMessage } from 'naive-ui'
 import { api } from '@/api/client'
 import { useAppStore } from '@/stores/app'
 
@@ -139,6 +139,17 @@ onMounted(() => { load(); loadVector() })
     </div>
 
     <!-- 向量长期记忆（体量 / 清空） -->
+    <NAlert
+      v-if="vecStats && vecStats.unconfigured"
+      type="warning"
+      :show-icon="true"
+      title="未配置 Embedding 模型，记忆检索已自动回退为全文检索"
+      style="margin-bottom: 12px"
+    >
+      未配置语义 Embedding，系统未静默降级为无意义的哈希伪向量，而是自动以
+      <b>全文检索（FTS5 中文子串匹配）</b>作为检索主干。配置
+      <code>embedding.embed_model</code> 后将自动升级为「全文 + 向量」混合检索。
+    </NAlert>
     <div class="vec-card">
       <div class="vec-title">向量长期记忆</div>
       <div class="vec-body">

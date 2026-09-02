@@ -197,6 +197,26 @@ class EmbeddingEngine:
         return bool(self._last_kind and self._intended
                     and self._last_kind != self._intended)
 
+    @property
+    def unconfigured(self) -> bool:
+        """本应走 provider/auto 语义后端，但未配置 embed_model —— 静默降级陷阱。
+
+        这是「未配置 Embedding 模型」的根因：backend=provider/auto 且 embed_model
+        为空时，系统直接把 _intended 设为 hash，于是 degraded 永远为 False，
+        全程静默用 hash 伪向量冒充语义检索，导致 RAG/记忆检索毫无语义能力。
+        """
+        self._lazy_init()
+        return self.cfg.backend in ("provider", "auto") and not self.cfg.embed_model
+
+    @property
+    def semantic_available(self) -> bool:
+        """当前是否真正使用语义 embedding（local/ollama/已配置模型的 provider）。
+
+        仅当此值为 True 时，向量检索才具备语义能力；否则应把检索权重交给全文检索。
+        """
+        self._lazy_init()
+        return self._intended not in (None, "hash")
+
     def _signature(self, kind: Optional[str], dim: int) -> str:
         """向量空间签名：不同签名的向量**不可互相比较**，必须隔离。"""
         kind = kind or self._backend or "hash"

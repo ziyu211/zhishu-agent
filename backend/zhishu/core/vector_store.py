@@ -14,6 +14,7 @@ delete_document / doc_count。
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -22,6 +23,8 @@ from typing import List, Optional
 import numpy as np
 
 from .config import VectorStoreConfig
+
+logger = logging.getLogger("zhishu.vector_store")
 
 
 # 预览正文最多保存的字符数（避免大文件撑爆数据库）
@@ -38,6 +41,9 @@ class VectorStore:
         self._index = None          # list[(id, doc_id, np.ndarray vec)]
         self._owner_map = None      # doc_id -> owner(或 None)
         self._index_dirty = True
+        # 全文检索可用性（FTS5）。未配置 embedding 模型时向量会降级为 hash
+        # 伪向量（无语义能力），全文检索是唯一的检索主干，故此标记很关键。
+        self._fts_available = False
         if self.backend == "sqlite":
             os.makedirs(os.path.dirname(cfg.path) or ".", exist_ok=True)
             self._conn = sqlite3.connect(cfg.path, check_same_thread=False)
@@ -81,6 +87,40 @@ class VectorStore:
             if "emb_sig" not in vcols:
                 self._conn.execute("ALTER TABLE vectors ADD COLUMN emb_sig TEXT")
                 self._conn.commit()
+            # 全文检索（FTS5）：embedding 未配置时会静默降级为 hash 伪向量（无语义
+            # 能力），全文检索是唯一的语义/关键词检索主干。用 trigram 分词以支持中文
+            # 子串匹配（中文无天然词边界，trigram 比默认分词更可靠）。
+            # 采用 external-content 模式：vectors_fts 不重复存文本，只索引 vectors(id,text)，
+            # 通过触发器随 vectors 表增删改自动同步。
+            try:
+                self._conn.execute(
+                    """CREATE VIRTUAL TABLE IF NOT EXISTS vectors_fts USING fts5(
+                           text, content='vectors', content_rowid='id',
+                           tokenize='trigram'
+                       )"""
+                )
+                self._conn.execute(
+                    "CREATE TRIGGER IF NOT EXISTS vectors_ai AFTER INSERT ON vectors "
+                    "BEGIN INSERT INTO vectors_fts(rowid, text) VALUES (new.id, new.text); END;")
+                self._conn.execute(
+                    "CREATE TRIGGER IF NOT EXISTS vectors_ad AFTER DELETE ON vectors "
+                    "BEGIN INSERT INTO vectors_fts(vectors_fts, rowid, text) "
+                    "VALUES('delete', old.id, old.text); END;")
+                self._conn.execute(
+                    "CREATE TRIGGER IF NOT EXISTS vectors_au AFTER UPDATE ON vectors "
+                    "BEGIN INSERT INTO vectors_fts(vectors_fts, rowid, text) "
+                    "VALUES('delete', old.id, old.text); "
+                    "INSERT INTO vectors_fts(rowid, text) VALUES (new.id, new.text); END;")
+                # 老库 / 已存在 FTS 表但内容为空：从 vectors 重建一次（幂等）
+                v_cnt = self._conn.execute("SELECT count(*) FROM vectors").fetchone()[0]
+                fts_cnt = self._conn.execute("SELECT count(*) FROM vectors_fts").fetchone()[0]
+                if v_cnt > 0 and fts_cnt == 0:
+                    self._conn.execute("INSERT INTO vectors_fts(vectors_fts) VALUES('rebuild')")
+                self._conn.commit()
+                self._fts_available = True
+            except Exception as e:  # noqa: BLE001 —— FTS5 不可用（极老 sqlite）时优雅降级
+                logger.warning("FTS5 不可用，全文检索已关闭：%s", e)
+                self._fts_available = False
         else:
             # 占位：milvus / pgvector / dm 接入点（保持接口一致）
             raise NotImplementedError(
@@ -223,6 +263,70 @@ class VectorStore:
             out.append({
                 "id": _id, "doc_id": doc_id, "text": text,
                 "meta": json.loads(meta or "{}"), "score": sim,
+            })
+        return out
+
+    def fts_search(self, query: str, top_k: int = 10,
+                   owner: Optional[str] = None) -> List[dict]:
+        """全文检索（FTS5 trigram + bm25），作为未配置 embedding 时的检索主干。
+
+        返回按相关度排序的命中列表，每条含 id/doc_id/text/meta/score。
+        score 为「越高越相关」：FTS 命中取 -bm25（bm25 本身为负分），LIKE 兜底为 0.0。
+
+        触发兜底：查询串 < 3 字符（trigram 对短串不友好）或 FTS 无命中时，
+        退化为对 vectors.text 的 LIKE 子串匹配，保证中文关键词仍可命中。
+        """
+        if not self._fts_available:
+            return []
+        q = (query or "").strip()
+        if not q:
+            return []
+        safe = q.replace('"', '""')
+        fts_query = f'"{safe}"'
+        params: list = [fts_query]
+        join = ""
+        where = ["vectors_fts MATCH ?"]
+        if owner is not None:
+            join = "LEFT JOIN documents d ON v.doc_id = d.doc_id"
+            where.append("(d.owner = ? OR d.owner IS NULL)")
+            params.append(owner)
+        sql = (
+            "SELECT v.id, v.doc_id, v.text, v.meta, bm25(vectors_fts) AS rank "
+            f"FROM vectors_fts f JOIN vectors v ON v.id = f.rowid {join} "
+            "WHERE " + " AND ".join(where) +
+            " ORDER BY rank LIMIT ?"
+        )
+        params.append(top_k * 3)
+        rows: list = []
+        try:
+            rows = self._conn.execute(sql, params).fetchall()
+        except Exception:  # noqa: BLE001
+            rows = []
+        if len(q) < 3 or not rows:
+            # 短查询 / 无命中：LIKE 兜底（中文子串）
+            lparams: list = [f"%{q}%"]
+            lwhere = ["v.text LIKE ?"]
+            if owner is not None:
+                lwhere.append("(d.owner = ? OR d.owner IS NULL)")
+                lparams.append(owner)
+            lsql = "SELECT v.id, v.doc_id, v.text, v.meta FROM vectors v "
+            if owner is not None:
+                lsql += "LEFT JOIN documents d ON v.doc_id = d.doc_id "
+            lsql += "WHERE " + " AND ".join(lwhere) + " LIMIT ?"
+            lparams.append(top_k * 3)
+            try:
+                rows = [(r[0], r[1], r[2], r[3], 0.0)
+                        for r in self._conn.execute(lsql, lparams).fetchall()]
+            except Exception:  # noqa: BLE001
+                rows = []
+        out = []
+        for r in rows:
+            _id, doc_id, text, meta, rank = r[0], r[1], r[2], r[3], r[4]
+            out.append({
+                "id": _id, "doc_id": doc_id, "text": text,
+                "meta": json.loads(meta or "{}"),
+                # bm25 为负分（越负越相关）→ 取反使「越高越好」；LIKE 兜底为 0.0
+                "score": float(-rank) if rank else 0.0,
             })
         return out
 

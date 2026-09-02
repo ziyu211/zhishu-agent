@@ -31,6 +31,20 @@ from .vector_store import VectorStore
 from .kgraph import KnowledgeGraph
 from .config import EmbeddingConfig, VectorStoreConfig
 
+import logging
+
+logger = logging.getLogger("zhishu.rag")
+
+
+def _normalize(scores: List[float]) -> List[float]:
+    """把分数列表归一化到 [0,1]（最高=1.0）；全相等或全 0 时返回全 1.0。"""
+    if not scores:
+        return []
+    lo, hi = min(scores), max(scores)
+    if hi - lo < 1e-9:
+        return [1.0 for _ in scores]
+    return [(s - lo) / (hi - lo) for s in scores]
+
 
 # ── 标准库（零依赖）Office 文档提取 ───────────────────────────────────────
 # 借鉴 hermes-agent read_extract 的设计：优先用 zipfile + xml 直接解析
@@ -1331,15 +1345,64 @@ class KnowledgeBase:
     # ------------------------- 检索 / 上下文 -------------------------
     def query(self, question: str, top_k: int = 5,
               owner: Optional[str] = None) -> List[dict]:
-        # 检索侧同样按签名隔离：用 hash 伪向量去比对真语义向量（或反之）只会
-        # 得到噪声排序，且维度不同会抛异常。签名不匹配的分块直接不参与打分。
+        """知识库检索（混合检索：全文 FTS + 向量加权融合）。
+
+        参照 Hermes 的检索策略：全文检索（FTS5 trigram + bm25）始终可用、是未配置
+        embedding 时的唯一主干；语义向量检索仅在真正可用时参与融合。
+          * 语义可用（未降级）：FTS 0.4 + 向量 0.6 加权融合；
+          * 降级为 hash（未配置模型 / Provider 不可用）：向量检索无意义，全文检索
+            独占 1.0 权重 —— 不再用伪向量冒充语义，检索质量反而更稳更可预期。
+        """
         vecs, emb_sig, degraded = self.emb.embed_tagged([question])
+        # 全文检索（始终可用，按 owner 隔离）
+        fts_hits = self.store.fts_search(question, top_k=top_k, owner=owner)
         if degraded:
-            import logging
-            logging.getLogger("zhishu.rag").warning(
-                "检索时 embedding 已降级为 hash，仅能命中同为 hash 签名的分块；"
-                "语义检索结果将显著变差，请检查 embedding 模型可用性。")
-        return self.store.search(vecs[0], top_k, owner=owner, emb_sig=emb_sig)
+            logger.warning(
+                "检索时 embedding 已降级为 hash（未配置语义模型或 Provider 不可用），"
+                "语义向量检索不可用，已回退为全文检索模式。请在配置中指定 embedding "
+                "模型（embedding.embed_model）以启用语义检索，否则 RAG 仅依赖关键词匹配。")
+            return self._finalize(fts_hits, top_k)
+        vec_hits = self.store.search(vecs[0], top_k, owner=owner, emb_sig=emb_sig)
+        fused = self._hybrid_fuse(fts_hits, vec_hits, w_fts=0.4, w_vec=0.6)
+        return self._finalize(fused, top_k)
+
+    @staticmethod
+    def _hybrid_fuse(fts_hits, vec_hits, w_fts: float, w_vec: float) -> List[dict]:
+        """全文 + 向量加权融合（各列表先归一化到 [0,1] 再加权，按 id 去重取最高）。
+
+        任一列表为空时直接返回另一列表（归一化前），不强行融合以免引入单边噪声。
+        """
+        if not fts_hits:
+            return list(vec_hits)
+        if not vec_hits:
+            return list(fts_hits)
+        fts_n = _normalize([h.get("score", 0.0) for h in fts_hits])
+        vec_n = _normalize([h.get("score", 0.0) for h in vec_hits])
+        merged: dict = {}
+        for h, n in zip(fts_hits, fts_n):
+            merged[h["id"]] = {"hit": h, "s": w_fts * n}
+        for h, n in zip(vec_hits, vec_n):
+            if h["id"] in merged:
+                merged[h["id"]]["s"] += w_vec * n
+            else:
+                merged[h["id"]] = {"hit": h, "s": w_vec * n}
+        # 把融合分写回 hit，使最终展示的 score 与排序口径一致（_finalize 据此归一化）。
+        # 否则展示分仍是各列表原始分，混合模式下会出现「第 2 条分低、第 3 条分高」的反直觉。
+        for m in merged.values():
+            m["hit"]["score"] = m["s"]
+        return [m["hit"] for m in sorted(merged.values(), key=lambda x: x["s"], reverse=True)]
+
+    @staticmethod
+    def _finalize(hits, top_k: int) -> List[dict]:
+        """截取 top_k 并把 score 归一化到 [0,1]（最高=1.0），保证前端「相关度%」展示合理。"""
+        hits = hits[:top_k]
+        if not hits:
+            return []
+        scores = [h.get("score", 0.0) for h in hits]
+        lo, hi = min(scores), max(scores)
+        for h, s in zip(hits, scores):
+            h["score"] = (s - lo) / (hi - lo) if hi - lo > 1e-9 else 1.0
+        return hits
 
     def build_context(self, question: str, top_k: int = 5,
                       owner: Optional[str] = None) -> str:
@@ -1349,7 +1412,7 @@ class KnowledgeBase:
         parts = []
         for i, h in enumerate(hits, 1):
             src = h["meta"].get("source", h["doc_id"])
-            parts.append(f"[知识 {i} | 来源:{src} | 相似度:{h['score']:.3f}]\n{h['text']}")
+            parts.append(f"[知识 {i} | 来源:{src} | 相关度:{h['score']:.3f}]\n{h['text']}")
         return "\n\n".join(parts)
 
     # ------------------------- 文档级管理 -------------------------
@@ -1377,6 +1440,11 @@ class KnowledgeBase:
             "vectors": self.store.count(owner),
             "documents": self.store.doc_count(owner),
         }
+        # 检索能力透传：让前端如实告知用户「当前是混合检索还是仅靠全文检索」。
+        out["fts_available"] = getattr(self.store, "_fts_available", False)
+        out["semantic_available"] = self.emb.semantic_available
+        out["unconfigured"] = self.emb.unconfigured
+        out["retrieval_mode"] = "hybrid" if self.emb.semantic_available else "fts"
         # 暴露向量空间签名与「陈旧分块」数量：换了 embedding 模型或曾经降级过的
         # 分块在当前配置下检索不到，前端可据此提示用户重新解析。
         try:

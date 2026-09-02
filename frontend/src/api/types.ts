@@ -135,6 +135,14 @@ export interface KnowledgeStats {
   embedding_dim: number
   vectors: number
   documents: number
+  /** 全文检索（FTS5）是否可用 */
+  fts_available?: boolean
+  /** 是否真正使用语义 embedding（local/ollama/已配置模型的 provider） */
+  semantic_available?: boolean
+  /** backend=provider/auto 但未配置 embed_model：本应走语义却静默降级 hash */
+  unconfigured?: boolean
+  /** 当前检索模式：hybrid（混合）/ fts（仅靠全文，未配置 embedding） */
+  retrieval_mode?: 'hybrid' | 'fts'
 }
 export interface KnowledgeSearchHit {
   text: string
