@@ -111,6 +111,13 @@ _CTX_OVERFLOW_HINTS = (
     "max_model_len", "prompt is too long", "token limit",
     "exceeds the context", "exceeds the maximum", "请求长度过长",
     "上下文长度", "超出上下文", "超出最大", "token 数量",
+    # vLLM / SGLang / LMDeploy / MindIE 等本地推理框架的变体措辞。
+    # 例：vLLM 早期版本报错 "The input(130373tokens) is longer than the
+    # model's ontert length (81920tokens)"（"ontert" 为该版本拼写错误），
+    # 既不含 "context length" 也不含 "max_model_len"，必须靠 "longer than"
+    # 兜底才能识别为超长并触发自动裁剪；否则会被误判为「Provider 不可用」。
+    "longer than", "maximum length", "max context length",
+    "context window", "sequence length",
 )
 
 

@@ -47,6 +47,12 @@ def test_is_context_overflow():
         "However, you requested 300000 tokens (...).")
     assert _is_context_overflow("ERR: max_model_len exceeded")
     assert _is_context_overflow("错误：超出上下文长度")
+    # vLLM 变体措辞（内网 192.168.0.9:30010 真实报错，含早期版本拼写错误 "ontert"）
+    assert _is_context_overflow(
+        "Provider[192.168.0.9:30010] 返回HTTP400:The input(130373tokens) "
+        "is longer than the model's ontert length (81920tokens)")
+    assert _is_context_overflow("The input is longer than the model's max context length (8192)")
+    assert _is_context_overflow("maximum length is 81920 tokens")
     # 不应误判其它 400
     assert not _is_context_overflow("")
     assert not _is_context_overflow("model 'foo' not found")
