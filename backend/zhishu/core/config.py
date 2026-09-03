@@ -212,7 +212,7 @@ class MediaConfig:
 @dataclass
 class AgentConfig:
     """Agent 运行时行为（对标 Hermes agent 运行期可配置项，均为 opt-in）。"""
-    compression_enabled: bool = False       # 上下文压缩（长对话自动摘要）
+    compression_enabled: bool = True        # 上下文压缩（长对话自动摘要）
     compression_threshold: int = 24         # 历史轮数超过此值才压缩
     compression_keep_recent: int = 8        # 压缩时保留最近 N 轮原样
     compression_tool_result_max: int = 4000 # 单条工具结果超过此字符数则摘要（0=关闭）
@@ -220,7 +220,7 @@ class AgentConfig:
     moa_provider: str = ""                  # 配置为 mode="moa" 的 provider 名
     moa_reference_models: list[str] = field(default_factory=list)  # 参考模型列表
     moa_aggregator: str = ""                # 聚合模型（空=默认模型）
-    skills_progressive: bool = False       # 技能渐进披露（仅列清单+read_skill，默认全量注入）
+    skills_progressive: bool = True        # 技能渐进披露（仅列清单+read_skill，默认全量注入）
     # 技能自进化闭环（对标 Hermes learning loop）：复杂任务完成后由 LLM 蒸馏沉淀为技能文件。
     # 安全护栏：仅当步数/工具调用数达标、且任务成功（到达 done）时触发；仅写入技能目录并审计。
     # 默认开启：对标 Hermes 的「主动学习」——复杂任务成功后由 LLM 把轨迹蒸馏为技能文件，
@@ -324,7 +324,7 @@ class AgentConfig:
 @dataclass
 class MemoryConfig:
     """长期记忆后端（对标 Hermes MemoryProvider）。"""
-    vector_enabled: bool = False            # 向量长期记忆（跨会话语义召回 + LLM 抽取）
+    vector_enabled: bool = True             # 向量长期记忆（跨会话语义召回 + LLM 抽取）
     vector_top_k: int = 5                   # 召回条数
     backend: str = "builtin"                # 可插拔记忆后端：builtin | mem0（默认 builtin，零回归）
     # —— 以下为对齐 Hermes 记忆编排的增强开关（全默认开启，零回归） ——
