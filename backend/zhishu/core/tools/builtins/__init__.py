@@ -9,4 +9,6 @@ from __future__ import annotations
 # 实际定义与按 owner 隔离的子目录逻辑统一收敛到 sandbox 子模块。
 from .sandbox import SANDBOX_ROOT, sandbox_cwd_for  # noqa: E402,F401
 
-from . import terminal, file, web, knowledge, delegate, skills, code_exec, sessions, todo, memory, agent_admin, compare, generate_excel  # noqa: E402,F401
+# 注意：新增工具模块必须在此显式登记，否则 @tool 装饰器不会执行、工具不会被注册
+# （模型看不到该工具，只能退回手写 code_exec，稳定性无法保证）。
+from . import terminal, file, web, knowledge, delegate, skills, code_exec, sessions, todo, memory, agent_admin, compare, generate_excel, docx_revision  # noqa: E402,F401

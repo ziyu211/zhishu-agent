@@ -16,6 +16,29 @@ def _sanitize(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]", "", (name or "").strip())[:64]
 
 
+# 技能正文读取上限（仅在极端超大时生效，且会**显式告知**而非静默截断）
+_MAX_SKILL_CHARS = 200_000
+
+
+def _skill_body(text) -> str:
+    """读取技能正文：**不做静默截断**。
+
+    历史坑：此处曾写死 `[:8000]`，而 SKILL.md 里最关键的踩坑经验（如「python-docx
+    无 add_comment，必须用底层 oxml 构造 comments.xml」「zip 必须 fresh-write
+    打包，writestr 追加会产生重复条目」）往往写在文档**后半部分**，被截断后模型
+    就会漏掉批注逻辑 —— 这正是 wdjd5 校对产物 78% 没有批注的诱因之一。
+
+    技能是模型**主动选择**加载的，读全才有意义；仅在异常超大时截断并明确提示，
+    绝不静默丢内容。
+    """
+    text = text or ""
+    if len(text) <= _MAX_SKILL_CHARS:
+        return text
+    return (text[:_MAX_SKILL_CHARS]
+            + f"\n\n[read_skill] 技能正文过长，已截断至前 {_MAX_SKILL_CHARS} 字符。"
+              f"如需后续章节，请用 file_read 分页读取 data/skills/<技能名>/SKILL.md。")
+
+
 def _touch_skill(base: str, name: str) -> None:
     """技能使用统计（对标 Hermes `skill_usage.py`）：read_skill 命中时自增
     use_count 并更新 last_used，支撑技能冷热排序与运营观察。
@@ -65,14 +88,15 @@ async def read_skill(args: dict, ctx) -> str:
     if os.path.isfile(md):
         try:
             _touch_skill(base, name)  # 使用统计（失败静默）
-            return open(md, encoding="utf-8").read()[:8000]
+            return _skill_body(open(md, encoding="utf-8").read())
         except Exception as e:
             return f"[read_skill] 读取失败：{e}"
     meta = os.path.join(d, "module.json")
     if os.path.isfile(meta):
         try:
             _touch_skill(base, name)  # 使用统计（失败静默）
-            return (json.load(open(meta, encoding="utf-8")).get("content") or "（无内容）")[:8000]
+            return _skill_body(json.load(open(meta, encoding="utf-8")).get("content")
+                               or "（无内容）")
         except Exception as e:
             return f"[read_skill] 读取失败：{e}"
     return f"[read_skill] 技能 {name} 无内容"

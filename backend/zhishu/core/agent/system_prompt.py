@@ -17,6 +17,32 @@ from ..modules import build_agent_context_prompt, build_user_memory_prompt
 # 工具使用指引（主管模式注入，帮助模型聚焦稳定可用的解析路径，避免调用
 # 已废弃或易失败的旧插件导致空转/死循环）。
 _TOOL_GUIDANCE = """\
+【技能使用（强制）】
+- 系统提示【已启用技能 Skills】中列出的技能，只要与当前任务相关（哪怕只是部分相关），
+  就**必须**先用 read_skill(name) 加载其完整指令，再严格按步骤执行；
+  不得只看技能名+简介就凭通用能力自由发挥。
+- 技能里沉淀的是经过验证的工作流、专用参数与踩坑经验。跳过加载极易漏掉关键步骤
+  （实测代价：生成 Word 修订版时漏掉原生批注部件 → 用户拿到的文档没有批注；
+  重新打包 zip 时漏掉必需条目 → Word 提示「内容有问题」打不开）。
+- 即使你认为用常规方法也能完成，也要先加载技能：它定义了**在这里**这件事该怎么做。
+
+【生成「带批注的 Word 修订版」—— 必须调 docx_revision 工具，严禁手写 oxml】
+- 适用任务：校对文档 / 生成修订版 / 标出错别字 / 要「带批注的 Word」/ 审改稿等。
+- **必须调用 docx_revision 工具**（传 path + revisions 列表），由服务端生成：错字=红色+删除线、
+  正字=红色紧随、Word 原生批注（右侧批注栏可见），并返回 /media 下载链接。
+- **严禁**用 code_exec 自己写 oxml 构造 comments.xml、改 [Content_Types].xml / document.xml.rels、
+  再 fresh-write 重新打包 zip。实测这条路 78% 会失败，三种典型死法：
+    · 只写 comments.xml 部件却漏掉正文锚点 → Word 里批注无处挂靠、**用户看不到任何批注**；
+    · 压根没写批注逻辑 → 只是普通修订文档，没有批注栏；
+    · 打包中途异常 → 留下 22 字节空 zip，Word 提示「内容有问题，无法打开」。
+- 分工：**你只做认知部分**——读懂文档、找出错误、组织成 revisions 清单，格式交由工具保证。
+  每项 {find: 原文错误片段, replace: 修正后文本, comment?: 批注说明}；replace 空串=删除多余字，
+  漏字场景 find=错误写法 / replace=完整写法，comment 留空自动生成。
+- 工具会回报「修正 N 处 / 批注 M 条」及**未命中**片段（find 在原文找不到），
+  你必须据实核对调整，不得把未命中当成成功。
+- 技能（如 wdjd 系列）若描述了手写 oxml 的旧流程，仍以本条为准：技能负责「怎么找出错误」，
+  批注文档的**生成**一律交给 docx_revision。
+
 【文档与图片解析指引】
 - 读取用户上传的文档（txt/md/csv/tsv/json/代码/日志等文本，以及 docx/xlsx/pptx/odt·ods·odp/rtf/epub/pdf 等）：\
 一律使用 read_file 工具，传入附件的 stored_path（或 /media/ URL），它基于标准库零依赖解析，\

@@ -157,6 +157,26 @@ def touch_skill_usage(name: str, session_id: Optional[str] = None) -> bool:
         return False
 
 
+# 技能强制加载规则（对标 Hermes prompt_builder 的 "## Skills (mandatory)"）。
+#
+# 为什么必须写死成强制措辞：此前这里只有一句软性的「按需读取完整指令」，模型
+# （尤其能力较强的模型）看到「技能名 + 一句话简介」后常自认为已经会做，于是直接
+# 凭通用能力开干，跳过 read_skill，结果漏掉技能里沉淀的关键步骤与踩坑经验。
+# 实测代价：wdjd5 校对技能 240 份产物中 78% 没有 Word 原生批注，其中 157 份
+# 压根没写批注逻辑。故改为与 Hermes 一致的强制措辞。
+_SKILLS_MANDATORY_RULE = (
+    "【技能使用规则（强制）】\n"
+    "回复前先扫描下方技能清单。只要某个技能与当前任务相关（哪怕只是部分相关），"
+    "就**必须**先用 read_skill(name) 加载它的完整指令，并严格按其步骤执行。\n"
+    "宁可多加载，也不要漏加载——技能里沉淀的是经过验证的工作流、专用参数与踩坑经验；"
+    "凭通用能力自由发挥极易漏掉关键步骤（例如生成 Word 修订版时漏掉原生批注部件、"
+    "重新打包 zip 时漏掉必需条目导致文件损坏打不开）。\n"
+    "即使你认为用常规方法也能完成该任务，也必须先加载技能——"
+    "因为技能定义了**在这里**这件事应该怎么做。\n"
+    "只有当清单中确实没有任何技能与本次任务相关时，才可不加载直接作答。"
+)
+
+
 def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None,
                                is_admin: bool = False,
                                user_role: Optional[str] = None,
@@ -181,7 +201,7 @@ def build_agent_context_prompt(cfg: ZhishuConfig, owner: str | None = None,
         for s in injected:
             touch_skill_usage(s.get("name") or "", session_id=session_id)
         if progressive:
-            lines = ["可用技能（调用 read_skill 工具并按需读取其完整指令）："]
+            lines = [_SKILLS_MANDATORY_RULE, "", "可用技能："]
             for s in injected:
                 lines.append(f"- {s['name']}: {s.get('description', '')}")
             parts.append("【已启用技能 Skills】\n" + "\n".join(lines))

@@ -67,6 +67,36 @@ def _is_excluded(rel: str) -> bool:
     return os.path.basename(rel).startswith(_EXCLUDE_PREFIXES)
 
 
+# zip 系产物（OOXML 办公文档本质是 zip 包）
+_ZIP_EXTS = (".docx", ".docm", ".dotx", ".xlsx", ".xlsm", ".xltx",
+             ".pptx", ".pptm", ".potx", ".zip", ".odt", ".ods", ".odp", ".epub")
+
+
+def _broken_zip_reason(fp: str) -> Optional[str]:
+    """zip/OOXML 产物健康检查：返回损坏原因，None 表示健康可交付。
+
+    背景（实测坑）：模型用 ``ZipFile(out, 'w')`` 做 fresh-write 重新打包 docx 时，
+    一旦写入过程中抛异常，``with`` 块退出会留下一个**只有 End Of Central Directory
+    记录**的 22 字节空 zip。此前这类空壳被当作成功产物发布给用户，用户下载后 Word
+    提示「内容有问题，无法打开」——而模型却以为任务已完成。
+
+    这里统一拦下：损坏产物不出下载链接，并明确告知模型「需修复后重做」。
+    """
+    if os.path.splitext(fp)[1].lower() not in _ZIP_EXTS:
+        return None
+    try:
+        import zipfile
+        with zipfile.ZipFile(fp) as z:
+            if not z.namelist():
+                return "zip 内没有任何条目（打包中途异常留下的空壳）"
+            bad = z.testzip()
+            if bad is not None:
+                return f"zip 结构损坏（条目 {bad} CRC 校验失败）"
+    except Exception as e:  # noqa: BLE001
+        return f"不是有效的 zip 文件（{type(e).__name__}）"
+    return None
+
+
 def publish_diff(
     root: str,
     before: dict[str, tuple[float, int]],
@@ -89,6 +119,7 @@ def publish_diff(
         return ""
     after = snapshot(root)
     published: list[tuple[str, str]] = []
+    broken: list[str] = []  # 损坏产物文件名（不出链接，明确告知模型需修复重做）
     skipped = 0
     for rel, (mtime, size) in after.items():
         if rel in before and before[rel] == (mtime, size):
@@ -101,6 +132,11 @@ def publish_diff(
         if size > max_bytes:
             skipped += 1
             continue
+        # 产物健康护栏：损坏 zip/OOXML 不出下载链接（避免交付打不开的文件）
+        br = _broken_zip_reason(fp)
+        if br is not None:
+            broken.append(f"{os.path.basename(rel)}（{br}）")
+            continue
         try:
             url = media.save_file(fp, kind="file", owner=owner)
         except Exception:
@@ -108,7 +144,7 @@ def publish_diff(
         published.append((os.path.basename(rel), url))
         if len(published) >= max_files:
             break
-    if not published and skipped == 0:
+    if not published and skipped == 0 and not broken:
         return ""
     lines = ["", "", f"[{label}]（以下链接真实有效，用户在浏览器点击即可下载；你必须原样、完整展示给用户，"
             f"禁止改写为『无法生成链接』『联系管理员』或『只给路径』等说法）："]
@@ -117,6 +153,10 @@ def publish_diff(
     if skipped:
         limit_mb = max_bytes // 1024 // 1024
         lines.append(f"- （另有 {skipped} 个文件超过大小上限 {limit_mb}MB，未发布）")
+    if broken:
+        lines.append(f"- ⚠️ 另有 {len(broken)} 个产物文件损坏未发布，需修复后重新生成：")
+        for b in broken[:5]:
+            lines.append(f"  - {b}")
     return "\n".join(lines)
 
 
@@ -182,6 +222,10 @@ def publish_referenced_paths(
         except OSError:
             continue
         if not is_file or fsize == 0:
+            continue
+        # 产物健康护栏：损坏 zip/OOXML 不出下载链接（避免交付打不开的文件）
+        br = _broken_zip_reason(ap)
+        if br is not None:
             continue
         # (a) 已在媒体根：改写为 /media 链接（文件本就由媒体库托管，零拷贝零重复）
         if media_root and (ap == media_root or ap.startswith(media_root + os.sep)):
